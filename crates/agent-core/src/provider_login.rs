@@ -8,7 +8,15 @@ pub fn login(provider: &str, emit: &dyn Fn(Value)) -> Result<(), String> {
     if !matches!(provider, "openai-codex" | "anthropic") {
         return Err("Unsupported browser login provider".into());
     }
-    let config = Config::load_existing().map_err(|e| e.to_string())?;
+    let config = Config::load_existing()
+        .or_else(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                Config::load_or_create()
+            } else {
+                Err(error)
+            }
+        })
+        .map_err(|e| e.to_string())?;
     let outcome = auth::login(
         provider,
         &LoginContext {
