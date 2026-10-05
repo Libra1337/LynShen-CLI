@@ -56,6 +56,16 @@ fn open(cwd: &Path, mode: ApprovalMode) -> AgentCore {
     core
 }
 
+fn write_command(text: &str, file: &str) -> String {
+    if cfg!(windows) {
+        format!(
+            "RUN: [System.IO.File]::WriteAllText((Join-Path (Get-Location) '{file}'), '{text}')"
+        )
+    } else {
+        format!("RUN: printf {text} > {file}")
+    }
+}
+
 #[test]
 fn engines_in_one_process_work_in_their_own_directories() {
     let _guard = setup();
@@ -64,8 +74,8 @@ fn engines_in_one_process_work_in_their_own_directories() {
     let mut first = open(&first_dir, ApprovalMode::FullAccess);
     let mut second = open(&second_dir, ApprovalMode::FullAccess);
 
-    first.submit_user_message("RUN: printf first > out.txt".to_string());
-    second.submit_user_message("RUN: printf second > out.txt".to_string());
+    first.submit_user_message(write_command("first", "out.txt"));
+    second.submit_user_message(write_command("second", "out.txt"));
     pump(&mut first, is_ready);
     pump(&mut second, is_ready);
 
@@ -87,7 +97,7 @@ fn unattended_engine_defers_a_gated_call_and_runs_it_once_approved() {
     let mut core = open(&dir, ApprovalMode::Manual);
     core.set_attended(false);
 
-    core.submit_user_message("RUN: printf ran > marker.txt".to_string());
+    core.submit_user_message(write_command("ran", "marker.txt"));
     let events = pump(&mut core, is_ready);
     let action = events
         .iter()

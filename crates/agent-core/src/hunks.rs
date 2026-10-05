@@ -582,8 +582,14 @@ diff --git a/sample.txt b/sample.txt
         assert!(git_apply(&dir, &patch), "filtered patch must apply cleanly");
 
         let content = fs::read_to_string(dir.join("sample.txt")).unwrap();
-        assert!(content.contains("a3\n"), "rejected hunk must not apply");
-        assert!(content.contains("A17\n"), "approved hunk must apply");
+        assert!(
+            content.lines().any(|line| line == "a3"),
+            "rejected hunk must not apply"
+        );
+        assert!(
+            content.lines().any(|line| line == "A17"),
+            "approved hunk must apply"
+        );
         let _ = fs::remove_dir_all(dir);
     }
 
