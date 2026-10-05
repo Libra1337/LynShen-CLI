@@ -358,7 +358,7 @@ mod tests {
 
     fn hub(label: &str) -> (Arc<Hub>, PathBuf, PathBuf) {
         let dir = std::env::temp_dir().join(format!(
-            "jucode-terminal-{label}-{}-{}",
+            "lynshen-terminal-{label}-{}-{}",
             std::process::id(),
             now()
         ));

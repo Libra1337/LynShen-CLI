@@ -1,4 +1,4 @@
-//! `jucode daemon pair` / `jucode daemon relay …`: set up a daemon from a
+//! `lynshen daemon pair` / `lynshen daemon relay …`: set up a daemon from a
 //! terminal, for machines without Desktop (a server, a cloud container).
 //! Both talk to the running daemon as a local client (its token is in the
 //! state directory); `relay on|off` also works while it is stopped.
@@ -14,7 +14,7 @@ pub fn pair(listen: &str) -> io::Result<i32> {
     let mut socket = match open(listen) {
         Ok(socket) => socket,
         Err(error) => {
-            eprintln!("jucode daemon pair: {error}");
+            eprintln!("lynshen daemon pair: {error}");
             return Ok(1);
         }
     };
@@ -29,10 +29,10 @@ pub fn pair(listen: &str) -> io::Result<i32> {
         Ok(0)
     } else {
         eprintln!(
-            "jucode daemon pair: {}",
+            "lynshen daemon pair: {}",
             reply["message"].as_str().unwrap_or("the daemon refused")
         );
-        eprintln!("the relay must be on: jucode daemon relay on");
+        eprintln!("the relay must be on: lynshen daemon relay on");
         Ok(1)
     }
 }
@@ -45,7 +45,7 @@ pub fn relay(listen: &str, action: Option<&str>) -> io::Result<i32> {
         Some("off") => Some(false),
         Some("status") | None => None,
         Some(_) => {
-            eprintln!("usage: jucode daemon relay [on|off|status] [--listen <host:port>]");
+            eprintln!("usage: lynshen daemon relay [on|off|status] [--listen <host:port>]");
             return Ok(2);
         }
     };
@@ -66,7 +66,7 @@ pub fn relay(listen: &str, action: Option<&str>) -> io::Result<i32> {
         }
         // Not running: the setting is read at start.
         Err(_) => {
-            let store = jucode_daemon::Store::open(jucode_daemon::state_dir()?)?;
+            let store = lynshen_daemon::Store::open(lynshen_daemon::state_dir()?)?;
             if let Some(enabled) = enabled {
                 store.set_setting("relay", json!(enabled))?;
             }
@@ -83,7 +83,7 @@ pub fn relay(listen: &str, action: Option<&str>) -> io::Result<i32> {
 fn print_status(reply: &Value) {
     if reply["type"] != "relay_status" {
         eprintln!(
-            "jucode daemon relay: {}",
+            "lynshen daemon relay: {}",
             reply["message"].as_str().unwrap_or("unexpected reply")
         );
         return;
@@ -106,14 +106,14 @@ fn print_status(reply: &Value) {
 /// Connects as a local client and waits for the daemon's hello.
 fn open(listen: &str) -> Result<Socket, String> {
     // Read the token file directly: the running daemon holds the store.
-    let path = jucode_daemon::state_dir()
+    let path = lynshen_daemon::state_dir()
         .map_err(|error| error.to_string())?
         .join("token");
     let token = std::fs::read_to_string(&path)
         .map_err(|error| format!("no daemon token at {} ({error})", path.display()))?;
     let token = token.trim();
     let (mut socket, _) = connect(format!("ws://{listen}/?token={token}")).map_err(|error| {
-        format!("no daemon at {listen} ({error}); start it with `jucode daemon`")
+        format!("no daemon at {listen} ({error}); start it with `lynshen daemon`")
     })?;
     loop {
         let frame = read(&mut socket).map_err(|error| error.to_string())?;

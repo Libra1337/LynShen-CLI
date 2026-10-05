@@ -2,17 +2,17 @@
 
 ## Terms
 
-- **后端 (backend)**: the agent backend — the coding-agent engine that runs a session: JuCode's own engine, Claude Code, Codex, or an ACP agent. In code it is `BackendId` / `backendId`; the daemon protocol calls it `engine`. It never means a server side, the daemon (the UI calls that 后台服务, "background service"), or a model provider (`provider`).
+- **后端 (backend)**: the agent backend — the coding-agent engine that runs a session: LynShen's own engine, Claude Code, Codex, or an ACP agent. In code it is `BackendId` / `backendId`; the daemon protocol calls it `engine`. It never means a server side, the daemon (the UI calls that 后台服务, "background service"), or a model provider (`provider`).
 
 ## Project Structure & Module Organization
 
 This is a lightweight Rust CLI/TUI workspace. The binary entry point is `src/main.rs`; agent state, sessions, tools, and LLM streaming live in `crates/agent-core/`; terminal rendering and input handling live in `crates/tui/`. Keep tests next to the module they cover with `#[cfg(test)]`. Build artifacts such as `target/` and `target-msvc/` are generated outputs.
 
-`crates/llm-provider-kit/` is a git submodule (github.com/JuCode-Team/llm-provider-kit) holding the provider layer: wire protocols (Responses/Codex/Azure, Anthropic Messages, Chat Completions), the vendored provider catalog (`omp`), provider templates, request builders, the blocking HTTP transport (`transport`), and the catalog-driven login flows (`auth`, `oauth`). It is a workspace member, so `cargo fmt/clippy/test --workspace` covers it. Changes to the provider layer belong there, not in `agent-core`; commit them in the submodule repo first, then bump the pointer here. JuCode-specific pieces stay in this repo: the gateway OAuth flow and auth.json layout (`crates/agent-core/src/oauth.rs`, `config.rs`), the gateway provider template and client name (`crates/agent-core/src/providers.rs`), and the agent loop, tool definitions, approvals, subagents, and safety classifier (`crates/agent-core/src/llm.rs`).
+`crates/llm-provider-kit/` is a git submodule (github.com/LynShen-Team/llm-provider-kit) holding the provider layer: wire protocols (Responses/Codex/Azure, Anthropic Messages, Chat Completions), the vendored provider catalog (`omp`), provider templates, request builders, the blocking HTTP transport (`transport`), and the catalog-driven login flows (`auth`, `oauth`). It is a workspace member, so `cargo fmt/clippy/test --workspace` covers it. Changes to the provider layer belong there, not in `agent-core`; commit them in the submodule repo first, then bump the pointer here. LynShen-specific pieces stay in this repo: the gateway OAuth flow and auth.json layout (`crates/agent-core/src/oauth.rs`, `config.rs`), the gateway provider template and client name (`crates/agent-core/src/providers.rs`), and the agent loop, tool definitions, approvals, subagents, and safety classifier (`crates/agent-core/src/llm.rs`).
 
 ## Build, Test, and Development Commands
 
-- `cargo run`: run the local JuCode TUI.
+- `cargo run`: run the local LynShen TUI.
 - `cargo test`: run unit tests.
 - `cargo check`: verify the project quickly without producing a final binary.
 - `cargo fmt`: format Rust code with rustfmt.

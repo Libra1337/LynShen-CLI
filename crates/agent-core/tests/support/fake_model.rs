@@ -1,6 +1,6 @@
 //! A temporary HOME and a scripted local chat-completions server, shared by
 //! the agent-core and daemon integration tests. Nothing here reads or writes
-//! the developer's `~/.jucode` or calls a real provider.
+//! the developer's `~/.lynshen` or calls a real provider.
 
 use serde_json::{json, Value};
 use std::{
@@ -13,7 +13,7 @@ use std::{
 };
 
 /// Tests share one HOME and one fake server; they run one at a time because
-/// the engines share `~/.jucode/config.json`.
+/// the engines share `~/.lynshen/config.json`.
 pub fn setup() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: Mutex<()> = Mutex::new(());
     static INIT: OnceLock<()> = OnceLock::new();
@@ -22,9 +22,9 @@ pub fn setup() -> std::sync::MutexGuard<'static, ()> {
         let home = temp_dir("home");
         env::set_var("HOME", &home);
         env::remove_var("USERPROFILE");
-        env::set_var("JUCODE_FAKE_KEY", "test-key");
+        env::set_var("LYNSHEN_FAKE_KEY", "test-key");
         let base_url = start_fake_model();
-        let profile = home.join(".jucode");
+        let profile = home.join(".lynshen");
         fs::create_dir_all(&profile).unwrap();
         fs::write(
             profile.join("config.json"),
@@ -33,7 +33,7 @@ pub fn setup() -> std::sync::MutexGuard<'static, ()> {
                 "protocol": "chat",
                 "model": "fake-model",
                 "base_url": base_url,
-                "api_key_env": "JUCODE_FAKE_KEY",
+                "api_key_env": "LYNSHEN_FAKE_KEY",
                 "retry_attempts": 0,
                 "include_project_instructions": false,
             })
@@ -48,7 +48,7 @@ pub fn temp_dir(label: &str) -> PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let dir = env::temp_dir().join(format!(
-        "jucode-hosted-{}-{}-{label}",
+        "lynshen-hosted-{}-{}-{label}",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::SeqCst)
     ));

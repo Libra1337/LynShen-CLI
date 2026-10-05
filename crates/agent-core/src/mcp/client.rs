@@ -97,7 +97,7 @@ impl McpClient {
         let params = json!({
             "protocolVersion": MCP_PROTOCOL_VERSION,
             "capabilities": { "roots": { "listChanged": false } },
-            "clientInfo": { "name": "jucode", "version": env!("CARGO_PKG_VERSION") }
+            "clientInfo": { "name": "lynshen", "version": env!("CARGO_PKG_VERSION") }
         });
         let result = self.transport.request("initialize", params, self.timeout)?;
         let version = result
@@ -839,7 +839,7 @@ mod tests {
         let requests = state.requests.lock().unwrap();
         assert_eq!(requests[0].0, "initialize");
         assert_eq!(requests[0].1["protocolVersion"], MCP_PROTOCOL_VERSION);
-        assert_eq!(requests[0].1["clientInfo"]["name"], "jucode");
+        assert_eq!(requests[0].1["clientInfo"]["name"], "lynshen");
         assert_eq!(
             requests[0].1["clientInfo"]["version"],
             env!("CARGO_PKG_VERSION")

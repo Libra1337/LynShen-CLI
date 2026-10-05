@@ -7,7 +7,7 @@
 use snow::{Builder, HandshakeState, TransportState};
 
 pub const PATTERN: &str = "Noise_IK_25519_ChaChaPoly_SHA256";
-pub const PROLOGUE: &[u8] = b"jucode-relay-v1";
+pub const PROLOGUE: &[u8] = b"lynshen-relay-v1";
 /// Frame bytes per transport message.
 pub const CHUNK: usize = 65000;
 /// The largest Noise message.

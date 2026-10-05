@@ -1,27 +1,27 @@
 export const releaseTargets = [
   {
     directory: "cli-linux-x64",
-    packageName: "@jucode/cli-linux-x64",
+    packageName: "@lynshen/cli-linux-x64",
     rustTarget: "x86_64-unknown-linux-gnu",
-    binaryName: "jucode"
+    binaryName: "lynshen"
   },
   {
     directory: "cli-win32-x64",
-    packageName: "@jucode/cli-win32-x64",
+    packageName: "@lynshen/cli-win32-x64",
     rustTarget: "x86_64-pc-windows-msvc",
-    binaryName: "jucode.exe"
+    binaryName: "lynshen.exe"
   },
   {
     directory: "cli-darwin-arm64",
-    packageName: "@jucode/cli-darwin-arm64",
+    packageName: "@lynshen/cli-darwin-arm64",
     rustTarget: "aarch64-apple-darwin",
-    binaryName: "jucode"
+    binaryName: "lynshen"
   },
   {
     directory: "cli-darwin-x64",
-    packageName: "@jucode/cli-darwin-x64",
+    packageName: "@lynshen/cli-darwin-x64",
     rustTarget: "x86_64-apple-darwin",
-    binaryName: "jucode"
+    binaryName: "lynshen"
   }
 ];
 
@@ -31,4 +31,4 @@ export const nativeReleaseTargets = ["x86_64-unknown-linux-gnu", "x86_64-pc-wind
 export const macosReleaseTargets = ["aarch64-apple-darwin"];
 
 export const rootPackageDirectory = "cli";
-export const rootPackageName = "@jucode/cli";
+export const rootPackageName = "@lynshen/cli";

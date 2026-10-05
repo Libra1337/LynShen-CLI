@@ -6,7 +6,7 @@ it by hand, and what is deliberately left for later.
 
 ## Shape
 
-A cloud agent is the same `jucode daemon` that runs on a user's machine,
+A cloud agent is the same `lynshen daemon` that runs on a user's machine,
 in a container of its own: one container per user, the daemon unchanged
 (single user, file storage, blocking threads — per-user isolation is what
 lets it stay that way). Clients reach it exactly like a local daemon that
@@ -15,32 +15,32 @@ encrypted, with no port published. A client only has to choose where a
 session runs.
 
 ```
- Desktop / PWA ──wss──▶ jucode-relay ◀──wss── daemon (user's machine)
+ Desktop / PWA ──wss──▶ lynshen-relay ◀──wss── daemon (user's machine)
                                   ▲
                                   └──wss── daemon container (per user, cloud)
-                                             volumes: ~/.jucode, /workspace
+                                             volumes: ~/.lynshen, /workspace
 ```
 
 ## What exists
 
-- **Image** — `docker/Dockerfile`: the jucode binary on Debian slim with
+- **Image** — `docker/Dockerfile`: the lynshen binary on Debian slim with
   git, ssh, ripgrep and curl, running as uid 1000 under tini (which reaps
   what tool commands leave behind). Volumes:
-  - `/home/jucode/.jucode`: config, `auth.json`, sessions, daemon state,
+  - `/home/lynshen/.lynshen`: config, `auth.json`, sessions, daemon state,
     relay identity (the host id stays stable across restarts);
   - `/workspace`: the repositories the agent works in.
 - **Entrypoint** — `docker/entrypoint.sh`:
-  - seeds `config.json` on first start: the JuCode gateway, a model it
-    serves (`JUCODE_MODEL`, default `gpt-6-sol`), and
+  - seeds `config.json` on first start: the LynShen gateway, a model it
+    serves (`LYNSHEN_MODEL`, default `gpt-6-sol`), and
     `"sandbox": "full-access"` — the container is the isolation boundary,
     and the engine's own sandbox (bubblewrap) needs user namespaces a
     container normally lacks;
   - turns the relay on, since it is the only way in;
-  - runs `jucode daemon --listen 127.0.0.1:7788`.
+  - runs `lynshen daemon --listen 127.0.0.1:7788`.
 - **Headless setup commands** (any server, not only containers):
-  - `jucode daemon relay on|off|status`: live on a running daemon, saved
+  - `lynshen daemon relay on|off|status`: live on a running daemon, saved
     for the next start on a stopped one;
-  - `jucode daemon pair`: prints a pairing link and code for a phone or
+  - `lynshen daemon pair`: prints a pairing link and code for a phone or
     browser (valid 5 minutes, single use).
 - **Clean exits** — the daemon ends its tool commands on SIGTERM (what
   `docker stop` sends), so stopping a container leaves nothing running.
@@ -48,19 +48,19 @@ session runs.
 ## Running one by hand
 
 ```sh
-docker build -f docker/Dockerfile -t jucode-daemon .
-docker volume create jucode-home && docker volume create jucode-work
+docker build -f docker/Dockerfile -t lynshen-daemon .
+docker volume create lynshen-home && docker volume create lynshen-work
 
-docker run -d --name jucode-agent --restart unless-stopped \
-  -v jucode-home:/home/jucode/.jucode -v jucode-work:/workspace \
-  jucode-daemon
+docker run -d --name lynshen-agent --restart unless-stopped \
+  -v lynshen-home:/home/lynshen/.lynshen -v lynshen-work:/workspace \
+  lynshen-daemon
 
-# Credentials: model calls go through the JuCode gateway with the OAuth
+# Credentials: model calls go through the LynShen gateway with the OAuth
 # tokens of a logged-in machine (they refresh themselves).
-docker cp ~/.jucode/auth.json jucode-agent:/home/jucode/.jucode/auth.json
+docker cp ~/.lynshen/auth.json lynshen-agent:/home/lynshen/.lynshen/auth.json
 
-docker exec jucode-agent jucode daemon relay status
-docker exec jucode-agent jucode daemon pair   # open the link on the phone
+docker exec lynshen-agent lynshen daemon relay status
+docker exec lynshen-agent lynshen daemon pair   # open the link on the phone
 ```
 
 Servers run x86_64: build with `docker buildx build --platform linux/amd64`
@@ -85,7 +85,7 @@ Each item needs a decision before it is built.
    the next due time before stopping it and wake it then. A client that
    finds the host offline (relay close 4404) could also ask for a wake-up.
 5. **Ownership** — pairing is code-based today. A cloud host should be
-   bound to the JuCode account that owns it, so the account's devices can
+   bound to the LynShen account that owns it, so the account's devices can
    reach it without scanning a code.
 6. **Clients** — label hosts as local or cloud, and let a new session pick
    where it runs.

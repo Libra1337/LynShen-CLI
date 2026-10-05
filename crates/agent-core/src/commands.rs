@@ -28,7 +28,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         name: "/login",
         aliases: &[],
         args: "[provider|list] [api-key] | [web-url] [api-url]",
-        description: "Sign in to JuCode or a catalog provider (OAuth)",
+        description: "Sign in to LynShen or a catalog provider (OAuth)",
         advanced: false,
     },
     CommandSpec {

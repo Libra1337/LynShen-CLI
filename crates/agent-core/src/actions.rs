@@ -76,7 +76,7 @@ pub fn action_digest(name: &str, arguments: &str, cwd: &std::path::Path) -> Stri
 
 /// The message that wakes the session once a deferred action is decided.
 /// Clients recognise the header line and show it as a notice, not a user
-/// message (JuCode-Desktop `src/lib/delivery.ts`): keep the two in step.
+/// message (LynShen-Desktop `src/lib/delivery.ts`): keep the two in step.
 pub fn decision_message(action: &DeferredAction, outcome: Option<(&str, bool)>) -> String {
     let call = if action.summary.is_empty() {
         format!("`{}`", action.name)

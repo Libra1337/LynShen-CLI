@@ -1,17 +1,17 @@
-# `jucode serve` Protocol
+# `lynshen serve` Protocol
 
-`jucode serve` is a persistent bidirectional protocol mode for GUI/IDE
+`lynshen serve` is a persistent bidirectional protocol mode for GUI/IDE
 front-ends. The process reads newline-delimited JSON commands on stdin and
 emits the engine's `AgentEvent` stream as newline-delimited JSON on stdout —
 the same schema `--headless` uses. It runs until stdin closes, an `op:"shutdown"`
 arrives, or a `command` op carries `/quit` or `/exit`.
 
-`jucode serve --chat` starts a chat session instead: it runs in `~/.jucode/chats`
+`lynshen serve --chat` starts a chat session instead: it runs in `~/.lynshen/chats`
 with the chat prompt (conversation and web research) and without project
 instructions or project skills. Any engine started in that directory, or
 inside it, is a chat session as well.
 
-This is the richer of JuCode's two embedding protocols. `jucode acp` is the
+This is the richer of LynShen's two embedding protocols. `lynshen acp` is the
 standardized subset for ACP clients; see `docs/serve-vs-acp.md` for the split.
 
 ## Framing
@@ -36,7 +36,7 @@ A client that does not support `protocol` must stop instead of guessing.
 Every later event carries a `session` field with the engine's current
 session id, the same shape the daemon uses to multiplex several sessions on
 one connection (`docs/agent-daemon-plan.md`). Ops may carry a `session`
-field; `jucode serve` hosts exactly one session and ignores it.
+field; `lynshen serve` hosts exactly one session and ignores it.
 
 ## Lifecycle
 
@@ -267,7 +267,7 @@ Interrupt:
 
 ## Mapping to UI
 
-Suggested rendering (as used by JuCode Desktop):
+Suggested rendering (as used by LynShen Desktop):
 
 | Events | UI |
 | --- | --- |

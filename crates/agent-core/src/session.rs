@@ -1896,7 +1896,7 @@ mod tests {
 
     fn temp_profile(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
-            "jucode-session-test-{tag}-{}",
+            "lynshen-session-test-{tag}-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -2792,6 +2792,6 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .map(|duration| duration.as_nanos())
             .unwrap_or(0);
-        std::env::temp_dir().join(format!("jucode-{name}-{nanos}"))
+        std::env::temp_dir().join(format!("lynshen-{name}-{nanos}"))
     }
 }

@@ -29,7 +29,7 @@ pub(crate) struct SubagentWorkspace {
 }
 
 /// Prepares the isolated workspace for a subagent under
-/// `<parent_cwd>/.jucode/agents/<task>-<millis>`. Inside a git repository this
+/// `<parent_cwd>/.lynshen/agents/<task>-<millis>`. Inside a git repository this
 /// is a detached `git worktree` (the child sees the committed tree and its
 /// file-tool writes stay in the worktree); outside a repository it is a fresh
 /// empty directory (the child sees nothing of the parent tree by default and
@@ -39,7 +39,7 @@ pub(crate) fn prepare_workspace(
     task_name: &str,
 ) -> Result<SubagentWorkspace, String> {
     let root = parent_cwd
-        .join(".jucode")
+        .join(".lynshen")
         .join("agents")
         .join(format!("{task_name}-{}", now_ms()));
     if root.exists() {
@@ -824,7 +824,7 @@ mod tests {
     }
 
     fn temp_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("jucode-subagent-ws-{tag}-{}", now_ms()));
+        let dir = std::env::temp_dir().join(format!("lynshen-subagent-ws-{tag}-{}", now_ms()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -856,7 +856,7 @@ mod tests {
         assert!(workspace.from_git);
         assert!(workspace
             .root
-            .starts_with(repo.join(".jucode").join("agents")));
+            .starts_with(repo.join(".lynshen").join("agents")));
         // The child sees the committed tree...
         assert!(workspace.root.join("tracked.txt").exists());
 

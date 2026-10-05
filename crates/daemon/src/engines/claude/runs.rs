@@ -378,7 +378,7 @@ mod tests {
 
     fn session() -> PathBuf {
         let dir =
-            std::env::temp_dir().join(format!("jucode-runs-{}-{}", std::process::id(), now_ms()));
+            std::env::temp_dir().join(format!("lynshen-runs-{}-{}", std::process::id(), now_ms()));
         fs::create_dir_all(dir.join("conv/workflows")).unwrap();
         fs::create_dir_all(dir.join("conv/subagents/workflows/wf_1")).unwrap();
         dir.join("conv")

@@ -1,7 +1,7 @@
 //! Sessions run by another agent CLI (Claude Code, Codex, ACP agents) as a
 //! child process. An adapter translates the engine's own wire format into the
-//! jucode event dialect and client ops into engine frames, so every client
-//! sees the same events it gets from a jucode session. The daemon keeps a
+//! lynshen event dialect and client ops into engine frames, so every client
+//! sees the same events it gets from a lynshen session. The daemon keeps a
 //! snapshot of each session (state events, transcript, pending approvals) for
 //! clients that start watching mid-session.
 
@@ -40,7 +40,7 @@ pub enum Kind {
 impl Kind {
     pub fn parse(name: &str) -> Result<Option<Self>, String> {
         match name {
-            "" | "jucode" => Ok(None),
+            "" | "lynshen" => Ok(None),
             "claude" => Ok(Some(Kind::Claude)),
             "codex" => Ok(Some(Kind::Codex)),
             "acp" => Ok(Some(Kind::Acp)),
@@ -60,7 +60,7 @@ impl Kind {
 /// How an engine is started. `resume` names the engine's own conversation.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Options {
-    /// The client's approval mode (jucode or desktop names).
+    /// The client's approval mode (lynshen or desktop names).
     pub approval_mode: Option<String>,
     pub model: Option<String>,
     pub resume: Option<String>,
@@ -73,7 +73,7 @@ pub struct Options {
     pub bin: Option<String>,
     /// Extra environment for the engine process.
     pub env: Vec<(String, String)>,
-    /// Claude / Codex: talk to the JuCode gateway on the user's JuCode login
+    /// Claude / Codex: talk to the LynShen gateway on the user's LynShen login
     /// instead of the provider in their own config (which stays untouched).
     /// None: as the session last ran.
     pub gateway: Option<bool>,
@@ -115,7 +115,7 @@ impl Options {
                 .flatten()
                 .filter_map(|(name, value)| Some((name.clone(), value.as_str()?.to_string())))
                 .collect(),
-            gateway: value["jucode_gateway"].as_bool(),
+            gateway: value["lynshen_gateway"].as_bool(),
             ultracode: value["ultracode"] == true,
             effort: text("effort"),
             fast: value["fast"] == true,
@@ -204,7 +204,7 @@ fn adapter(kind: Kind, cwd: &Path, options: &Options) -> Box<dyn Adapter> {
 }
 
 /// The engine's command, and the local gateway key it holds when it runs
-/// on the JuCode gateway (see crate::gateway).
+/// on the LynShen gateway (see crate::gateway).
 fn command(kind: Kind, id: &str, options: &Options) -> Result<(Command, Option<String>), String> {
     let command = match kind {
         Kind::Claude => claude::command(id, options),
@@ -229,7 +229,7 @@ fn tui_command(
     with_gateway(kind, id, options, command)
 }
 
-/// `command` with the session's environment, and on the JuCode gateway when
+/// `command` with the session's environment, and on the LynShen gateway when
 /// it runs there: with the local gateway key it holds.
 fn with_gateway(
     kind: Kind,
@@ -242,10 +242,10 @@ fn with_gateway(
         return Ok((command, None));
     }
     if kind == Kind::Acp {
-        return Err("an ACP agent has no JuCode gateway mode".to_string());
+        return Err("an ACP agent has no LynShen gateway mode".to_string());
     }
     // Not signed in fails the start, not the first request.
-    jucode_agent_core::jucode_gateway_credentials()?;
+    lynshen_agent_core::lynshen_gateway_credentials()?;
     let base = crate::gateway::base_url()?;
     let key = crate::gateway::issue(id)?;
     let configured = match kind {
@@ -916,7 +916,7 @@ impl Session<'_> {
             // whoever answers them next.
             "set_attended" => false,
             // Claude Code / Codex move between this machine's own login and
-            // the JuCode gateway (a new process; the conversation resumes),
+            // the LynShen gateway (a new process; the conversation resumes),
             // once the running turn ends.
             "set_gateway" => {
                 let Some(gateway) = op["gateway"].as_bool() else {
@@ -926,7 +926,7 @@ impl Session<'_> {
                     return false;
                 };
                 if self.kind == Kind::Acp {
-                    self.publish(vec![json!({ "type": "error", "message": "an ACP agent has no JuCode gateway mode" })]);
+                    self.publish(vec![json!({ "type": "error", "message": "an ACP agent has no LynShen gateway mode" })]);
                     return false;
                 }
                 self.restart = Some(

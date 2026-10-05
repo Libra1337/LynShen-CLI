@@ -112,9 +112,9 @@ impl Hub {
         relay: Option<String>,
     ) -> Arc<Self> {
         let schedules = Mutex::new(schedules::load(&agents));
-        // `~/.jucode`: uploads live beside the daemon's state, not in it.
-        let jucode_dir = store.dir().parent().unwrap_or(store.dir()).to_path_buf();
-        let uploads = crate::uploads::Uploads::load(&jucode_dir);
+        // `~/.lynshen`: uploads live beside the daemon's state, not in it.
+        let lynshen_dir = store.dir().parent().unwrap_or(store.dir()).to_path_buf();
+        let uploads = crate::uploads::Uploads::load(&lynshen_dir);
         let requirements = crate::requirements::Requirements::load(
             store.dir(),
             uploads.dir().join("requirements"),
@@ -285,7 +285,7 @@ impl Hub {
         self.create_engine_session(cwd, agent, chat, None, engines::Options::default())
     }
 
-    /// `create_session` with the engine to run (None: jucode) and its start
+    /// `create_session` with the engine to run (None: lynshen) and its start
     /// options.
     pub fn create_engine_session(
         self: &Arc<Self>,
@@ -296,11 +296,11 @@ impl Hub {
         options: engines::Options,
     ) -> Result<String, String> {
         if engine.is_some() && agent.is_some() {
-            return Err("agents run on the jucode engine".to_string());
+            return Err("agents run on the lynshen engine".to_string());
         }
         let cwd = match agent {
             None if chat => {
-                jucode_agent_core::chat::ensure_chats_dir().map_err(|error| error.to_string())?
+                lynshen_agent_core::chat::ensure_chats_dir().map_err(|error| error.to_string())?
             }
             Some(id) => {
                 let agent = self
@@ -348,7 +348,7 @@ impl Hub {
     /// Hosts a session recorded earlier (after a restart or a close). A
     /// session that is already hosted is left as it is.
     /// `cwd` also opens a session the daemon never hosted (one saved by
-    /// the TUI or `jucode serve` in that directory).
+    /// the TUI or `lynshen serve` in that directory).
     pub fn open_session(self: &Arc<Self>, id: &str, cwd: Option<PathBuf>) -> Result<(), String> {
         self.open_engine_session(id, cwd, None, engines::Options::default())
     }
@@ -375,7 +375,7 @@ impl Hub {
             (Some(record), _) => record,
             (None, Some(cwd)) => {
                 let saved = match engine {
-                    None => jucode_agent_core::saved_sessions(&cwd)
+                    None => lynshen_agent_core::saved_sessions(&cwd)
                         .map_err(|error| error.to_string())?
                         .iter()
                         .any(|summary| summary.id == id),
@@ -520,10 +520,10 @@ impl Hub {
         self.broadcast(&json!({ "type": "session_closed", "session": id }));
     }
 
-    /// Sends `op` to every open JuCode session (other engines have no MCP
+    /// Sends `op` to every open LynShen session (other engines have no MCP
     /// servers of the daemon's).
-    pub fn forward_to_jucode_sessions(&self, op: &Value) {
-        let jucode: HashSet<String> = self
+    pub fn forward_to_lynshen_sessions(&self, op: &Value) {
+        let lynshen: HashSet<String> = self
             .store
             .sessions()
             .into_iter()
@@ -531,7 +531,7 @@ impl Hub {
             .map(|record| record.id)
             .collect();
         for (id, hosted) in lock(&self.sessions).iter() {
-            if jucode.contains(id) {
+            if lynshen.contains(id) {
                 let _ = hosted.ops.send(op.clone());
             }
         }
@@ -926,7 +926,7 @@ impl Hub {
                     let _ = self.store.record_timer_done(&timer.id, "fired");
                 }
                 Err(error) => {
-                    jucode_agent_core::log_warn!(
+                    lynshen_agent_core::log_warn!(
                         "daemon",
                         "timer not fired",
                         error = error.to_string()
@@ -951,7 +951,7 @@ impl Hub {
                         continue;
                     }
                     if let Err(error) = self.deliver(&message, target) {
-                        jucode_agent_core::log_warn!("daemon", "delivery failed", error = error);
+                        lynshen_agent_core::log_warn!("daemon", "delivery failed", error = error);
                     }
                 }
                 Err(reason) => {
@@ -1041,7 +1041,7 @@ impl Hub {
                 .into_iter()
                 .find(|record| record.id == session)?;
             Some(SessionInfo {
-                engine: record.engine.unwrap_or_else(|| "jucode".to_string()),
+                engine: record.engine.unwrap_or_else(|| "lynshen".to_string()),
                 gateway: record.gateway,
                 cwd: record.cwd.to_string_lossy().into_owned(),
             })
@@ -1104,7 +1104,7 @@ impl Hub {
         match self.post_report(&report) {
             Ok(()) => self.notify(&report.title, error, session),
             Err(error) => {
-                jucode_agent_core::log_warn!("daemon", "failure report not saved", error = error)
+                lynshen_agent_core::log_warn!("daemon", "failure report not saved", error = error)
             }
         }
     }
@@ -1141,12 +1141,12 @@ impl Hub {
         };
         let id = session.to_string();
         thread::spawn(move || {
-            let reply = jucode_agent_core::title_completion(titles::HANDOFF_SYSTEM, &prompt);
+            let reply = lynshen_agent_core::title_completion(titles::HANDOFF_SYSTEM, &prompt);
             lock(&hub.handing_off).remove(&id);
             let note = match reply {
                 Ok(reply) => titles::clean_handoff(&reply),
                 Err(error) => {
-                    jucode_agent_core::log_warn!("daemon", "handoff note failed", error = error);
+                    lynshen_agent_core::log_warn!("daemon", "handoff note failed", error = error);
                     None
                 }
             };
@@ -1160,7 +1160,7 @@ impl Hub {
                 .and_then(|record| record.title)
                 .unwrap_or(title);
             if let Err(error) = hub.agents.save_handoff(&agent, &id, &title, &note, now()) {
-                jucode_agent_core::log_warn!("daemon", "handoff note not saved", error = error);
+                lynshen_agent_core::log_warn!("daemon", "handoff note not saved", error = error);
             }
         });
     }
@@ -1191,12 +1191,12 @@ impl Hub {
         };
         let id = session.to_string();
         thread::spawn(move || {
-            let reply = jucode_agent_core::title_completion(titles::SYSTEM, &prompt);
+            let reply = lynshen_agent_core::title_completion(titles::SYSTEM, &prompt);
             lock(&hub.titling).remove(&id);
             let title = match reply {
                 Ok(reply) => titles::clean(&reply),
                 Err(error) => {
-                    jucode_agent_core::log_warn!(
+                    lynshen_agent_core::log_warn!(
                         "daemon",
                         "conversation title failed",
                         error = error
@@ -1316,7 +1316,7 @@ impl Hub {
                 let summary = saved.get(&record.id);
                 json!({
                     "session": record.id,
-                    "chat": jucode_agent_core::chat::is_chat_dir(&cwd),
+                    "chat": lynshen_agent_core::chat::is_chat_dir(&cwd),
                     "cwd": cwd.display().to_string(),
                     "created_at": record.created_at,
                     "updated_at": summary.map_or(record.created_at, |s| s.updated_at * 1000),
@@ -1324,7 +1324,7 @@ impl Hub {
                     "archived": record.archived,
                     "group": record.group,
                     "gateway": record.gateway,
-                    "engine": record.engine.as_deref().unwrap_or("jucode"),
+                    "engine": record.engine.as_deref().unwrap_or("lynshen"),
                     "agent": record.agent,
                     "open": hosted.is_some(),
                     "watchers": hosted.map(|h| h.watchers.len()).unwrap_or(0),
@@ -1335,10 +1335,10 @@ impl Hub {
     }
 
     /// Every session saved in `cwd`, newest first, whoever ran it (the
-    /// daemon, the TUI or `jucode serve`), with the daemon's title and
+    /// daemon, the TUI or `lynshen serve`), with the daemon's title and
     /// archive state for the ones it knows.
     pub fn session_history(&self, cwd: &std::path::Path) -> Result<Value, String> {
-        let saved = jucode_agent_core::saved_sessions(cwd).map_err(|error| error.to_string())?;
+        let saved = lynshen_agent_core::saved_sessions(cwd).map_err(|error| error.to_string())?;
         let records: HashMap<String, SessionRecord> = self
             .store
             .sessions()
@@ -1370,7 +1370,7 @@ impl Hub {
                     s.label,
                     s.updated_at * 1000,
                     json!(s.entries),
-                    "jucode",
+                    "lynshen",
                 )
             })
             .chain(
@@ -1401,10 +1401,10 @@ impl Hub {
 /// Saved-session summaries of the given directories, by session id.
 fn saved_by_id<'a>(
     dirs: impl Iterator<Item = &'a std::path::Path>,
-) -> HashMap<String, jucode_agent_core::SessionSummary> {
+) -> HashMap<String, lynshen_agent_core::SessionSummary> {
     let dirs: HashSet<&std::path::Path> = dirs.collect();
     dirs.into_iter()
-        .flat_map(|dir| jucode_agent_core::saved_sessions(dir).unwrap_or_default())
+        .flat_map(|dir| lynshen_agent_core::saved_sessions(dir).unwrap_or_default())
         .map(|summary| (summary.id.clone(), summary))
         .collect()
 }
@@ -1440,7 +1440,7 @@ fn shown_title(record: &SessionRecord, label: Option<&str>) -> Option<String> {
 
 /// How `delivery_text` starts the line naming where a message came from.
 /// Clients show a message with one of these headers as a notice, not as
-/// something the user wrote (JuCode-Desktop `src/lib/delivery.ts`).
+/// something the user wrote (LynShen-Desktop `src/lib/delivery.ts`).
 const DELIVERY_HEADERS: [&str; 5] = [
     "[message from ",
     "[timer ",
@@ -1558,7 +1558,7 @@ mod tests {
     #[test]
     fn an_agent_turn_that_fails_becomes_a_report() {
         let dir = std::env::temp_dir().join(format!(
-            "jucode-hub-failed-{}-{}",
+            "lynshen-hub-failed-{}-{}",
             std::process::id(),
             now()
         ));
@@ -1593,7 +1593,7 @@ mod tests {
     #[test]
     fn a_finishing_engine_leaves_its_successor_hosted() {
         let dir = std::env::temp_dir().join(format!(
-            "jucode-hub-generation-{}-{}",
+            "lynshen-hub-generation-{}-{}",
             std::process::id(),
             now()
         ));

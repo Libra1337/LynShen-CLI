@@ -1,12 +1,12 @@
-//! The local gateway. Claude Code and Codex sessions on the JuCode gateway
+//! The local gateway. Claude Code and Codex sessions on the LynShen gateway
 //! send their requests here (`http://127.0.0.1:<port>/gw/v1/…`), not to the
 //! gateway itself, and the daemon forwards them:
 //!
-//! - with a JuCode access token valid at that moment: the engines would keep
+//! - with a LynShen access token valid at that moment: the engines would keep
 //!   the one they started with, which expires after an hour (every request
 //!   then fails with 401);
-//! - with the session's group (`X-JuCode-Group`), when that group serves
-//!   the requested model; else the model's default group from `jucode_groups`
+//! - with the session's group (`X-LynShen-Group`), when that group serves
+//!   the requested model; else the model's default group from `lynshen_groups`
 //!   in config.json; else none, and the gateway routes on its own.
 //!
 //! Only engines the daemon started pass here: native tools keep their own
@@ -39,7 +39,7 @@ struct State {
     keys: HashMap<String, String>,
     /// Session → the group it routes to.
     groups: HashMap<String, String>,
-    /// Session → its running turn (`X-JuCode-Turn`, see crate::usage).
+    /// Session → its running turn (`X-LynShen-Turn`, see crate::usage).
     turns: HashMap<String, String>,
     /// The gateway's groups (`/v1/open/groups`), and when they were read.
     catalog: Option<(Instant, Vec<Value>)>,
@@ -130,23 +130,23 @@ pub fn serve(stream: TcpStream, head: &str) -> Result<(), String> {
 }
 
 fn live_upstream() -> Result<Upstream, String> {
-    let (api, token) = jucode_agent_core::jucode_gateway_token()?;
+    let (api, token) = lynshen_agent_core::lynshen_gateway_token()?;
     Ok(Upstream { api, token })
 }
 
-/// `jucode_groups` in `~/.jucode/config.json`: the JuCode engine's per-model
+/// `lynshen_groups` in `~/.lynshen/config.json`: the LynShen engine's per-model
 /// group choice, the default here too.
 fn read_default_groups() -> BTreeMap<String, String> {
     let path = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(|home| {
             std::path::PathBuf::from(home)
-                .join(".jucode")
+                .join(".lynshen")
                 .join("config.json")
         });
     path.and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-        .and_then(|config| serde_json::from_value(config["jucode_groups"].clone()).ok())
+        .and_then(|config| serde_json::from_value(config["lynshen_groups"].clone()).ok())
         .unwrap_or_default()
 }
 
@@ -192,14 +192,14 @@ fn live_groups(upstream: &Upstream) -> Option<Vec<Value>> {
     Some(groups)
 }
 
-/// What a client that cannot read this machine's JuCode login (the remote
+/// What a client that cannot read this machine's LynShen login (the remote
 /// page) needs to offer the gateway: the models the user chose to show
-/// (`jucode_models` in config.json) and the gateway's groups. Empty lists
+/// (`lynshen_models` in config.json) and the gateway's groups. Empty lists
 /// when not signed in or the gateway cannot be reached.
 pub fn catalog_json() -> Value {
     // The window the engine budgets with: through the pinned group, and a
     // hand-set override (capped at the gateway's largest) over the gateway's.
-    let models: Vec<Value> = jucode_agent_core::jucode_visible_models()
+    let models: Vec<Value> = lynshen_agent_core::lynshen_visible_models()
         .into_iter()
         .map(|model| {
             json!({
@@ -223,7 +223,7 @@ fn agent() -> &'static ureq::Agent {
             .timeout_connect(Duration::from_secs(30))
             .timeout_read(READ_TIMEOUT)
             .redirects(0)
-            // Direct, like the JuCode engine's own requests: ureq would read
+            // Direct, like the LynShen engine's own requests: ureq would read
             // ALL_PROXY first and has no SOCKS support built in.
             .build()
     })
@@ -277,8 +277,8 @@ fn dropped_request_header(name: &str) -> bool {
             | "upgrade"
             | "expect"
             | "accept-encoding"
-            | "x-jucode-group"
-            | "x-jucode-turn"
+            | "x-lynshen-group"
+            | "x-lynshen-turn"
     )
 }
 
@@ -347,7 +347,7 @@ fn serve_with(
     };
     let upstream = match upstream() {
         Ok(upstream) => upstream,
-        // "not logged in to JuCode …": the desktop reads it as a sign-in error.
+        // "not logged in to LynShen …": the desktop reads it as a sign-in error.
         Err(message) => return reply_error(&mut out, 401, &message),
     };
     let model = serde_json::from_slice::<Value>(&request.body)
@@ -383,10 +383,10 @@ fn serve_with(
         }
     }
     if let Some(group) = &group {
-        call = call.set("X-JuCode-Group", group);
+        call = call.set("X-LynShen-Group", group);
     }
     if let Some(turn) = state().turns.get(&session).cloned() {
-        call = call.set("X-JuCode-Turn", &turn);
+        call = call.set("X-LynShen-Turn", &turn);
     }
     let result = if request.body.is_empty() && request.method.eq_ignore_ascii_case("GET") {
         call.call()
@@ -399,7 +399,7 @@ fn serve_with(
             return reply_error(
                 &mut out,
                 502,
-                &format!("cannot reach the JuCode gateway: {error}"),
+                &format!("cannot reach the LynShen gateway: {error}"),
             );
         }
     };
@@ -632,7 +632,7 @@ mod tests {
         assert!(!state().keys.contains_key(&key));
     }
 
-    /// A fake JuCode gateway: answers one request with a streamed body and
+    /// A fake LynShen gateway: answers one request with a streamed body and
     /// reports what it received.
     fn fake_upstream() -> (String, thread::JoinHandle<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -721,7 +721,7 @@ mod tests {
         assert!(received.starts_with("post /v1/responses "), "{received}");
         assert!(received.contains("authorization: bearer real-token"));
         assert!(!received.contains(&key), "the local key stays local");
-        assert!(received.contains("x-jucode-group: g1"));
+        assert!(received.contains("x-lynshen-group: g1"));
         assert!(received.contains("x-custom: kept"));
         assert!(received.contains("accept-encoding: identity"));
         assert!(received.ends_with(body), "{received}");
@@ -786,7 +786,7 @@ mod tests {
             .join()
             .unwrap()
             .to_ascii_lowercase()
-            .contains("x-jucode-group"));
+            .contains("x-lynshen-group"));
         assert!(reply.starts_with("HTTP/1.1 200"));
         revoke(&key);
     }

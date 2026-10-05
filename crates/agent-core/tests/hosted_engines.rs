@@ -4,13 +4,13 @@
 //!
 //! The whole binary runs against a temporary HOME and a local fake
 //! chat-completions server, so it never reads or writes the developer's
-//! `~/.jucode` or calls a real provider.
+//! `~/.lynshen` or calls a real provider.
 
 #[path = "support/fake_model.rs"]
 mod fake_model;
 
 use fake_model::{setup, temp_dir};
-use jucode_agent_core::{AgentCore, AgentEvent, ApprovalMode};
+use lynshen_agent_core::{AgentCore, AgentEvent, ApprovalMode};
 use std::{
     env, fs,
     path::Path,
@@ -183,7 +183,7 @@ fn config_changes_from_two_engines_both_land() {
     second.mcp_set(&server("from_second"));
 
     let config_path = std::path::PathBuf::from(env::var("HOME").unwrap())
-        .join(".jucode")
+        .join(".lynshen")
         .join("config.json");
     let saved: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
@@ -202,7 +202,7 @@ fn config_changes_from_two_engines_both_land() {
 
 #[test]
 fn host_tools_run_in_the_host_and_host_prompt_reaches_the_model() {
-    use jucode_agent_core::host::HostExtensions;
+    use lynshen_agent_core::host::HostExtensions;
     use std::sync::{Arc, Mutex};
     let _guard = setup();
     let mut core = open(&temp_dir("host"), ApprovalMode::Manual);
@@ -242,7 +242,7 @@ fn host_tools_run_in_the_host_and_host_prompt_reaches_the_model() {
 
 #[test]
 fn an_exclusive_host_leaves_the_engine_no_tools_of_its_own() {
-    use jucode_agent_core::host::HostExtensions;
+    use lynshen_agent_core::host::HostExtensions;
     use std::sync::Arc;
     let _guard = setup();
     let dir = temp_dir("exclusive");
@@ -271,7 +271,7 @@ fn an_exclusive_host_leaves_the_engine_no_tools_of_its_own() {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn a_sandboxed_engine_runs_commands_inside_and_asks_to_leave() {
-    use jucode_agent_core::sandbox::{CommandRule, RuleAction, SandboxMode, SandboxPolicy};
+    use lynshen_agent_core::sandbox::{CommandRule, RuleAction, SandboxMode, SandboxPolicy};
     let _guard = setup();
     let dir = temp_dir("sandboxed");
     fs::create_dir_all(dir.join(".git")).unwrap();
@@ -381,7 +381,7 @@ fn subagents_command_saves_the_models_subagents_may_use() {
     let _guard = setup();
     let mut core = open(&temp_dir("subagents"), ApprovalMode::Manual);
     let config_path = std::path::PathBuf::from(env::var("HOME").unwrap())
-        .join(".jucode")
+        .join(".lynshen")
         .join("config.json");
     let saved = || -> serde_json::Value {
         serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap()

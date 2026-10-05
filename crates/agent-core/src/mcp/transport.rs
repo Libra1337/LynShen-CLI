@@ -226,7 +226,7 @@ fn route_response(
     }
 }
 
-/// Reply for supported server-initiated requests. JuCode exposes its working
+/// Reply for supported server-initiated requests. LynShen exposes its working
 /// directory as the single MCP root; sampling and elicitation remain out.
 pub(crate) fn server_request_reply(
     server: &str,
@@ -1202,7 +1202,7 @@ mod tests {
         }
 
         let root = std::env::temp_dir().join(format!(
-            "jucode-mcp-oauth-test-{}",
+            "lynshen-mcp-oauth-test-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -1277,7 +1277,7 @@ mod tests {
     fn stdio_transport_round_trips_against_a_shell_server() {
         use std::fs;
         let dir = std::env::temp_dir().join(format!(
-            "jucode-mcp-stdio-test-{}",
+            "lynshen-mcp-stdio-test-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()

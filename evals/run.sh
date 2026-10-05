@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Minimal eval harness: runs each task under evals/tasks/ against
-# `jucode --headless` in a throwaway work directory and scores the result
+# `lynshen --headless` in a throwaway work directory and scores the result
 # with the task's check.sh. See evals/README.md.
 set -u
 
@@ -10,12 +10,12 @@ REPO_ROOT="$(cd "$EVALS_DIR/.." && pwd)"
 # Agent under test. Override to compare other agents, e.g.:
 #   AGENT_CMD='codex exec --full-auto' ./evals/run.sh
 if [ -z "${AGENT_CMD:-}" ]; then
-    if [ -x "$REPO_ROOT/target/release/jucode" ]; then
-        AGENT_CMD="$REPO_ROOT/target/release/jucode --headless --approval-mode full-auto"
-    elif [ -x "$REPO_ROOT/target/debug/jucode" ]; then
-        AGENT_CMD="$REPO_ROOT/target/debug/jucode --headless --approval-mode full-auto"
+    if [ -x "$REPO_ROOT/target/release/lynshen" ]; then
+        AGENT_CMD="$REPO_ROOT/target/release/lynshen --headless --approval-mode full-auto"
+    elif [ -x "$REPO_ROOT/target/debug/lynshen" ]; then
+        AGENT_CMD="$REPO_ROOT/target/debug/lynshen --headless --approval-mode full-auto"
     else
-        AGENT_CMD="jucode --headless --approval-mode full-auto"
+        AGENT_CMD="lynshen --headless --approval-mode full-auto"
     fi
 fi
 TIMEOUT_SECS="${TIMEOUT_SECS:-300}"
@@ -30,7 +30,7 @@ for task_dir in "$EVALS_DIR"/tasks/*/; do
     if [ -n "$only_task" ] && [ "$task" != "$only_task" ]; then
         continue
     fi
-    workdir="$(mktemp -d "${TMPDIR:-/tmp}/jucode-eval-$task-XXXXXX")"
+    workdir="$(mktemp -d "${TMPDIR:-/tmp}/lynshen-eval-$task-XXXXXX")"
     if [ -d "$task_dir/fixture" ]; then
         cp -R "$task_dir/fixture/." "$workdir/"
     fi

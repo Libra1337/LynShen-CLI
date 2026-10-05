@@ -1,7 +1,7 @@
 //! User-defined slash commands loaded from Markdown prompt files.
 //!
-//! Two sources, mirroring skills: `~/.jucode/commands/*.md` (always loaded —
-//! the profile dir is user-owned) and `<project>/.jucode/commands/*.md`
+//! Two sources, mirroring skills: `~/.lynshen/commands/*.md` (always loaded —
+//! the profile dir is user-owned) and `<project>/.lynshen/commands/*.md`
 //! (loaded only after the project is trusted, same gate as project skills).
 //! Invoking `/name args` injects the file body as the user prompt, with
 //! `$ARGUMENTS` replaced by the raw argument string.
@@ -20,8 +20,8 @@ pub struct CustomCommand {
     pub command: String,
     pub path: PathBuf,
     pub description: String,
-    /// True for project-local commands (`.jucode/commands`), false for user
-    /// commands (`~/.jucode/commands`).
+    /// True for project-local commands (`.lynshen/commands`), false for user
+    /// commands (`~/.lynshen/commands`).
     pub project_scoped: bool,
 }
 
@@ -36,7 +36,7 @@ pub fn discover_custom_commands(
     let mut commands = Vec::new();
     read_commands_dir(&profile_dir.join("commands"), false, &mut commands)?;
     if project_trusted {
-        read_commands_dir(&cwd.join(".jucode").join("commands"), true, &mut commands)?;
+        read_commands_dir(&cwd.join(".lynshen").join("commands"), true, &mut commands)?;
     }
     commands.sort_by(|left, right| {
         (left.project_scoped, &left.command).cmp(&(right.project_scoped, &right.command))
@@ -177,7 +177,7 @@ mod tests {
 
     fn temp_root(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
-            "jucode-custom-cmd-{tag}-{}",
+            "lynshen-custom-cmd-{tag}-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -191,14 +191,14 @@ mod tests {
         let profile = root.join("profile");
         let cwd = root.join("repo");
         fs::create_dir_all(profile.join("commands")).unwrap();
-        fs::create_dir_all(cwd.join(".jucode").join("commands")).unwrap();
+        fs::create_dir_all(cwd.join(".lynshen").join("commands")).unwrap();
         fs::write(
             profile.join("commands").join("Deploy Fast.md"),
             "---\ndescription: Ship it\n---\nDeploy the app.\n",
         )
         .unwrap();
         fs::write(
-            cwd.join(".jucode").join("commands").join("review.md"),
+            cwd.join(".lynshen").join("commands").join("review.md"),
             "# Review checklist\nDo a review.\n",
         )
         .unwrap();
@@ -220,9 +220,9 @@ mod tests {
         let root = temp_root("trust");
         let profile = root.join("profile");
         let cwd = root.join("repo");
-        fs::create_dir_all(cwd.join(".jucode").join("commands")).unwrap();
+        fs::create_dir_all(cwd.join(".lynshen").join("commands")).unwrap();
         fs::write(
-            cwd.join(".jucode").join("commands").join("evil.md"),
+            cwd.join(".lynshen").join("commands").join("evil.md"),
             "run something\n",
         )
         .unwrap();
@@ -243,10 +243,10 @@ mod tests {
         let profile = root.join("profile");
         let cwd = root.join("repo");
         fs::create_dir_all(profile.join("commands")).unwrap();
-        fs::create_dir_all(cwd.join(".jucode").join("commands")).unwrap();
+        fs::create_dir_all(cwd.join(".lynshen").join("commands")).unwrap();
         fs::write(profile.join("commands").join("go.md"), "user prompt\n").unwrap();
         fs::write(
-            cwd.join(".jucode").join("commands").join("go.md"),
+            cwd.join(".lynshen").join("commands").join("go.md"),
             "project prompt\n",
         )
         .unwrap();

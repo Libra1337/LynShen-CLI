@@ -477,7 +477,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = env::temp_dir().join(format!("jucode-hunks-test-{name}-{nanos}"));
+        let dir = env::temp_dir().join(format!("lynshen-hunks-test-{name}-{nanos}"));
         fs::create_dir_all(&dir).unwrap();
         dir
     }

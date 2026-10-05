@@ -1,7 +1,7 @@
-//! Web tools served by the JuCode gateway: `web_search` (POST /tools/v1/search)
+//! Web tools served by the LynShen gateway: `web_search` (POST /tools/v1/search)
 //! and, when `web_fetch_engine` names a gateway engine, `web_fetch`
 //! (POST /tools/v1/fetch). The `local` fetch engine stays in `web_fetch`.
-//! Calls authenticate with the JuCode login session and are billed to the
+//! Calls authenticate with the LynShen login session and are billed to the
 //! account like model calls.
 
 use serde_json::{json, Value};
@@ -25,7 +25,7 @@ pub struct WebTools {
     pub encrypt_secrets: bool,
     pub search_engine: String,
     pub fetch_engine: String,
-    /// A JuCode session exists; `web_search` is offered only then.
+    /// A LynShen session exists; `web_search` is offered only then.
     pub signed_in: bool,
 }
 
@@ -33,7 +33,7 @@ pub fn search_definition() -> Value {
     json!({
         "type": "function",
         "name": "web_search",
-        "description": "Search the web and return ranked results: title, url, a snippet of the relevant page text, and the published date when known. Use it for current information, or to find pages you do not have a URL for; then read the pages you need in full with web_fetch. Write the query the way you would type it into a search engine. Each call is billed to the user's JuCode account.",
+        "description": "Search the web and return ranked results: title, url, a snippet of the relevant page text, and the published date when known. Use it for current information, or to find pages you do not have a URL for; then read the pages you need in full with web_fetch. Write the query the way you would type it into a search engine. Each call is billed to the user's LynShen account.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -184,8 +184,8 @@ fn fetch_result(value: &Value, requested_url: &str, max_bytes: Option<u64>) -> V
 fn gateway_post(web: &WebTools, path: &str, body: Value) -> Result<Value, String> {
     let auth = crate::oauth::ensure_session(&web.api_url, web.encrypt_secrets)?;
     let token = auth
-        .jucode_access_token()
-        .ok_or("not logged in to JuCode. Run /login.")?;
+        .lynshen_access_token()
+        .ok_or("not logged in to LynShen. Run /login.")?;
     let url = format!("{}{}", web.api_url.trim_end_matches('/'), path);
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(CONNECT_TIMEOUT)
@@ -205,10 +205,10 @@ fn gateway_post(web: &WebTools, path: &str, body: Value) -> Result<Value, String
                 .pointer("/error/message")
                 .and_then(Value::as_str)
                 .unwrap_or("request failed");
-            Err(format!("JuCode gateway HTTP {code}: {message}"))
+            Err(format!("LynShen gateway HTTP {code}: {message}"))
         }
         Err(ureq::Error::Transport(transport)) => {
-            Err(format!("could not reach the JuCode gateway: {transport}"))
+            Err(format!("could not reach the LynShen gateway: {transport}"))
         }
     }
 }
@@ -258,7 +258,7 @@ mod tests {
     #[test]
     fn local_engine_and_missing_config_fetch_locally() {
         let local = WebTools {
-            api_url: "https://api.jucode.net".to_string(),
+            api_url: "https://api.lynshen.net".to_string(),
             encrypt_secrets: false,
             search_engine: "auto".to_string(),
             fetch_engine: "local".to_string(),

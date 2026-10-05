@@ -155,7 +155,7 @@ fn discover_skills_from(
         read_skills_dir(&dir, &mut skills)?;
     }
     if project_trusted {
-        read_skills_dir(&cwd.join(".jucode").join("skills"), &mut skills)?;
+        read_skills_dir(&cwd.join(".lynshen").join("skills"), &mut skills)?;
         // `.agents/skills/` is the cross-tool convention for project skills.
         read_skills_dir(&cwd.join(".agents").join("skills"), &mut skills)?;
     }
@@ -281,7 +281,7 @@ fn read_limited_utf8(path: &Path, max_bytes: usize) -> io::Result<(String, usize
     }
     let mut content = String::from_utf8_lossy(&bytes[..end]).to_string();
     if truncated {
-        content.push_str("\n\n[project instructions truncated by JuCode budget]\n");
+        content.push_str("\n\n[project instructions truncated by LynShen budget]\n");
     }
     Ok((content, end))
 }
@@ -393,7 +393,7 @@ mod tests {
             "Chat prompt",
             &PromptContext {
                 date: "2026-09-29".to_string(),
-                cwd: PathBuf::from("/home/u/.jucode/chats/c1"),
+                cwd: PathBuf::from("/home/u/.lynshen/chats/c1"),
                 tools: vec!["web_search", "web_fetch"],
                 edit_tools: crate::config::default_edit_tools(),
                 project_instructions: Vec::new(),
@@ -504,7 +504,7 @@ mod tests {
     #[test]
     fn discovers_project_instructions_from_root_to_cwd() {
         let root = std::env::temp_dir().join(format!(
-            "jucode-instruction-test-{}",
+            "lynshen-instruction-test-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -540,7 +540,7 @@ mod tests {
     #[test]
     fn discovers_frontmatter_skill_files() {
         let root = std::env::temp_dir().join(format!(
-            "jucode-skill-test-{}",
+            "lynshen-skill-test-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -567,7 +567,7 @@ mod tests {
     #[test]
     fn discovers_nested_skill_files() {
         let root = std::env::temp_dir().join(format!(
-            "jucode-nested-skill-test-{}",
+            "lynshen-nested-skill-test-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -597,7 +597,7 @@ mod tests {
     #[test]
     fn skill_commands_slugify_names() {
         let root = std::env::temp_dir().join(format!(
-            "jucode-skill-command-test-{}",
+            "lynshen-skill-command-test-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -623,7 +623,7 @@ mod tests {
     #[test]
     fn disabled_global_skills_are_hidden_but_trusted_project_skills_load() {
         let root = std::env::temp_dir().join(format!(
-            "jucode-skill-sources-test-{}",
+            "lynshen-skill-sources-test-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -634,7 +634,7 @@ mod tests {
         let global = profile.join("skills/global");
         let user_agents = root.join("home/.agents/skills");
         let user_agents_skill = user_agents.join("home-skill");
-        let project = cwd.join(".jucode/skills/project");
+        let project = cwd.join(".lynshen/skills/project");
         let agents = cwd.join(".agents/skills/agents-skill");
         fs::create_dir_all(&global).unwrap();
         fs::create_dir_all(&user_agents_skill).unwrap();

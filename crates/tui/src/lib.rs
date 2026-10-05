@@ -15,7 +15,7 @@ mod ui_builder;
 
 use git_bar::GitStatusTracker;
 use input::{paste_burst_render_delay, InputBuffer, PasteBurst, PasteCharDecision, PasteFlush};
-use jucode_agent_core::{AgentEvent, CommandView, TranscriptItem};
+use lynshen_agent_core::{AgentEvent, CommandView, TranscriptItem};
 use local_shell::{local_shell_command, LocalShellRunner};
 use picker::{PickerMode, PickerState, TreePromptAction};
 use ratatui::crossterm::{
@@ -238,7 +238,7 @@ fn default_commands() -> Vec<CommandCandidate> {
     .collect()
 }
 
-fn format_plan_summary(items: &[jucode_agent_core::PlanItem]) -> String {
+fn format_plan_summary(items: &[lynshen_agent_core::PlanItem]) -> String {
     if items.is_empty() {
         return "Plan cleared".to_string();
     }
@@ -254,7 +254,7 @@ fn format_plan_summary(items: &[jucode_agent_core::PlanItem]) -> String {
     lines.join("\n")
 }
 
-fn format_goal_summary(goal: Option<jucode_agent_core::GoalView>) -> String {
+fn format_goal_summary(goal: Option<lynshen_agent_core::GoalView>) -> String {
     let Some(goal) = goal else {
         return "Goal\nNo goal set.\nCommands: /goal <objective>".to_string();
     };

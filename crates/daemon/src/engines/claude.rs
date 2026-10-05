@@ -26,7 +26,7 @@
 //!   with `--dangerously-skip-permissions`, so switching into or out of it
 //!   restarts the engine on the same conversation.
 //!
-//! Translated into the jucode event dialect (`docs/serve-protocol.md`) plus
+//! Translated into the lynshen event dialect (`docs/serve-protocol.md`) plus
 //! the Desktop's extras (`assistant_uuid`, `rate_limit`, `resume_failed`,
 //! `model_label`, approval `questions`).
 
@@ -54,10 +54,10 @@ const IMAGE_CAP: u64 = 3_750_000;
 static GATEWAY_FILES: std::sync::Mutex<Vec<(String, std::path::PathBuf)>> =
     std::sync::Mutex::new(Vec::new());
 
-/// This session talks to the JuCode gateway through the daemon's local
+/// This session talks to the LynShen gateway through the daemon's local
 /// gateway (`base`, see crate::gateway): a settings file (owner-only) that
 /// overrides the endpoint and credential for this process alone. The
-/// credential is the local `key`, never the JuCode token; the file is named
+/// credential is the local `key`, never the LynShen token; the file is named
 /// by the session (`id`), not the key, since its path is in the engine's argv
 /// for anyone on the machine to read. An empty ANTHROPIC_API_KEY masks one
 /// the user's own settings set.
@@ -67,8 +67,8 @@ pub fn use_gateway(command: &mut Command, id: &str, base: &str, key: &str) -> Re
         "ANTHROPIC_AUTH_TOKEN": key,
         "ANTHROPIC_API_KEY": "",
     } });
-    let dir = home().join(".jucode").join("daemon");
-    // Older daemons wrote the JuCode token itself here.
+    let dir = home().join(".lynshen").join("daemon");
+    // Older daemons wrote the LynShen token itself here.
     let _ = std::fs::remove_file(dir.join("claude-gateway.json"));
     let mut name: String = id
         .chars()
@@ -205,7 +205,7 @@ pub fn tui(id: &str, options: &Options) -> Command {
     command
 }
 
-/// Client approval mode (jucode or Desktop names) → claude permission mode.
+/// Client approval mode (lynshen or Desktop names) → claude permission mode.
 pub fn to_claude_mode(mode: &str) -> &'static str {
     match mode {
         "plan" => "plan",
@@ -227,7 +227,7 @@ fn from_claude_mode(mode: &str) -> &'static str {
     }
 }
 
-/// Claude tool name → the jucode tool-card name.
+/// Claude tool name → the lynshen tool-card name.
 fn tool_name(name: &str) -> &str {
     match name {
         "Bash" => "bash",
@@ -677,7 +677,7 @@ impl Claude {
 
     fn control_request(&mut self, request: Value, tag: &str) -> String {
         self.request_seq += 1;
-        let id = format!("jucode-{}", self.request_seq);
+        let id = format!("lynshen-{}", self.request_seq);
         self.pending.insert(
             id.clone(),
             (text(&request["subtype"]).to_string(), tag.to_string()),
@@ -2630,12 +2630,12 @@ mod tests {
         assert!(boot[4].contains("mcp_status"));
         let ready = frame(
             &mut c,
-            json!({ "type": "control_response", "response": { "subtype": "success", "request_id": "jucode-1", "response": { "mode": "default" } } }),
+            json!({ "type": "control_response", "response": { "subtype": "success", "request_id": "lynshen-1", "response": { "mode": "default" } } }),
         );
         assert_eq!(types(&ready), ["approval_mode", "command_list", "status"]);
         let listed = frame(
             &mut c,
-            json!({ "type": "control_response", "response": { "subtype": "success", "request_id": "jucode-3", "response": { "commands": [
+            json!({ "type": "control_response", "response": { "subtype": "success", "request_id": "lynshen-3", "response": { "commands": [
                 { "name": "review", "description": "Review a diff (user)", "argumentHint": "" },
                 { "name": "compact", "description": "Free up context", "argumentHint": "<instructions>", "builtin": true },
                 { "name": "model", "description": "Set the AI model", "argumentHint": "<model>", "builtin": true }
@@ -3304,7 +3304,7 @@ mod tests {
 
     #[test]
     fn an_attached_image_goes_as_an_image_block() {
-        let dir = std::env::temp_dir().join(format!("jucode-image-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("lynshen-image-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let png = dir.join("shot.png");
         fs::write(&png, [0x89, b'P', b'N', b'G']).unwrap();

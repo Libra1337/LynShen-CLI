@@ -64,19 +64,19 @@ pub fn tui(id: &str, options: &Options) -> Command {
 }
 
 /// The provider a gateway session configures (see `use_gateway`).
-const GATEWAY_PROVIDER: &str = "jucode_gateway";
+const GATEWAY_PROVIDER: &str = "lynshen_gateway";
 
 /// The env var a gateway session reads its key from.
-const GATEWAY_KEY_ENV: &str = "JUCODE_GATEWAY_TOKEN";
+const GATEWAY_KEY_ENV: &str = "LYNSHEN_GATEWAY_TOKEN";
 
-/// This session talks to the JuCode gateway through the daemon's local
+/// This session talks to the LynShen gateway through the daemon's local
 /// gateway (`base`, see crate::gateway): config overrides for this process
-/// alone, with the local `key` (never the JuCode token) in its environment.
+/// alone, with the local `key` (never the LynShen token) in its environment.
 pub fn use_gateway(command: &mut Command, base: &str, key: &str) -> Result<(), String> {
     command
         .args(["-c", &format!("model_provider=\"{GATEWAY_PROVIDER}\""), "-c"])
         .arg(format!(
-            "model_providers.{GATEWAY_PROVIDER}={{name=\"JuCode\",base_url=\"{base}/v1\",env_key=\"{GATEWAY_KEY_ENV}\",wire_api=\"responses\"}}"
+            "model_providers.{GATEWAY_PROVIDER}={{name=\"LynShen\",base_url=\"{base}/v1\",env_key=\"{GATEWAY_KEY_ENV}\",wire_api=\"responses\"}}"
         ))
         .env(GATEWAY_KEY_ENV, key);
     Ok(())
@@ -130,7 +130,7 @@ fn mcp_servers(data: &Value) -> Value {
     json!({ "type": "mcp_servers", "servers": servers })
 }
 
-/// Client approval mode (jucode or Desktop names) → the Desktop engine mode
+/// Client approval mode (lynshen or Desktop names) → the Desktop engine mode
 /// Codex supports: `read-only`, `auto-edit` or `full-auto`.
 fn engine_mode(mode: &str) -> &'static str {
     match mode {
@@ -376,7 +376,7 @@ pub struct Codex {
     pending: HashMap<u64, (String, String)>,
     thread: Option<String>,
     resume: Option<String>,
-    /// Talks to the JuCode gateway: a resumed thread must too, whichever
+    /// Talks to the LynShen gateway: a resumed thread must too, whichever
     /// provider it was written with (`thread/resume` would use that one).
     gateway: bool,
     active_turn: Option<String>,
@@ -1671,7 +1671,7 @@ impl Adapter for Codex {
     fn start(&mut self) -> Vec<String> {
         vec![self.request(
             "initialize",
-            json!({ "clientInfo": { "name": "jucode-daemon", "title": "JuCode", "version": env!("CARGO_PKG_VERSION") }, "capabilities": { "experimentalApi": true } }),
+            json!({ "clientInfo": { "name": "lynshen-daemon", "title": "LynShen", "version": env!("CARGO_PKG_VERSION") }, "capabilities": { "experimentalApi": true } }),
             "",
         )]
     }
@@ -2509,19 +2509,19 @@ mod tests {
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
             .collect();
-        assert_eq!(args[1], "model_provider=\"jucode_gateway\"");
+        assert_eq!(args[1], "model_provider=\"lynshen_gateway\"");
         assert!(args[3].contains("base_url=\"http://127.0.0.1:7788/gw/v1\""));
         assert!(!args.concat().contains("tok\""));
         let env: Vec<_> = command.get_envs().collect();
         assert_eq!(
             env,
             [(
-                std::ffi::OsStr::new("JUCODE_GATEWAY_TOKEN"),
+                std::ffi::OsStr::new("LYNSHEN_GATEWAY_TOKEN"),
                 Some(std::ffi::OsStr::new("tok"))
             )]
         );
         assert_eq!(
-            Options::from_json(&json!({ "jucode_gateway": true })).gateway,
+            Options::from_json(&json!({ "lynshen_gateway": true })).gateway,
             Some(true)
         );
         assert_eq!(Options::from_json(&json!({})).gateway, None);

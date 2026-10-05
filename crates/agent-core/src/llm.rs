@@ -26,11 +26,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// Wire protocol for a model. The JuCode gateway serves each model in its own
+/// Wire protocol for a model. The LynShen gateway serves each model in its own
 /// dialect (Claude over Anthropic Messages, the rest over Responses), so the
 /// config-wide `protocol` applies to other providers only.
 fn protocol_for(provider: &str, protocol: &str, model: &str) -> Protocol {
-    if provider == "jucode" {
+    if provider == "lynshen" {
         return Protocol::resolve("", model);
     }
     llm_provider_kit::omp::catalog()
@@ -166,7 +166,7 @@ pub struct OpenAiClientConfig<'a> {
     /// as the main model). Pass None to disable classification.
     pub safety_model: Option<String>,
     pub safety_reasoning_effort: String,
-    /// Extra request headers per model name (the JuCode group choice).
+    /// Extra request headers per model name (the LynShen group choice).
     pub model_headers: HashMap<String, Vec<(String, String)>>,
     /// Canonical edit-tool names to expose (see `Config::edit_tools`).
     pub edit_tools: Vec<String>,
@@ -1279,7 +1279,7 @@ impl OpenAiClient {
             allow_subagents: child_depth < MAX_SUBAGENT_DEPTH,
             max_tool_calls,
             deadline: timeout.map(|timeout| started + timeout),
-            // Each model speaks its own wire protocol (on the JuCode gateway
+            // Each model speaks its own wire protocol (on the LynShen gateway
             // Claude uses Anthropic Messages, the rest Responses).
             provider_kind: protocol,
             goal_tool_tx: None,
@@ -1490,7 +1490,7 @@ impl OpenAiClient {
     fn disabled_tool_error(&self, name: &str) -> Option<String> {
         if name == "web_search" && !self.tool_state.web_search_enabled() {
             return Some(
-                "web_search runs through the JuCode gateway and needs a JuCode login. Run /login."
+                "web_search runs through the LynShen gateway and needs a LynShen login. Run /login."
                     .to_string(),
             );
         }
@@ -1796,7 +1796,7 @@ fn subagent_definitions(
     let mut spawn = json!({
             "type": "function",
             "name": "spawn_agent",
-            "description": format!("Start a background subagent for an independent task. By default it starts with a fresh context (only your message) and works in your cwd, so its file writes land directly in your tree; give it a self-contained task. Set isolation to \"worktree\" to run it in a per-agent workspace under .jucode/agents/ (a detached git worktree inside a repository, otherwise a fresh directory) whose changes you harvest via workdir and files_changed — use this when several agents write in parallel. The agent inherits tools, system prompt, and skills and returns immediately. Keep at most {MAX_LIVE_SUBAGENTS} live agents; nesting is capped at depth {MAX_SUBAGENT_DEPTH}.{}", subagent_model_guide(own_model, own_efforts, models)),
+            "description": format!("Start a background subagent for an independent task. By default it starts with a fresh context (only your message) and works in your cwd, so its file writes land directly in your tree; give it a self-contained task. Set isolation to \"worktree\" to run it in a per-agent workspace under .lynshen/agents/ (a detached git worktree inside a repository, otherwise a fresh directory) whose changes you harvest via workdir and files_changed — use this when several agents write in parallel. The agent inherits tools, system prompt, and skills and returns immediately. Keep at most {MAX_LIVE_SUBAGENTS} live agents; nesting is capped at depth {MAX_SUBAGENT_DEPTH}.{}", subagent_model_guide(own_model, own_efforts, models)),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -2158,7 +2158,7 @@ fn subagent_system_prompt(
         None => " You share the parent's working directory; other agents may be editing it too, so change only the files your task needs.".to_string(),
     };
     format!(
-        "{parent_system}\n\n<subagent_context>\nYou are JuCode subagent {path}. Work only on the task delegated by the parent. Keep work bounded: inspect only what is needed, avoid broad refactors, and stop when you have enough evidence.{workspace} Return a concise self-contained answer with Summary, Evidence, Files/commands checked, and Risks or unknowns. Do not ask follow-up questions unless the task is impossible without missing information.\n</subagent_context>"
+        "{parent_system}\n\n<subagent_context>\nYou are LynShen subagent {path}. Work only on the task delegated by the parent. Keep work bounded: inspect only what is needed, avoid broad refactors, and stop when you have enough evidence.{workspace} Return a concise self-contained answer with Summary, Evidence, Files/commands checked, and Risks or unknowns. Do not ask follow-up questions unless the task is impossible without missing information.\n</subagent_context>"
     )
 }
 
@@ -2367,7 +2367,7 @@ fn inject_input_item(
 
 /// Retries after the first attempt, overridable for debugging.
 fn retry_attempts_from_env(configured: usize) -> usize {
-    env::var("JUCODE_RETRY_ATTEMPTS")
+    env::var("LYNSHEN_RETRY_ATTEMPTS")
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
         .unwrap_or(configured)
@@ -2401,7 +2401,7 @@ fn map_transport_event(event: TransportEvent) -> Result<StreamEvent, String> {
 }
 
 fn cache_debug_enabled() -> bool {
-    env::var("JUCODE_CACHE_DEBUG")
+    env::var("LYNSHEN_CACHE_DEBUG")
         .ok()
         .is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
 }
@@ -2564,7 +2564,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        env::temp_dir().join(format!("jucode-llm-test-{name}-{nanos}"))
+        env::temp_dir().join(format!("lynshen-llm-test-{name}-{nanos}"))
     }
 
     #[test]
@@ -2612,10 +2612,10 @@ mod tests {
             system_prompt: "system".to_string(),
             prompt_cache_key: "cache-key".to_string(),
             mcp: McpManager::default(),
-            base_url: "https://api.jucode.net/v1".to_string(),
+            base_url: "https://api.lynshen.net/v1".to_string(),
             max_output_tokens: 2048,
             api_key: Some("test-key"),
-            api_key_env: "JUCODE_TEST_API_KEY",
+            api_key_env: "LYNSHEN_TEST_API_KEY",
             retry_attempts: 1,
             connect_timeout: Duration::from_secs(1),
             read_timeout: Duration::from_secs(1),
@@ -2653,7 +2653,7 @@ mod tests {
     /// unconfigured entry is dropped at build.
     fn subagent_model_client() -> OpenAiClient {
         let mut config = test_client_config();
-        config.provider = "jucode".to_string();
+        config.provider = "lynshen".to_string();
         config.model = "gpt-main".to_string();
         config.models = vec![
             model("gpt-main", &["low", "medium", "high"], 8000),
@@ -2786,7 +2786,7 @@ mod tests {
 
         // An enabled edit tool actually runs.
         let dir =
-            std::env::temp_dir().join(format!("jucode-llm-edit-tools-{}", std::process::id()));
+            std::env::temp_dir().join(format!("lynshen-llm-edit-tools-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let request = ToolCallRequest {
             call_id: "call_write".to_string(),
@@ -3022,7 +3022,7 @@ mod tests {
     #[test]
     fn edit_tool_approval_request_carries_hunks_and_returns_the_subset() {
         let dir = std::env::temp_dir().join(format!(
-            "jucode-llm-approval-hunks-{}",
+            "lynshen-llm-approval-hunks-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()

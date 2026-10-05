@@ -1,7 +1,7 @@
 //! `web_fetch` tool: GET a single http(s) URL and return readable text.
 //! HTML is reduced with a small hand-written extractor; the response body is
 //! capped at 2 MB and the generic model-output projection in tools.rs handles
-//! truncation plus saving the full result under .jucode/truncated-results.
+//! truncation plus saving the full result under .lynshen/truncated-results.
 
 use serde_json::{json, Value};
 use std::io::Read;

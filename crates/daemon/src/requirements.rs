@@ -5,7 +5,7 @@
 //! picks up where the last one stopped.
 //!
 //! Screenshots are uploads (see `uploads`) moved into
-//! `~/.jucode/uploads/requirements/<id>/` when the requirement is noted.
+//! `~/.lynshen/uploads/requirements/<id>/` when the requirement is noted.
 //!
 //! Its state is the user's: idea, open, done or parked. While it is open,
 //! what it shows follows its sessions: one waits for an approval, the latest
@@ -547,15 +547,15 @@ fn rewrite_progress(hub: &Arc<Hub>, id: &str, session: &str) {
          Latest session excerpt:\n{excerpt}",
         text(&r["text"])
     );
-    let progress = match jucode_agent_core::title_completion(PROGRESS_SYSTEM, &request) {
+    let progress = match lynshen_agent_core::title_completion(PROGRESS_SYSTEM, &request) {
         Ok(reply) => parse_progress(&reply),
         Err(error) => {
-            jucode_agent_core::log_warn!("daemon", "requirement progress failed", error = error);
+            lynshen_agent_core::log_warn!("daemon", "requirement progress failed", error = error);
             return;
         }
     };
     let Some(progress) = progress else {
-        jucode_agent_core::log_warn!(
+        lynshen_agent_core::log_warn!(
             "daemon",
             "requirement progress unreadable",
             requirement = id
@@ -600,10 +600,10 @@ fn retitle(hub: &Arc<Hub>, id: &str, words: &str) {
     let id = id.to_string();
     let request = format!("Project: \nCurrent title: (none)\n\nFirst request:\n{words}\n");
     thread::spawn(move || {
-        let title = match jucode_agent_core::title_completion(titles::SYSTEM, &request) {
+        let title = match lynshen_agent_core::title_completion(titles::SYSTEM, &request) {
             Ok(reply) => titles::clean(&reply),
             Err(error) => {
-                jucode_agent_core::log_warn!("daemon", "requirement title failed", error = error);
+                lynshen_agent_core::log_warn!("daemon", "requirement title failed", error = error);
                 None
             }
         };
@@ -885,7 +885,7 @@ mod tests {
 
     #[test]
     fn screenshots_move_in_numbered() {
-        let dir = std::env::temp_dir().join(format!("jucode-req-img-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("lynshen-req-img-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let upload = dir.join("u-1-shot.JPG");

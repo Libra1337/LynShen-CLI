@@ -1,6 +1,6 @@
 # MCP Support
 
-JuCode implements a standard [Model Context Protocol](https://modelcontextprotocol.io) client
+LynShen implements a standard [Model Context Protocol](https://modelcontextprotocol.io) client
 (protocol version `2025-06-18`; an older version offered back by a server is accepted and
 recorded). The implementation is dependency-light by design: hand-rolled JSON-RPC 2.0 over
 `serde_json`, blocking I/O with `std::process` / `std::thread` / `mpsc` for stdio, and the
@@ -8,7 +8,7 @@ existing blocking `ureq` agent for HTTP. No tokio, no SDK crates.
 
 ## Configuration
 
-Servers are declared in the `mcp_servers` array of `~/.jucode/config.json`:
+Servers are declared in the `mcp_servers` array of `~/.lynshen/config.json`:
 
 ```json
 {
@@ -27,7 +27,7 @@ Servers are declared in the `mcp_servers` array of `~/.jucode/config.json`:
       "transport": "http",
       "url": "https://example.com/mcp",
       "oauth": {
-        "client_id": "jucode-cli",
+        "client_id": "lynshen-cli",
         "token_url": "https://example.com/oauth/token",
         "scope": "mcp"
       },
@@ -53,7 +53,7 @@ Invalid entries are skipped with a warning in the log; valid entries round-trip 
 ### HTTP bearer and OAuth tokens
 
 For a static token, set `headers.Authorization` to `Bearer <token>`. For a refreshable token, set
-the `oauth` metadata and store the initial token bundle in `~/.jucode/auth.json`:
+the `oauth` metadata and store the initial token bundle in `~/.lynshen/auth.json`:
 
 ```json
 {
@@ -67,11 +67,11 @@ the `oauth` metadata and store the initial token bundle in `~/.jucode/auth.json`
 }
 ```
 
-`access_expires_at` is Unix seconds; use `0` when expiry is unknown. JuCode sends the access
+`access_expires_at` is Unix seconds; use `0` when expiry is unknown. LynShen sends the access
 token as a bearer token, refreshes it with the standard `refresh_token` form grant before
 expiry or after HTTP 401, handles refresh-token rotation, and atomically persists the new
 bundle in auth.json. This is a non-interactive v1 flow: obtain the initial token by the
-provider's documented process. JuCode does not invent a provider-specific browser dance.
+provider's documented process. LynShen does not invent a provider-specific browser dance.
 To keep a non-refreshing bearer in auth.json instead of config.json, use `"oauth": {}`, omit
 the refresh token, and set `access_expires_at` to `0`.
 

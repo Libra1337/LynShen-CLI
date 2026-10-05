@@ -11,7 +11,7 @@ const ENVELOPE_PREFIX: &str = "jcenc1:";
 const KEY_FILE: &str = "secret.key";
 const KEY_LEN: usize = 32;
 const NONCE_LEN: usize = 12;
-const APP_IDENTIFIER: &str = "com.jucode.desktop";
+const APP_IDENTIFIER: &str = "com.lynshen.desktop";
 
 pub(crate) type SecretKey = [u8; KEY_LEN];
 
@@ -161,9 +161,9 @@ fn for_each_secret(auth: &mut Value, mut visit: impl FnMut(&mut String)) {
             }
         }
     }
-    if let Some(jucode) = auth.get_mut("jucode").and_then(Value::as_object_mut) {
+    if let Some(lynshen) = auth.get_mut("lynshen").and_then(Value::as_object_mut) {
         for field in ["access_token", "refresh_token"] {
-            if let Some(Value::String(secret)) = jucode.get_mut(field) {
+            if let Some(Value::String(secret)) = lynshen.get_mut(field) {
                 visit(secret);
             }
         }
@@ -203,14 +203,14 @@ fn read_key(path: &Path) -> io::Result<Option<SecretKey>> {
 
 fn key_candidates() -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    if let Some(path) = env::var_os("JUCODE_SECRET_KEY_PATH")
+    if let Some(path) = env::var_os("LYNSHEN_SECRET_KEY_PATH")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
     {
         push_unique(&mut paths, path);
     }
     if let Some(home) = home_dir() {
-        push_unique(&mut paths, home.join(".jucode").join(KEY_FILE));
+        push_unique(&mut paths, home.join(".lynshen").join(KEY_FILE));
         if cfg!(target_os = "macos") {
             push_unique(
                 &mut paths,
@@ -270,7 +270,7 @@ mod tests {
         let key = [0x17; KEY_LEN];
         let original = json!({
             "providers": { "openai": "sk-openai", "empty": "" },
-            "jucode": {
+            "lynshen": {
                 "access_token": "access",
                 "refresh_token": "refresh",
                 "access_expires_at": 123
@@ -283,7 +283,7 @@ mod tests {
             .unwrap()
             .starts_with(ENVELOPE_PREFIX));
         assert_eq!(auth["providers"]["empty"], "");
-        assert_eq!(auth["jucode"]["access_expires_at"], 123);
+        assert_eq!(auth["lynshen"]["access_expires_at"], 123);
 
         reveal_with_key(&mut auth, &key).unwrap();
         assert_eq!(auth, original);

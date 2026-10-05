@@ -4,8 +4,8 @@
 //! client's connection, so through the relay they stay end to end encrypted
 //! and other frames keep flowing between chunks; the relay stores nothing.
 //!
-//! A file lands in `~/.jucode/uploads/<date>/<upload id>-<name>` (outside
-//! the daemon's state directory, which the jucode sandbox does not let tools
+//! A file lands in `~/.lynshen/uploads/<date>/<upload id>-<name>` (outside
+//! the daemon's state directory, which the lynshen sandbox does not let tools
 //! read) and is written as `<path>.part` until its last chunk. Leftover parts
 //! and files older than `KEEP_DAYS` are removed when the daemon starts.
 
@@ -40,9 +40,9 @@ pub struct Uploads {
 }
 
 impl Uploads {
-    /// `jucode_dir`: `~/.jucode` (the parent of the daemon's state).
-    pub fn load(jucode_dir: &Path) -> Self {
-        let dir = jucode_dir.join("uploads");
+    /// `lynshen_dir`: `~/.lynshen` (the parent of the daemon's state).
+    pub fn load(lynshen_dir: &Path) -> Self {
+        let dir = lynshen_dir.join("uploads");
         prune(&dir, Duration::from_secs(KEEP_DAYS * 24 * 60 * 60));
         Self {
             dir,
@@ -200,7 +200,7 @@ mod tests {
 
     fn temp(label: &str) -> PathBuf {
         let dir =
-            std::env::temp_dir().join(format!("jucode-uploads-{label}-{}", std::process::id()));
+            std::env::temp_dir().join(format!("lynshen-uploads-{label}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         dir
     }

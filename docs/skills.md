@@ -1,19 +1,19 @@
 # Skills
 
-JuCode loads skills from these sources:
+LynShen loads skills from these sources:
 
-1. installed user skills under `~/.jucode/skills`;
+1. installed user skills under `~/.lynshen/skills`;
 2. user-level skills under `~/.agents/skills` (the cross-tool convention directory);
-3. project skills under `<project>/.jucode/skills` and `<project>/.agents/skills`, only after the project is trusted;
-4. the JuCode marketplace returned by `/v1/skills/marketplace`;
-5. one optional extra GitHub source configured in `~/.jucode/config.json`.
+3. project skills under `<project>/.lynshen/skills` and `<project>/.agents/skills`, only after the project is trusted;
+4. the LynShen marketplace returned by `/v1/skills/marketplace`;
+5. one optional extra GitHub source configured in `~/.lynshen/config.json`.
 
 Each skill is a directory containing `SKILL.md`. Frontmatter `name` and `description` fields
 are used for discovery. A skill named `Code Review` is available as `/code-review`; text after
 the slash command is passed to the skill as the user request. `/pin <skill>` keeps a skill's
 instructions in the current session context.
 
-Skill files usually live outside the workspace (`~/.jucode/skills`, `~/.agents/skills`), so the
+Skill files usually live outside the workspace (`~/.lynshen/skills`, `~/.agents/skills`), so the
 read-only file tools (`read`, `ls`, `outline`, `ripgrep`) may read under each discovered skill's
 directory in addition to the workspace. That lets the model open `SKILL.md` and follow relative
 references inside the skill. Mutating tools stay confined to the workspace, and other outside
@@ -55,7 +55,7 @@ Set `extra_skills_source` to the built-in name `anthropic` or to an HTTPS GitHub
 The built-in source points to <https://github.com/anthropics/skills>. Its vendored index,
 `crates/agent-core/src/anthropic-skills.json`, carries each skill's name, description, tags and
 license and is pinned to a reviewed Git commit, so listing works without a GitHub request. A custom
-repository URL is expected to contain skills at `skills/<slug>/`; JuCode reads its directory
+repository URL is expected to contain skills at `skills/<slug>/`; LynShen reads its directory
 through the public GitHub API and installs from the default branch. `/skills list` groups available
 skills by source.
 
@@ -77,10 +77,10 @@ classification and the upstream changes since the previous commit, then run the 
 
 ## Desktop marketplace
 
-JuCode Desktop shows the JuCode marketplace and the Anthropic index in one catalog through the
+LynShen Desktop shows the LynShen marketplace and the Anthropic index in one catalog through the
 daemon's `skills_catalog` and `skill_install` ops (see `docs/daemon-protocol.md`), which use the
 same install code as `/skills`. The session's engine picks the directory: Claude Code sessions
-install into `~/.claude/skills`, all others into `~/.jucode/skills`. A marketplace failure only
+install into `~/.claude/skills`, all others into `~/.lynshen/skills`. A marketplace failure only
 adds a warning; the Anthropic catalog stays installable.
 
 Desktop lists the source-available Anthropic document skills the same way: shown with their

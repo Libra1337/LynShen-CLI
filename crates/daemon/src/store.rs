@@ -1,11 +1,11 @@
-//! Append-only state under `~/.jucode/daemon/`. The daemon is the only
+//! Append-only state under `~/.lynshen/daemon/`. The daemon is the only
 //! writer (`Store::open` holds a lock on the directory), so each log is read
 //! from disk once and then kept in memory alongside its appends; every read
 //! folds the whole log. Opening compacts the logs that only ever grow: the
 //! session log down to one line per fact, and decided actions and finished
 //! timers out of theirs.
 
-use jucode_agent_core::actions::DeferredAction;
+use lynshen_agent_core::actions::DeferredAction;
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -57,11 +57,11 @@ pub struct SessionRecord {
     pub archived: bool,
     /// Removed from session lists (its conversation stays on disk).
     pub hidden: bool,
-    /// The engine running it; None: jucode.
+    /// The engine running it; None: lynshen.
     pub engine: Option<String>,
-    /// Claude / Codex: it last ran through the JuCode gateway.
+    /// Claude / Codex: it last ran through the LynShen gateway.
     pub gateway: bool,
-    /// The JuCode group its gateway requests route to (None: automatic).
+    /// The LynShen group its gateway requests route to (None: automatic).
     pub group: Option<String>,
 }
 
@@ -265,11 +265,11 @@ impl Store {
     }
 
     /// Records which computer this state belongs to. State copied from
-    /// another computer (see `jucode_agent_core::machine`) would answer to
+    /// another computer (see `lynshen_agent_core::machine`) would answer to
     /// that computer's token and paired devices: here it gets a new token
     /// and its devices are unpaired. Returns true when that happened.
     pub fn claim_machine(&self) -> io::Result<bool> {
-        let Some(current) = jucode_agent_core::machine::machine_id() else {
+        let Some(current) = lynshen_agent_core::machine::machine_id() else {
             return Ok(false);
         };
         let path = self.dir.join(MACHINE);
@@ -316,7 +316,7 @@ impl Store {
         self.record_engine_session(id, cwd, agent, None, false)
     }
 
-    /// Like `record_session`, for a session run by `engine` (None: jucode).
+    /// Like `record_session`, for a session run by `engine` (None: lynshen).
     pub fn record_engine_session(
         &self,
         id: &str,
@@ -954,7 +954,7 @@ mod tests {
 
     fn store(label: &str) -> Store {
         let dir = std::env::temp_dir().join(format!(
-            "jucode-daemon-store-{label}-{}",
+            "lynshen-daemon-store-{label}-{}",
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&dir);
@@ -981,7 +981,7 @@ mod tests {
     #[test]
     fn a_line_torn_by_a_crash_does_not_take_the_next_record_with_it() {
         let dir =
-            std::env::temp_dir().join(format!("jucode-daemon-store-torn-{}", std::process::id()));
+            std::env::temp_dir().join(format!("lynshen-daemon-store-torn-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         fs::write(
@@ -995,7 +995,7 @@ mod tests {
         assert_eq!(ids, ["a", "b"]);
         drop(store);
         let reopened = Store::open(
-            std::env::temp_dir().join(format!("jucode-daemon-store-torn-{}", std::process::id())),
+            std::env::temp_dir().join(format!("lynshen-daemon-store-torn-{}", std::process::id())),
         )
         .unwrap();
         let ids: Vec<String> = reopened.sessions().into_iter().map(|s| s.id).collect();
@@ -1305,7 +1305,7 @@ mod tests {
     #[test]
     fn state_copied_from_another_computer_gets_a_new_token_and_no_devices() {
         let store = store("machine");
-        let Some(current) = jucode_agent_core::machine::machine_id() else {
+        let Some(current) = lynshen_agent_core::machine::machine_id() else {
             return;
         };
         let token = store.token().unwrap();

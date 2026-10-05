@@ -1,6 +1,6 @@
 //! A Noise responder for interop tests (`docs/relay-protocol.md` §6).
 //!
-//! `cargo run -p jucode-daemon --example noise_peer -- <static private key hex>`
+//! `cargo run -p lynshen-daemon --example noise_peer -- <static private key hex>`
 //!
 //! Reads Noise messages as hex lines on stdin and writes replies as hex
 //! lines on stdout. Line 1 is msg 1: its payload goes to stderr as
@@ -8,7 +8,7 @@
 //! Every later line is a transport message; each complete frame (after chunk
 //! reassembly) is echoed back, sealed and chunked the same way.
 
-use jucode_daemon::noise;
+use lynshen_daemon::noise;
 use std::io::{self, BufRead, Write};
 
 fn main() -> Result<(), String> {

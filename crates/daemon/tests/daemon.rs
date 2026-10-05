@@ -5,7 +5,7 @@
 mod fake_model;
 
 use fake_model::{setup, temp_dir};
-use jucode_daemon::Store;
+use lynshen_daemon::Store;
 use serde_json::{json, Value};
 use std::{
     fs,
@@ -41,9 +41,9 @@ fn start_daemon_with(state: PathBuf, agents: PathBuf, relay: Option<String>) -> 
     let address = listener.local_addr().unwrap().to_string();
     let store = Store::open(state.clone()).unwrap();
     let token = store.token().unwrap();
-    let agent_store = jucode_daemon::Agents::open(agents.clone()).unwrap();
+    let agent_store = lynshen_daemon::Agents::open(agents.clone()).unwrap();
     let web = state.parent().map(|root| root.join("web"));
-    thread::spawn(move || jucode_daemon::serve(listener, store, agent_store, web, "test", relay));
+    thread::spawn(move || lynshen_daemon::serve(listener, store, agent_store, web, "test", relay));
     Daemon {
         address,
         token,
@@ -666,7 +666,7 @@ fn a_timer_due_while_the_daemon_was_down_fires_on_start() {
     let _guard = setup();
     // An agent and a timer written before this daemon starts, already due.
     let root = temp_dir("daemon-down");
-    let agents = jucode_daemon::Agents::open(root.join("agents")).unwrap();
+    let agents = lynshen_daemon::Agents::open(root.join("agents")).unwrap();
     agents
         .create(
             "sleeper",
@@ -696,7 +696,7 @@ fn a_timer_due_while_the_daemon_was_down_fires_on_start() {
 fn at_most_four_runs_are_in_progress_at_once() {
     let _guard = setup();
     let root = temp_dir("daemon-slots");
-    let agents = jucode_daemon::Agents::open(root.join("agents")).unwrap();
+    let agents = lynshen_daemon::Agents::open(root.join("agents")).unwrap();
     let ids = ["slot-a", "slot-b", "slot-c", "slot-d", "slot-e"];
     for id in ids {
         agents
@@ -1015,7 +1015,7 @@ fn a_schedule_runs_now_into_a_new_session_or_the_last_one() {
 fn a_schedule_due_while_the_daemon_was_down_fires_once_on_start() {
     let _guard = setup();
     let root = temp_dir("schedule-down");
-    let agents = jucode_daemon::Agents::open(root.join("agents")).unwrap();
+    let agents = lynshen_daemon::Agents::open(root.join("agents")).unwrap();
     agents
         .create(
             "nightly",
@@ -1371,7 +1371,7 @@ fn a_chat_session_runs_in_the_chats_directory_with_the_chat_prompt() {
         .clone();
     assert_eq!(entry["chat"], true);
     let cwd = PathBuf::from(entry["cwd"].as_str().unwrap());
-    assert!(cwd.is_dir() && cwd.ends_with(".jucode/chats"));
+    assert!(cwd.is_dir() && cwd.ends_with(".lynshen/chats"));
 
     client.send(json!({ "op": "watch", "session": session }));
     client.send(json!({ "op": "user_message", "session": session, "content": "SYSTEM" }));
@@ -1382,7 +1382,7 @@ fn a_chat_session_runs_in_the_chats_directory_with_the_chat_prompt() {
         .filter_map(|frame| frame["delta"].as_str().or(frame["text"].as_str()))
         .collect();
     assert!(
-        reply.contains(jucode_agent_core::chat::CHAT_TOOL_GUIDANCE),
+        reply.contains(lynshen_agent_core::chat::CHAT_TOOL_GUIDANCE),
         "{reply}"
     );
 }
@@ -1439,8 +1439,8 @@ impl FakeRelay {
         client_key: &[u8],
         host_key: &[u8],
         hello: Value,
-    ) -> (Value, jucode_daemon::noise::Transport) {
-        use jucode_daemon::noise;
+    ) -> (Value, lynshen_daemon::noise::Transport) {
+        use lynshen_daemon::noise;
         self.send(1, stream, &[]);
         let mut initiator = noise::initiator(client_key, host_key).unwrap();
         let mut buffer = vec![0u8; noise::MAX_MESSAGE];
@@ -1530,7 +1530,7 @@ fn a_relay_client_pairs_gets_hello_and_is_dropped_on_revoke() {
     VerifyingKey::from_bytes(&public)
         .unwrap()
         .verify(
-            &[b"jucode-relay-v1:".as_slice(), &nonce].concat(),
+            &[b"lynshen-relay-v1:".as_slice(), &nonce].concat(),
             &Signature::from_bytes(&signature),
         )
         .unwrap();
@@ -1548,7 +1548,7 @@ fn a_relay_client_pairs_gets_hello_and_is_dropped_on_revoke() {
     let mut relay = FakeRelay { host };
 
     // A new phone pairs with the code and gets the usual greeting.
-    let (phone_key, _) = jucode_daemon::noise::generate_keypair().unwrap();
+    let (phone_key, _) = lynshen_daemon::noise::generate_keypair().unwrap();
     let (reply, mut phone) = relay.connect(
         1,
         &phone_key,
@@ -1588,7 +1588,7 @@ fn a_relay_client_pairs_gets_hello_and_is_dropped_on_revoke() {
     }
 
     // An unknown key without a code is refused and closed.
-    let (stranger_key, _) = jucode_daemon::noise::generate_keypair().unwrap();
+    let (stranger_key, _) = lynshen_daemon::noise::generate_keypair().unwrap();
     let (reply, _) = relay.connect(3, &stranger_key, &host_key, json!({ "name": "x" }));
     assert_eq!(reply["ok"], false);
     assert_eq!(relay.next_on(3), (3, Vec::new()));
@@ -1963,12 +1963,12 @@ fn a_claude_conversation_moves_to_its_tui_and_back() {
 }
 
 #[test]
-fn a_jucode_conversation_moves_to_its_tui_and_back() {
+fn a_lynshen_conversation_moves_to_its_tui_and_back() {
     let _guard = setup();
     let daemon = start_daemon();
-    let dir = temp_dir("daemon-jucode-tui");
+    let dir = temp_dir("daemon-lynshen-tui");
     fs::create_dir_all(&dir).unwrap();
-    // The jucode TUI stands in as a script echoing what it is typed.
+    // The lynshen TUI stands in as a script echoing what it is typed.
     let script = dir.join("tui.sh");
     fs::write(&script, "#!/bin/sh\necho TUI\nwhile read line; do echo \"got: $line\"; [ \"$line\" = exit ] && exit 0; done\n").unwrap();
     std::process::Command::new("chmod")
@@ -1976,7 +1976,7 @@ fn a_jucode_conversation_moves_to_its_tui_and_back() {
         .arg(&script)
         .status()
         .unwrap();
-    std::env::set_var("JUCODE_BIN", &script);
+    std::env::set_var("LYNSHEN_BIN", &script);
     let mut desktop = Client::connect(&daemon);
     let session = desktop.create_session(&dir);
     desktop.send(json!({ "op": "watch", "session": session }));
@@ -1984,7 +1984,7 @@ fn a_jucode_conversation_moves_to_its_tui_and_back() {
         &mut desktop,
         json!({ "op": "session_tui", "session": session }),
     );
-    std::env::remove_var("JUCODE_BIN");
+    std::env::remove_var("LYNSHEN_BIN");
     let term = opened["term"]
         .as_str()
         .unwrap_or_else(|| panic!("{opened}"))
@@ -2277,7 +2277,7 @@ fn the_desktop_saves_mcp_servers_for_every_session_without_one() {
         std::env::var_os("HOME")
             .map(PathBuf::from)
             .unwrap()
-            .join(".jucode/config.json"),
+            .join(".lynshen/config.json"),
     )
     .unwrap();
     assert!(config.contains("\"probe\""), "{config}");
@@ -2379,9 +2379,9 @@ fn only_the_desktop_starts_acp_agents_which_run_like_any_session() {
     );
 }
 
-/// A one-route HTTP server standing in for the JuCode API: every request
+/// A one-route HTTP server standing in for the LynShen API: every request
 /// gets `body` as JSON.
-fn fake_jucode_api(body: Value) -> String {
+fn fake_lynshen_api(body: Value) -> String {
     use std::io::{BufRead, BufReader, Write};
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
@@ -2404,10 +2404,10 @@ fn fake_jucode_api(body: Value) -> String {
     format!("http://{address}")
 }
 
-fn set_jucode_api_url(url: &str) {
-    let path = PathBuf::from(std::env::var_os("HOME").unwrap()).join(".jucode/config.json");
+fn set_lynshen_api_url(url: &str) {
+    let path = PathBuf::from(std::env::var_os("HOME").unwrap()).join(".lynshen/config.json");
     let mut config: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-    config["jucode_api_url"] = json!(url);
+    config["lynshen_api_url"] = json!(url);
     fs::write(&path, config.to_string()).unwrap();
 }
 
@@ -2415,7 +2415,7 @@ fn set_jucode_api_url(url: &str) {
 fn the_desktop_lists_and_installs_skills_into_the_engines_directory() {
     let _guard = setup();
     let home = PathBuf::from(std::env::var_os("HOME").unwrap());
-    set_jucode_api_url(&fake_jucode_api(json!({
+    set_lynshen_api_url(&fake_lynshen_api(json!({
         "skills": [{
             "id": "review",
             "name": "Review",
@@ -2439,13 +2439,13 @@ fn the_desktop_lists_and_installs_skills_into_the_engines_directory() {
 
     let catalog = request(
         &mut desktop,
-        json!({ "op": "skills_catalog", "backend": "jucode" }),
+        json!({ "op": "skills_catalog", "backend": "lynshen" }),
     );
     assert_eq!(catalog["type"], "skills_catalog", "{catalog}");
     assert_eq!(catalog["warnings"], json!([]));
-    let jucode_dir = home.join(".jucode/skills");
-    assert_eq!(catalog["installDir"], json!(jucode_dir));
-    let review = entry(&catalog, "jucode", "review");
+    let lynshen_dir = home.join(".lynshen/skills");
+    assert_eq!(catalog["installDir"], json!(lynshen_dir));
+    let review = entry(&catalog, "lynshen", "review");
     assert_eq!(
         (&review["isDefault"], &review["installed"], &review["tags"]),
         (&json!(true), &json!(false), &json!(["code"]))
@@ -2464,18 +2464,18 @@ fn the_desktop_lists_and_installs_skills_into_the_engines_directory() {
 
     let installed = request(
         &mut desktop,
-        json!({ "op": "skill_install", "source": "jucode", "skill": "review", "backend": "jucode" }),
+        json!({ "op": "skill_install", "source": "lynshen", "skill": "review", "backend": "lynshen" }),
     );
     assert_eq!(installed["type"], "skill_installed", "{installed}");
-    assert_eq!(installed["path"], json!(jucode_dir.join("review")));
-    assert!(fs::read_to_string(jucode_dir.join("review/SKILL.md"))
+    assert_eq!(installed["path"], json!(lynshen_dir.join("review")));
+    assert!(fs::read_to_string(lynshen_dir.join("review/SKILL.md"))
         .unwrap()
         .contains("Be strict."));
     let catalog = request(
         &mut desktop,
-        json!({ "op": "skills_catalog", "backend": "jucode" }),
+        json!({ "op": "skills_catalog", "backend": "lynshen" }),
     );
-    assert_eq!(entry(&catalog, "jucode", "review")["installed"], true);
+    assert_eq!(entry(&catalog, "lynshen", "review")["installed"], true);
 
     // Claude Code sessions read their own directory.
     let catalog = request(
@@ -2483,10 +2483,10 @@ fn the_desktop_lists_and_installs_skills_into_the_engines_directory() {
         json!({ "op": "skills_catalog", "backend": "claude" }),
     );
     assert_eq!(catalog["installDir"], json!(home.join(".claude/skills")));
-    assert_eq!(entry(&catalog, "jucode", "review")["installed"], false);
+    assert_eq!(entry(&catalog, "lynshen", "review")["installed"], false);
     for op in [
         json!({ "op": "skill_install", "source": "elsewhere", "skill": "review" }),
-        json!({ "op": "skill_install", "source": "jucode", "skill": "missing" }),
+        json!({ "op": "skill_install", "source": "lynshen", "skill": "missing" }),
         json!({ "op": "skill_install", "source": "anthropic", "skill": "../escape" }),
     ] {
         assert_eq!(request(&mut desktop, op)["type"], "error");
@@ -2504,18 +2504,18 @@ fn the_desktop_lists_and_installs_skills_into_the_engines_directory() {
     for op in ["skills_catalog", "skill_install"] {
         let refused = request(
             &mut phone,
-            json!({ "op": op, "source": "jucode", "skill": "review" }),
+            json!({ "op": op, "source": "lynshen", "skill": "review" }),
         );
         assert_eq!(refused["type"], "error", "{refused}");
     }
 
-    // Without the JuCode marketplace the Anthropic catalog still lists.
+    // Without the LynShen marketplace the Anthropic catalog still lists.
     let closed = TcpListener::bind("127.0.0.1:0").unwrap();
-    set_jucode_api_url(&format!("http://{}", closed.local_addr().unwrap()));
+    set_lynshen_api_url(&format!("http://{}", closed.local_addr().unwrap()));
     drop(closed);
     let catalog = request(
         &mut desktop,
-        json!({ "op": "skills_catalog", "backend": "jucode" }),
+        json!({ "op": "skills_catalog", "backend": "lynshen" }),
     );
     assert_eq!(
         catalog["warnings"].as_array().unwrap().len(),
@@ -2528,7 +2528,7 @@ fn the_desktop_lists_and_installs_skills_into_the_engines_directory() {
         .unwrap()
         .iter()
         .all(|skill| skill["source"] == "anthropic"));
-    let _ = fs::remove_dir_all(jucode_dir.join("review"));
+    let _ = fs::remove_dir_all(lynshen_dir.join("review"));
 }
 
 /// Requirement `id` in a `requirements` frame.

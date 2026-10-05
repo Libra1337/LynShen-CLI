@@ -1,8 +1,8 @@
 # Sandbox
 
-JuCode runs the model's shell commands in an OS sandbox: Seatbelt
+LynShen runs the model's shell commands in an OS sandbox: Seatbelt
 (`sandbox-exec`) on macOS, `bwrap` (bubblewrap) on Linux. It applies to every
-engine: the TUI, `jucode serve`, `--headless`, Desktop sessions and daemon
+engine: the TUI, `lynshen serve`, `--headless`, Desktop sessions and daemon
 sessions. A daemon agent uses its own settings from `agent.json`
 (`docs/daemon-protocol.md`).
 
@@ -11,15 +11,15 @@ sessions. A daemon agent uses its own settings from `agent.json`
 | Mode | Commands can write |
 | --- | --- |
 | `read-only` | nothing |
-| `workspace-write` (default) | the working directory, the configured read-write directories, temp and package-cache directories (`~/.cache`, `~/.npm`, `~/.cargo/registry`, …). Inside them `.git` (and a worktree's real git directory), `.jucode` and `.agents` stay read-only, as do the configured read-only directories. |
+| `workspace-write` (default) | the working directory, the configured read-write directories, temp and package-cache directories (`~/.cache`, `~/.npm`, `~/.cargo/registry`, …). Inside them `.git` (and a worktree's real git directory), `.lynshen` and `.agents` stay read-only, as do the configured read-only directories. |
 | `full-access` | anything: no sandbox |
 
 In every sandboxed mode `~/.ssh`, `~/.gnupg`, `~/.aws`,
-`~/.jucode/auth.json` and `~/.jucode/daemon` are unreadable. Network access
+`~/.lynshen/auth.json` and `~/.lynshen/daemon` are unreadable. Network access
 is on unless `sandbox_network` is false.
 
 Windows has no sandbox yet and defaults to `full-access`. On Linux without
-`bwrap` (or where unprivileged user namespaces are disabled) JuCode reports
+`bwrap` (or where unprivileged user namespaces are disabled) LynShen reports
 the sandbox as unavailable at startup and shell commands fail until you
 install bubblewrap or switch to `full-access`; it never falls back to running
 commands unsandboxed.
@@ -47,7 +47,7 @@ rules in-process, and can read and write the configured directories.
 
 ## Settings
 
-In `~/.jucode/config.json`:
+In `~/.lynshen/config.json`:
 
 ```json
 {

@@ -48,7 +48,7 @@ pub fn handle(hub: &Hub, name: &str, op: &Value) -> Result<Value, String> {
                 Some(file) => Some(allowed(hub, &cwd.join(file), false)?),
                 None => None,
             };
-            let mut diff = jucode_agent_core::git_diff(&cwd, file.as_deref())?;
+            let mut diff = lynshen_agent_core::git_diff(&cwd, file.as_deref())?;
             let truncated = diff.len() > MAX_DIFF;
             if truncated {
                 let mut end = MAX_DIFF;
@@ -74,7 +74,7 @@ fn allowed(hub: &Hub, path: &Path, browse: bool) -> Result<PathBuf, String> {
     let real = path
         .canonicalize()
         .map_err(|error| format!("{}: {error}", path.display()))?;
-    if jucode_agent_core::sandbox::denied_reads()
+    if lynshen_agent_core::sandbox::denied_reads()
         .iter()
         .any(|denied| real.starts_with(denied))
     {

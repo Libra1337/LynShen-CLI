@@ -1,14 +1,14 @@
 # Desktop GUI 设计文档（Tauri + JSON 子进程协议）
 
-本文档描述如何为 JuCode-CLI 增加桌面 GUI，并让桌面端与 CLI 引擎通信。
-方案对标 Codex：GUI 作为外壳，把 `jucode` 当子进程（sidecar）启动，通过 stdin/stdout
+本文档描述如何为 LynShen-CLI 增加桌面 GUI，并让桌面端与 CLI 引擎通信。
+方案对标 Codex：GUI 作为外壳，把 `lynshen` 当子进程（sidecar）启动，通过 stdin/stdout
 上的行分隔 JSON 双向通信。本文是设计参考，不是实现承诺。
 
 ## 1. 目标与非目标
 
 目标：
 
-- 复用现有引擎 `jucode-agent-core`，CLI / TUI / GUI 三端共享同一套引擎与同一套事件。
+- 复用现有引擎 `lynshen-agent-core`，CLI / TUI / GUI 三端共享同一套引擎与同一套事件。
 - 引擎侧改动最小：只新增一个常驻协议模式，输出侧尽量复用已有的 JSON 序列化。
 - 协议稳定后可承载多个前端（桌面端、未来的 IDE 扩展等）。
 
@@ -52,7 +52,7 @@ Codex 的 GUI / IDE 扩展不直接链接引擎，而是把 `codex` 二进制当
 在 stdin/stdout 上跑一条行分隔 JSON 协议：前端把“提交”写进 stdin（Submission Queue），
 从 stdout 读“事件”（Event Queue）。一条协议同时服务 TUI 之外的所有前端。
 
-JuCode-CLI 的 `--headless` 模式（`src/main.rs:68`）已经实现了这条协议的**输出侧**，
+LynShen-CLI 的 `--headless` 模式（`src/main.rs:68`）已经实现了这条协议的**输出侧**，
 只是它是一次性的（读一条 prompt → 跑完 → 打印 `final_result` → 退出）。
 GUI 需要的是把它变成**常驻、双向**的版本。
 
@@ -60,7 +60,7 @@ GUI 需要的是把它变成**常驻、双向**的版本。
 
 ```
 ┌──────────────────────────┐     stdin (NDJSON 命令)      ┌────────────────────────┐
-│  Tauri 应用                │  ─────────────────────────▶  │  jucode serve           │
+│  Tauri 应用                │  ─────────────────────────▶  │  lynshen serve           │
 │  ├─ WebView 前端 (TS)      │   {"op":"user_message",...}  │  └─ AgentCore            │
 │  │   渲染 AgentEvent       │                              │      (现有引擎，不改语义) │
 │  └─ Rust 壳                │  ◀─────────────────────────  │                          │
@@ -70,14 +70,14 @@ GUI 需要的是把它变成**常驻、双向**的版本。
 
 - 传输：子进程 stdio，**NDJSON**（一行一个 JSON 对象，`\n` 分隔；UTF-8）。
 - stderr：保留给引擎的日志/诊断，不参与协议。
-- 二进制分发：沿用现有 `npm/cli-*` 的按平台二进制机制（`npm/cli/bin/jucode.cjs`），
-  Tauri 用 sidecar 同款思路打包对应平台的 `jucode`。
+- 二进制分发：沿用现有 `npm/cli-*` 的按平台二进制机制（`npm/cli/bin/lynshen.cjs`），
+  Tauri 用 sidecar 同款思路打包对应平台的 `lynshen`。
 
 ## 5. 协议规格
 
 ### 5.1 启动
 
-GUI 启动 `jucode serve`。引擎进入常驻模式，**立即输出一批启动事件**
+GUI 启动 `lynshen serve`。引擎进入常驻模式，**立即输出一批启动事件**
 （等价于 `startup_events()`：`startup` + `model_status` + `command_list`），
 然后开始监听 stdin。
 
@@ -127,7 +127,7 @@ GUI 启动 `jucode serve`。引擎进入常驻模式，**立即输出一批启�
 ### 5.4 时序（一次普通对话）
 
 ```
-GUI                         jucode serve
+GUI                         lynshen serve
  │  spawn                          │
  │ ◀──── startup / model_status / command_list
  │ ── {"op":"user_message"} ─────▶ │  submit_user_message()
@@ -174,7 +174,7 @@ GUI                         jucode serve
 
 ## 7. Tauri 侧设计
 
-- **壳（Rust）**：用 Tauri sidecar 打包并 spawn `jucode serve`；建立 stdin/stdout 管道；
+- **壳（Rust）**：用 Tauri sidecar 打包并 spawn `lynshen serve`；建立 stdin/stdout 管道；
   把 stdout 的每行 JSON 透传给前端（Tauri `emit`），把前端的命令写入 stdin。
   壳本身不理解协议语义，只做转发与进程生命周期管理（崩溃重启、退出清理）。
 - **前端（TS/Web）**：维护一个由 `AgentEvent` 流驱动的状态机。建议的渲染映射：
@@ -195,7 +195,7 @@ GUI                         jucode serve
 
 ## 8. 分阶段计划
 
-1. **M1 — 协议打通（引擎侧，可独立验证）**：实现 `jucode serve`，用命令行手动喂 NDJSON
+1. **M1 — 协议打通（引擎侧，可独立验证）**：实现 `lynshen serve`，用命令行手动喂 NDJSON
    或写一个最小脚本验证一问一答、`status:ready` 收尾、`interrupt` 生效。此阶段不依赖任何 GUI。
 2. **M2 — Tauri MVP**：壳 + 聊天流 + 工具卡片 + 模型切换（`/model` 与 `model_view`）。
 3. **M3 — 完整视图**：会话树/恢复（`tree_view`/`resume_view`）、目标、上下文/压缩、技能。
@@ -220,7 +220,7 @@ GUI                         jucode serve
 
 ### 已实现（`src/main.rs` + `crates/agent-core/src/core.rs`）
 
-- `jucode serve` 常驻双向 NDJSON 协议：stdin 读线程 + 30ms 主循环。
+- `lynshen serve` 常驻双向 NDJSON 协议：stdin 读线程 + 30ms 主循环。
 - 5 个 op：`user_message` / `command` / `steer` / `interrupt` / `shutdown`。
 - 输出复用 `event_json()`，schema 与 `--headless` 完全一致。
 - `model_status` 去重：仅在状态变化（ready/streaming/queued 切换）时发。
@@ -241,9 +241,9 @@ GUI                         jucode serve
 - 图片附件端到端（模型读出图中文字、跨轮记得、非法路径跳过、写入 JSONL）。
 - 工作区测试全绿（187 passed）。
 
-### 已由桌面端（JuCode-Desktop）落地覆盖
+### 已由桌面端（LynShen-Desktop）落地覆盖
 
-以下 M1 时未验证的项，现已由 JuCode-Desktop 在真实使用路径中覆盖（2026-07 对照更新）：
+以下 M1 时未验证的项，现已由 LynShen-Desktop 在真实使用路径中覆盖（2026-07 对照更新）：
 
 - 真机 OAuth 往返：桌面端设置向导走引擎 `/login` + 轮询 `auth.json`，完整登录/登出已在用。
 - `/resume`（列表 + 恢复）、`/tree`→`/checkout`、`/fork`、`/delete`：桌面端历史/分支选择器基于这些命令实现。

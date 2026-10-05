@@ -1,5 +1,5 @@
 //! Agent Client Protocol agents (JSON-RPC 2.0 over stdio lines, protocol v1,
-//! https://agentclientprotocol.com): `jucode acp`, `gemini --experimental-acp`
+//! https://agentclientprotocol.com): `lynshen acp`, `gemini --experimental-acp`
 //! and the like, started with the command the desktop's agent registry names.
 //!
 //! - Handshake: `initialize` → `session/new` (the agent's session id).

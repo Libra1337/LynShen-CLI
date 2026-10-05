@@ -5,7 +5,7 @@ Date: 2026-09-28
 
 ## 1. 目标
 
-把"长期存在的 Agent + 常驻后台服务"这套能力加进 JuCode，使 JuCode 从"打开才工作的编码助手"变成"关掉界面也能继续推进工作的个人 Agent 环境"。
+把"长期存在的 Agent + 常驻后台服务"这套能力加进 LynShen，使 LynShen 从"打开才工作的编码助手"变成"关掉界面也能继续推进工作的个人 Agent 环境"。
 
 要达到的使用方式：
 
@@ -16,7 +16,7 @@ Date: 2026-09-28
 - 人不在电脑前时，用手机浏览器打开远程控制页面：看汇报、答复问题、批准待确认动作、给 Agent 发消息。IM 只做通知和简单指令。
 - 同一套服务可以跑在本机，也可以放进 Docker。
 
-这些能力已经在 AgentOS（TypeScript + Bun）里实现并有契约测试。本方案用 Rust 在 JuCode 里重新实现，AgentOS 只作为设计参考，停止开发，两边不做对接。
+这些能力已经在 AgentOS（TypeScript + Bun）里实现并有契约测试。本方案用 Rust 在 LynShen 里重新实现，AgentOS 只作为设计参考，停止开发，两边不做对接。
 
 ## 2. 约束
 
@@ -29,22 +29,22 @@ Date: 2026-09-28
 
 客户端协议允许破坏性修改：`serve` 协议、Desktop 的适配器与 `ChatState` 按本方案一起改，不保留旧格式的兼容层。
 
-Desktop 的约束：`ChatState` 只认 jucode 事件格式，其他后端通过适配器翻译进来（`JuCode-Desktop/src/lib/backends/README.md`）。本方案保留这一点。
+Desktop 的约束：`ChatState` 只认 lynshen 事件格式，其他后端通过适配器翻译进来（`LynShen-Desktop/src/lib/backends/README.md`）。本方案保留这一点。
 
-`JuCode-Desktop/docs/im-bridge.md` 的 v1 边界写的是"不安装常驻 daemon，出现明确需求后重新决策"。本方案就是这次重新决策：常驻服务成为远程控制、IM 入口和无人值守运行的前提。
+`LynShen-Desktop/docs/im-bridge.md` 的 v1 边界写的是"不安装常驻 daemon，出现明确需求后重新决策"。本方案就是这次重新决策：常驻服务成为远程控制、IM 入口和无人值守运行的前提。
 
 ## 3. 现状对照
 
-| 能力 | JuCode 现状 | AgentOS 中的实现 | 在 JuCode 中的做法 |
+| 能力 | LynShen 现状 | AgentOS 中的实现 | 在 LynShen 中的做法 |
 | --- | --- | --- | --- |
-| 会话与对话记录 | 会话树 JSONL、`/rewind`、`/fork`、压缩、会话锁 | Session + journal（SQLite） | 直接用 JuCode 的会话，不迁移 journal |
-| 编码循环 | 完整：编辑工具、快照、钩子、目标模式、MCP、技能 | 自研 runtime，较弱 | 直接用 JuCode 的 `AgentCore` |
+| 会话与对话记录 | 会话树 JSONL、`/rewind`、`/fork`、压缩、会话锁 | Session + journal（SQLite） | 直接用 LynShen 的会话，不迁移 journal |
+| 编码循环 | 完整：编辑工具、快照、钩子、目标模式、MCP、技能 | 自研 runtime，较弱 | 直接用 LynShen 的 `AgentCore` |
 | 长期存在的 Agent | 无 | brief 目录（role、capabilities、policy、state、memory） | 新增，见 4.3 |
 | 统一唤醒 | 无，只有交互式输入 | `wake()`：用户消息、Agent 消息、定时器、问题答复、子会话结束、IM | 新增，见 4.4 |
 | 非阻塞提问 | 审批在当前回合内阻塞等待 | 持久问题，Run 不停，答复或到期后唤醒 | 新增，见 4.5 |
 | 汇报 | 无 | `report` 工具，首页展示 | 新增 |
 | 定时器 | 无 | 持久定时器，约每分钟检查 | 新增 |
-| 权限 | `manual`、`auto-edit`、`auto`、`full-access`，`auto` 用安全模型判定 | `strict`、`auto`、`full` 三档，拦截规则 | 沿用 JuCode 的模式，与沙箱配合，见 4.6 |
+| 权限 | `manual`、`auto-edit`、`auto`、`full-access`，`auto` 用安全模型判定 | `strict`、`auto`、`full` 三档，拦截规则 | 沿用 LynShen 的模式，与沙箱配合，见 4.6 |
 | 沙箱 | 无（`cli-gap-checklist.md` 列为 non-goal） | bwrap、sandbox-exec | 参照 Codex 实现，见 4.6 |
 | 工作区外目录 | `extra_read_roots` 只读 | 目录授予，ro/rw，挂进沙箱 | 扩展为 Agent 级的 ro/rw 目录，即沙箱的可写根 |
 | 从目录创建 Agent | 无 | agent-father 调研，提交提案，一键批准；扫描文件夹批量接入；更新提案带 diff | 新增，见 4.7 |
@@ -57,12 +57,12 @@ AgentOS 中不迁移的部分：自研 runtime 与工具集、WebUI（由 Deskto
 
 ## 4. 设计
 
-### 4.1 后台服务 `jucode daemon`
+### 4.1 后台服务 `lynshen daemon`
 
-- 新增 crate `crates/daemon`，入口是子命令 `jucode daemon`。它在一个进程里托管多个 `AgentCore`，每个活跃会话一个实例，各自的工作线程与现在相同。
+- 新增 crate `crates/daemon`，入口是子命令 `lynshen daemon`。它在一个进程里托管多个 `AgentCore`，每个活跃会话一个实例，各自的工作线程与现在相同。
 - `AgentCore::new()` 目前从进程的当前目录取 `cwd`（`core.rs` 唯一一处 `env::current_dir`）。新增一个显式传入 `cwd` 与会话 id 的构造函数，daemon 只用这个。会话锁（`SessionLock`）保证同一会话不会被 daemon 和独立运行的 TUI 同时写入。
-- 生命周期：`jucode daemon install` 写入 launchd（macOS）或 systemd user unit（Linux）；Docker 镜像直接以 `jucode daemon` 为入口。
-- 状态目录：`~/.jucode/` 下新增 `agents/<id>/`（brief 与记忆）与 `daemon/`（问题、汇报、定时器、消息、待确认动作、修改记录、配对设备等追加日志）。daemon 是这些文件唯一的写入方，原子性由进程内加锁保证，启动时从日志重建内存索引。
+- 生命周期：`lynshen daemon install` 写入 launchd（macOS）或 systemd user unit（Linux）；Docker 镜像直接以 `lynshen daemon` 为入口。
+- 状态目录：`~/.lynshen/` 下新增 `agents/<id>/`（brief 与记忆）与 `daemon/`（问题、汇报、定时器、消息、待确认动作、修改记录、配对设备等追加日志）。daemon 是这些文件唯一的写入方，原子性由进程内加锁保证，启动时从日志重建内存索引。
 
 ### 4.2 协议与传输
 
@@ -72,17 +72,17 @@ AgentOS 中不迁移的部分：自研 runtime 与工具集、WebUI（由 Deskto
   - 每个 op 与事件带 `session` 字段用于多路复用；需要应答的 op 带 `id`，应答事件回填同一个 `id`。
   - 新增 Agent 级的 op 与事件：Agent 列表、问题、汇报、待确认动作、提案、定时器。
   - 连接建立时 daemon 发送 `hello`，带协议版本号；版本不符直接断开并提示升级。
-  - `jucode serve`（stdio）同步改成 v2 帧格式，只是固定一个会话。
+  - `lynshen serve`（stdio）同步改成 v2 帧格式，只是固定一个会话。
   - 顺带修正现有漂移：Desktop 的 `set_approval_mode` 类型仍是 `read-only`、`plan`、`auto-edit`、`full-auto`，与 CLI 的 `manual`、`auto-edit`、`auto`、`full-access` 不一致。
 - 鉴权：
-  - 本机：daemon 首次启动生成 token，存在 `~/.jucode/daemon/token`（权限 0600），Desktop 读取后在连接时带上。
+  - 本机：daemon 首次启动生成 token，存在 `~/.lynshen/daemon/token`（权限 0600），Desktop 读取后在连接时带上。
   - 手机：见 4.9 的配对流程。每台设备一个独立 token，可在 Desktop 上吊销。
   - 除 `127.0.0.1` 外，监听其他地址必须显式配置，且所有连接都要 token。
 
 ### 4.3 Agent
 
-- 一个 Agent 是 `~/.jucode/agents/<id>/` 下的一组文件：`role.md`、`capabilities.md`、`policy.md`、`state.md`、`memory/`，外加 `agent.json`（启用状态、默认模型、负责的目录与仓库、权限模式覆盖）。
-- Agent 的会话就是普通 JuCode 会话，会话元数据里多记 `agent_id` 与可选的父会话。`/rewind`、`/fork`、压缩全部照常可用。
+- 一个 Agent 是 `~/.lynshen/agents/<id>/` 下的一组文件：`role.md`、`capabilities.md`、`policy.md`、`state.md`、`memory/`，外加 `agent.json`（启用状态、默认模型、负责的目录与仓库、权限模式覆盖）。
+- Agent 的会话就是普通 LynShen 会话，会话元数据里多记 `agent_id` 与可选的父会话。`/rewind`、`/fork`、压缩全部照常可用。
 - 每次运行前，`prompt.rs` 在现有的 AGENTS.md 注入之后，加入 brief 四个文件、memory 索引、可用目录清单和当前时间。
 - 出厂带一个 agent-father：负责创建其他 Agent，维护"谁负责什么"的总览。
 
@@ -118,7 +118,7 @@ AgentOS 中不迁移的部分：自研 runtime 与工具集、WebUI（由 Deskto
   - Linux 与 WSL2：`bubblewrap`，使用 `PATH` 上找到的 `bwrap`。缺少 `bwrap` 或无法创建用户命名空间时，daemon 启动即报错并给出安装说明，不静默降级。
   - Windows 原生：暂不支持沙箱，只能选 `full-access`，daemon 在 Windows 上建议用 WSL2 或 Docker 运行。
 - 作用范围：`bash` 工具、钩子命令以及它们派生的所有子进程（git、包管理器、测试）都在沙箱内。文件读写工具在进程内按同一套路径规则校验。MCP 服务进程不进沙箱，每次调用按工具的只读标注和审批模式处理。
-- 可写根内的保护路径，与 Codex 相同，递归只读：`.git`（目录或文件，包括 `gitdir:` 指向的真实目录）、`.jucode`、`.agents`。`git commit` 等写 `.git` 的命令因此需要越界，由审批处理。
+- 可写根内的保护路径，与 Codex 相同，递归只读：`.git`（目录或文件，包括 `gitdir:` 指向的真实目录）、`.lynshen`、`.agents`。`git commit` 等写 `.git` 的命令因此需要越界，由审批处理。
 - 网络：与 Codex 不同，沙箱内默认允许联网。这是个人开发工具，安装依赖、拉取文档是日常操作；Agent 可以把网络关掉。
 - 越界：命令需要写沙箱外的路径、写保护路径或在沙箱外运行时，`bash` 工具带上 `escalate: true` 与理由重新发起，进入审批流程：
   - `manual`：总是问人。
@@ -143,11 +143,11 @@ AgentOS 中不迁移的部分：自研 runtime 与工具集、WebUI（由 Deskto
   - 侧栏：Agent 列表，每个带一行职责与未读、待处理计数。
   - Agent 页：会话、档案（brief 与修改记录）、设置（模型、目录、沙箱档位、审批模式）。
   - 提案卡片、新建 Agent 对话框、已配对设备列表。
-- 不经 daemon 的用法保持不变：单个会话仍可以直接 spawn `jucode serve`、codex、claude。
+- 不经 daemon 的用法保持不变：单个会话仍可以直接 spawn `lynshen serve`、codex、claude。
 
 ### 4.9 远程控制网页
 
-- 代码放在 JuCode-Desktop 仓库，作为同一个 SvelteKit 项目的第二个构建目标 `web`。复用 `ChatState`、消息列表、工具卡片、审批卡片、Markdown 渲染、i18n 与主题；`protocol.ts` 里对 Tauri `invoke` 的调用改为经过一层传输接口，`web` 目标只实现 WebSocket 这一种。
+- 代码放在 LynShen-Desktop 仓库，作为同一个 SvelteKit 项目的第二个构建目标 `web`。复用 `ChatState`、消息列表、工具卡片、审批卡片、Markdown 渲染、i18n 与主题；`protocol.ts` 里对 Tauri `invoke` 的调用改为经过一层传输接口，`web` 目标只实现 WebSocket 这一种。
 - 页面按手机优先设计，只包含远程场景需要的部分：
   - 首页：问题、待确认动作、汇报。
   - Agent 列表与 Agent 页。
@@ -168,7 +168,7 @@ AgentOS 中不迁移的部分：自研 runtime 与工具集、WebUI（由 Deskto
 | 阶段 | 内容 | 验证 |
 | --- | --- | --- |
 | 0 | `AgentCore` 显式 `cwd` 构造函数；进程级状态的梳理与拆分；审批的"无人在看"语义与待确认动作记录（先在 `serve` 下实现并测试） | 单元测试：同进程两个 `AgentCore` 分别在两个目录工作；无人值守时审批不阻塞回合 |
-| 1 | `jucode daemon` 骨架：WebSocket 服务、协议 v2（`serve` 同步切换）、本机 token、多会话托管、会话在 Desktop 关闭后继续运行；Desktop `daemon` 后端 | 关闭 Desktop 后任务继续，重新打开能看到后续输出；daemon 重启后会话可恢复 |
+| 1 | `lynshen daemon` 骨架：WebSocket 服务、协议 v2（`serve` 同步切换）、本机 token、多会话托管、会话在 Desktop 关闭后继续运行；Desktop `daemon` 后端 | 关闭 Desktop 后任务继续，重新打开能看到后续输出；daemon 重启后会话可恢复 |
 | 2 | Agent 与唤醒：`agents/` 目录、agent.json、brief 注入、消息投递与路由、Agent 间消息、定时器、启动恢复；Desktop 侧栏 Agent 列表 | 定时器在 Desktop 关闭时触发并完成一次运行；消息只投递一次 |
 | 3 | 持久问题、汇报、待确认动作；Desktop 首页 | 夜间场景：Agent 提问后继续工作，早上在首页答复，答复后会话被唤醒 |
 | 4 | 远程控制网页：传输接口抽象、`web` 构建目标、手机页面、配对与设备管理 | 手机经 Tailscale 打开网页，答复问题、批准待确认动作、给 Agent 发消息 |
@@ -195,28 +195,28 @@ AgentOS 中不迁移的部分：自研 runtime 与工具集、WebUI（由 Deskto
 
 ### 阶段 1 结果
 
-- `crates/daemon`：`jucode daemon [--listen]` 用 WebSocket 托管多个会话，协议见 `docs/daemon-protocol.md`。
-  - 鉴权：首次启动生成 `~/.jucode/daemon/token`（0600），连接必须带 token。
+- `crates/daemon`：`lynshen daemon [--listen]` 用 WebSocket 托管多个会话，协议见 `docs/daemon-protocol.md`。
+  - 鉴权：首次启动生成 `~/.lynshen/daemon/token`（0600），连接必须带 token。
   - 会话：`session_create`、`session_open`、`session_close`；会话创建时立即落盘，关闭或 daemon 重启后都能按 id 重开，未决定的待确认动作随之恢复。
   - 有人在看：客户端 `watch` 一个会话即为有人在看，最后一个客户端 `unwatch` 或断开后转为无人在看，正在等审批的调用转成待确认动作。`watch` 同时向该客户端发送会话快照（状态事件与对话记录）。
   - 追加日志：`sessions.jsonl`、`actions.jsonl`。`decide_action` 在引擎执行前记录，daemon 中途停止也不会重复执行。
   - 托管的会话拒绝 `/new` 与 `/resume <id>`，由 daemon 的会话操作代替。
-  - `jucode daemon install|uninstall` 写入 launchd 或 systemd 用户服务，并带上安装时的 PATH。
+  - `lynshen daemon install|uninstall` 写入 launchd 或 systemd 用户服务，并带上安装时的 PATH。
 - 协议 v2：`serve` 首行发 `hello`（带协议版本），每个事件带 `session`。事件序列化与指令处理移到 `agent-core/src/protocol.rs`，`serve` 与 daemon 共用。
 - Desktop：
-  - 设置 → 后端 → 后台服务：打开后新的 JuCode 会话由 daemon 托管。`src/lib/daemon.ts` 用一个 WebSocket 连接 daemon，托管会话在 Desktop 里的表现与子进程相同，适配器、`ChatState` 和各视图不变。
+  - 设置 → 后端 → 后台服务：打开后新的 LynShen 会话由 daemon 托管。`src/lib/daemon.ts` 用一个 WebSocket 连接 daemon，托管会话在 Desktop 里的表现与子进程相同，适配器、`ChatState` 和各视图不变。
   - 关闭 Desktop 只断开连接，会话继续运行；关闭标签页会结束对应的 daemon 会话；恢复、重启、切换 provider 都按 id 重开 daemon 会话。
-  - 修正：jucode 会话的指令改为经过适配器编码，审批模式名称（`read-only`、`full-auto`）在发送前映射为引擎的 `manual`、`full-access`。适配器检查 `hello` 的协议版本。
+  - 修正：lynshen 会话的指令改为经过适配器编码，审批模式名称（`read-only`、`full-auto`）在发送前映射为引擎的 `manual`、`full-access`。适配器检查 `hello` 的协议版本。
 - 验证：
   - `crates/daemon/tests/daemon.rs` 用真实 WebSocket 客户端和假模型覆盖错误 token、无人在看时推迟、客户端离开后会话继续、有人在看时提示且观察者离开后转为推迟、关闭后重开并恢复待确认动作、新会话关闭后重开、快照、拒绝切换会话的命令。
-  - Desktop 的 `DaemonClient` 与 SessionStore 托管流程有单元测试，另用真实 `jucode daemon` 跑通创建、快照、关闭、按 id 重开。
+  - Desktop 的 `DaemonClient` 与 SessionStore 托管流程有单元测试，另用真实 `lynshen daemon` 跑通创建、快照、关闭、按 id 重开。
   - 尚未在 Tauri 界面中手动走一遍完整流程。
 
 ### 阶段 2 结果
 
 - 引擎：新增宿主扩展接口（`host.rs`）。宿主可以给引擎加工具（由宿主执行，不走审批），并在每轮系统提示词末尾附加文字。Agent 的概念只存在于 daemon 中，agent-core 不知道 Agent。
 - daemon：
-  - Agent 存在 `~/.jucode/agents/<id>/`：brief 四个文件、`memory/` 和 `agent.json`（名称、工作目录、启用状态、审批模式，默认 `auto`）。Agent 的会话在它的工作目录里运行，每轮都带上 brief、记忆索引和其他 Agent 的清单。
+  - Agent 存在 `~/.lynshen/agents/<id>/`：brief 四个文件、`memory/` 和 `agent.json`（名称、工作目录、启用状态、审批模式，默认 `auto`）。Agent 的会话在它的工作目录里运行，每轮都带上 brief、记忆索引和其他 Agent 的清单。
   - Agent 会话有三个工具：`message_agent`（给其他 Agent 发消息）、`timer`（设置、列出、取消定时器）、`brief`（改写自己的 brief 与记忆）。
   - 消息先写入 `messages.jsonl` 再投递。路由顺序：消息指定的会话 → 所回复消息所在的会话 → 用户消息接该 Agent 最近活跃的会话 → 新会话。带 `dedupe_key` 的消息只投递一次。每秒重试未投递的消息（包括重启前留下的），同时最多 4 个运行。
   - 定时器写入 `timers.jsonl`，默认回到设置它的会话。触发时以定时器 id 作为消息的去重键，daemon 停机期间到期的定时器在启动后只触发一次。
@@ -263,8 +263,8 @@ AgentOS 中不迁移的部分：自研 runtime 与工具集、WebUI（由 Deskto
 - 引擎（`sandbox.rs`）：
   - 三档沙箱。macOS 用 Seatbelt，策略是默认放行，只拒绝三类：写可写目录以外的位置或保护路径、读取凭据、关闭网络时的出站连接。Linux 用 `bwrap`：整个文件系统只读，可写目录读写绑定，保护路径再只读绑定，凭据目录用空 tmpfs 遮住，关闭网络时新建网络命名空间。Windows 只支持 `full-access`。
   - 可写目录：工作目录、Agent 的读写目录、临时目录和常见包管理缓存（`~/.cache`、`~/.npm`、`~/.cargo/registry` 等），保证安装依赖和构建能在沙箱里完成。
-  - 保护路径：可写目录里的 `.git`（worktree 同时保护它指向的真实 git 目录）、`.jucode`、`.agents`，以及 Agent 的只读目录（即使它位于临时目录这类可写位置之下）。子 Agent 在 `.jucode/agents/…` 下的工作区仍可写。
-  - 凭据：`~/.ssh`、`~/.gnupg`、`~/.aws`、`~/.jucode/auth.json`、`~/.jucode/daemon` 在任何沙箱档位下都不可读。
+  - 保护路径：可写目录里的 `.git`（worktree 同时保护它指向的真实 git 目录）、`.lynshen`、`.agents`，以及 Agent 的只读目录（即使它位于临时目录这类可写位置之下）。子 Agent 在 `.lynshen/agents/…` 下的工作区仍可写。
+  - 凭据：`~/.ssh`、`~/.gnupg`、`~/.aws`、`~/.lynshen/auth.json`、`~/.lynshen/daemon` 在任何沙箱档位下都不可读。
   - 沙箱挂在每个引擎的 `ToolState` 上，TUI 与 `serve` 默认不启用，行为不变。
   - 审批：沙箱内的命令不需要审批（`manual` 除外）。命令带 `escalate: true` 和理由时越出沙箱执行，按审批模式处理（`auto` 走安全模型，其余问人，无人在看时转为待确认动作）。命令规则优先：`forbid` 不执行，`ask` 总是问人，`allow` 让越界直接执行；`forbid` 优先，其余取最长匹配。
   - 文件工具在进程内按同一套规则检查写入，并能读写 Agent 的其他目录。
@@ -279,7 +279,7 @@ AgentOS 中不迁移的部分：自研 runtime 与工具集、WebUI（由 Deskto
 - Linux 验证：CI 安装 bubblewrap 并放开 Ubuntu 的非特权用户命名空间限制，沙箱执行测试在 GitHub 的 Linux 机器上以普通用户通过。
 - 同时修正：daemon 投递消息后、会话线程读到它之前，运行计数可能被提前释放，导致同时运行超过 4 个（CI 上偶发失败）；现在投递的消息在被会话读取前一直占用运行位。
 
-AgentOS 现有数据不做迁移，只有少量会话。需要保留的 brief 可以直接复制到 `~/.jucode/agents/`。
+AgentOS 现有数据不做迁移，只有少量会话。需要保留的 brief 可以直接复制到 `~/.lynshen/agents/`。
 
 ## 6. 风险
 

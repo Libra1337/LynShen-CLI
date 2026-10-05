@@ -1,5 +1,5 @@
 {
-  "name": "jucode-cli-release",
+  "name": "lynshen-cli-release",
   "private": true,
   "workspaces": [
     "npm/cli",

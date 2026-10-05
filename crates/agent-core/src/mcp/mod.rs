@@ -851,7 +851,7 @@ mod tests {
     fn connect_server_speaks_full_protocol_over_stdio() {
         use std::fs;
         let dir = std::env::temp_dir().join(format!(
-            "jucode-mcp-e2e-test-{}",
+            "lynshen-mcp-e2e-test-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()

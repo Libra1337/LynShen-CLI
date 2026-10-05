@@ -1,8 +1,8 @@
 //! One hosted session: an engine on its own thread, fed ops through a
-//! channel and polled every 30 ms, the same loop `jucode serve` runs.
+//! channel and polled every 30 ms, the same loop `lynshen serve` runs.
 
 use crate::hub::Hub;
-use jucode_agent_core::{
+use lynshen_agent_core::{
     protocol::{self, session_event_json},
     AgentCore, AgentEvent, ApprovalMode,
 };
@@ -148,7 +148,7 @@ fn run(hub: &Hub, mut core: AgentCore, id: &str, ops: Receiver<Value>) {
     }
 }
 
-/// The conversation in the jucode TUI, on a terminal for the client that
+/// The conversation in the lynshen TUI, on a terminal for the client that
 /// asked: the engine here lets go of the session while the TUI has it, and
 /// opens it again once the TUI exits. None when the session should stop.
 fn terminal(
@@ -176,8 +176,8 @@ fn terminal(
         .sessions()
         .into_iter()
         .any(|r| r.id == id && r.agent.is_some());
-    // The jucode TUI is this binary, or the one JUCODE_BIN names.
-    let exe = std::env::var_os("JUCODE_BIN")
+    // The lynshen TUI is this binary, or the one LYNSHEN_BIN names.
+    let exe = std::env::var_os("LYNSHEN_BIN")
         .map(std::path::PathBuf::from)
         .map_or_else(std::env::current_exe, Ok);
     let (Some(arc), Ok(exe), false) = (hub.handle(), exe, agent) else {

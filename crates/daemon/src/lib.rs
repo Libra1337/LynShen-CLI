@@ -1,6 +1,6 @@
-//! `jucode daemon`: hosts many JuCode sessions in one long-running process
+//! `lynshen daemon`: hosts many LynShen sessions in one long-running process
 //! and serves them to clients (Desktop, the remote web page) over a
-//! WebSocket. Frames are the `jucode serve` JSON protocol, version 2, with a
+//! WebSocket. Frames are the `lynshen serve` JSON protocol, version 2, with a
 //! `session` field on every session op and event. See
 //! `docs/agent-daemon-plan.md` and `docs/daemon-protocol.md`.
 
@@ -31,7 +31,7 @@ pub use agents::Agents;
 pub use store::Store;
 
 use hub::Hub;
-use jucode_agent_core::protocol;
+use lynshen_agent_core::protocol;
 use serde_json::{json, Value};
 use std::{
     io::{self, ErrorKind},
@@ -48,7 +48,7 @@ use tungstenite::{
 };
 
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:7788";
-pub const DEFAULT_RELAY: &str = "wss://app.jucode.net/relay/v1";
+pub const DEFAULT_RELAY: &str = "wss://app.lynshen.net/relay/v1";
 
 /// Serves clients on `listener` until the process exits. The token guards
 /// every WebSocket connection: local clients read it from
@@ -66,7 +66,7 @@ pub fn serve(
 ) -> io::Result<()> {
     if store.claim_machine()? {
         relay::forget_identity(store.dir());
-        jucode_agent_core::log_warn!(
+        lynshen_agent_core::log_warn!(
             "daemon",
             "state copied from another computer: new token, devices unpaired, new relay identity"
         );
@@ -97,28 +97,28 @@ pub fn serve(
         let web = web.clone();
         thread::spawn(move || {
             if let Err(error) = connection(&hub, stream, &token, web.as_deref()) {
-                jucode_agent_core::log_warn!("daemon", "connection ended", error = error);
+                lynshen_agent_core::log_warn!("daemon", "connection ended", error = error);
             }
         });
     }
     Ok(())
 }
 
-/// State directory: `~/.jucode/daemon`.
+/// State directory: `~/.lynshen/daemon`.
 pub fn state_dir() -> io::Result<PathBuf> {
-    Ok(jucode_dir()?.join("daemon"))
+    Ok(lynshen_dir()?.join("daemon"))
 }
 
-/// Agents directory: `~/.jucode/agents`.
+/// Agents directory: `~/.lynshen/agents`.
 pub fn agents_dir() -> io::Result<PathBuf> {
-    Ok(jucode_dir()?.join("agents"))
+    Ok(lynshen_dir()?.join("agents"))
 }
 
-fn jucode_dir() -> io::Result<PathBuf> {
+fn lynshen_dir() -> io::Result<PathBuf> {
     let home = std::env::var_os("USERPROFILE")
         .or_else(|| std::env::var_os("HOME"))
         .ok_or_else(|| io::Error::new(ErrorKind::NotFound, "home directory not found"))?;
-    Ok(PathBuf::from(home).join(".jucode"))
+    Ok(PathBuf::from(home).join(".lynshen"))
 }
 
 fn connection(
@@ -721,10 +721,10 @@ fn handle(hub: &Arc<Hub>, client: u64, text: &str) {
         })),
         ("set_attended", Some(_)) => Err("the daemon sets attended from watch/unwatch".to_string()),
         // MCP servers are saved for every session: the config first, then the
-        // open JuCode sessions apply the same op.
+        // open LynShen sessions apply the same op.
         ("mcp_set" | "mcp_remove" | "mcp_toggle", None) => {
-            jucode_agent_core::change_mcp_config(&op).map(|()| {
-                hub.forward_to_jucode_sessions(&op);
+            lynshen_agent_core::change_mcp_config(&op).map(|()| {
+                hub.forward_to_lynshen_sessions(&op);
                 json!({ "type": "mcp_saved" })
             })
         }

@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const LEGACY_DEFAULT_SYSTEM_PROMPT: &str = r#"You are JuCode, a focused coding agent.
+const LEGACY_DEFAULT_SYSTEM_PROMPT: &str = r#"You are LynShen, a focused coding agent.
 
 Work with care before speed. Understand the task and the existing code before making changes. If the request is ambiguous or a key detail cannot be inferred safely, say so and ask a concise question. If there are multiple reasonable approaches, surface the tradeoff briefly.
 
@@ -24,7 +24,7 @@ For user-facing work, preserve the existing product language and design system. 
 
 Communicate directly and concisely. Report behavior-level changes, important risks, verification results, and any remaining gaps."#;
 
-pub const DEFAULT_SYSTEM_PROMPT: &str = r#"You are JuCode, a focused coding agent.
+pub const DEFAULT_SYSTEM_PROMPT: &str = r#"You are LynShen, a focused coding agent.
 
 Work with care before speed. Understand the task and the existing code before making changes. If the request is ambiguous or a key detail cannot be inferred safely, say so and ask a concise question. If there are multiple reasonable approaches, surface the tradeoff briefly.
 
@@ -228,7 +228,7 @@ pub struct Config {
     /// empty in config.json falls back to `compact_model`.
     pub safety_model: String,
     pub safety_reasoning_effort: String,
-    /// Model that names conversations (`jucode daemon`). Empty: the main
+    /// Model that names conversations (`lynshen daemon`). Empty: the main
     /// `model`.
     pub title_model: String,
     pub models: Vec<ModelConfig>,
@@ -236,23 +236,23 @@ pub struct Config {
     /// each with a note on when to use it. Empty: subagents run on the main
     /// agent's own model only.
     pub subagent_models: Vec<SubagentModel>,
-    /// The JuCode gateway models the user chose to show (`jucode_models`),
+    /// The LynShen gateway models the user chose to show (`lynshen_models`),
     /// out of everything their account can reach. Becomes `models` whenever
-    /// the provider is jucode; empty until the first login.
-    pub jucode_models: Vec<ModelConfig>,
-    /// JuCode group id per model name (`jucode_groups`): requests for that
-    /// model go only through that group (`X-JuCode-Group`). A model without
+    /// the provider is lynshen; empty until the first login.
+    pub lynshen_models: Vec<ModelConfig>,
+    /// LynShen group id per model name (`lynshen_groups`): requests for that
+    /// model go only through that group (`X-LynShen-Group`). A model without
     /// an entry is routed automatically across every group the account has.
-    pub jucode_groups: BTreeMap<String, String>,
+    pub lynshen_groups: BTreeMap<String, String>,
     /// Context windows the user set by hand (`context_window_overrides`),
     /// keyed by model name. Applied by `model_config`: fills in a window the
     /// gateway did not configure, or raises the advertised (smallest-account)
     /// window toward the model's `max_context_window`. Survives re-login,
-    /// which rewrites `jucode_models` from the gateway.
+    /// which rewrites `lynshen_models` from the gateway.
     pub context_window_overrides: BTreeMap<String, u64>,
     pub base_url: String,
-    pub jucode_web_url: String,
-    pub jucode_api_url: String,
+    pub lynshen_web_url: String,
+    pub lynshen_api_url: String,
     pub api_key_env: String,
     pub retry_attempts: usize,
     pub connect_timeout_seconds: u64,
@@ -274,11 +274,11 @@ pub struct Config {
     /// Sandbox for shell commands (`sandbox`, `sandbox_network`,
     /// `sandbox_directories`, `command_rules` in config.json).
     pub sandbox: crate::sandbox::SandboxPolicy,
-    /// Engine behind `web_search`, served by the JuCode gateway: one of
+    /// Engine behind `web_search`, served by the LynShen gateway: one of
     /// `crate::web::SEARCH_ENGINES`.
     pub web_search_engine: String,
     /// Engine behind `web_fetch`: `local` fetches from this machine, the
-    /// others go through the JuCode gateway (`crate::web::FETCH_ENGINES`).
+    /// others go through the LynShen gateway (`crate::web::FETCH_ENGINES`).
     pub web_fetch_engine: String,
     path: PathBuf,
 }
@@ -352,7 +352,7 @@ pub struct ModelConfig {
     pub name: String,
     /// 0 = unknown: no window-based compaction, nothing shown.
     pub context_window: u64,
-    /// Largest window any route offers (JuCode: the biggest account window;
+    /// Largest window any route offers (LynShen: the biggest account window;
     /// `context_window` is the smallest). 0 = same as `context_window`.
     pub max_context_window: u64,
     pub max_output_tokens: u64,
@@ -363,7 +363,7 @@ pub struct ModelConfig {
     pub output_cost: f64,
     /// What pickers show (e.g. "GPT-6.1 Sol"); None: the name.
     pub display_name: Option<String>,
-    /// JuCode: the window range through each group (group id → smallest,
+    /// LynShen: the window range through each group (group id → smallest,
     /// largest), when a group's channel gives the model another window.
     pub group_windows: BTreeMap<String, (u64, u64)>,
 }
@@ -383,17 +383,17 @@ impl ModelConfig {
 #[derive(Debug, Clone)]
 pub struct AuthStore {
     keys: BTreeMap<String, String>,
-    jucode: Option<JucodeTokens>,
+    lynshen: Option<LynShenTokens>,
     oauth: BTreeMap<String, llm_provider_kit::auth::StoredCredential>,
     encryption_key: Option<crate::secrets::SecretKey>,
     path: PathBuf,
 }
 
-/// OAuth tokens for the JuCode account, stored separately from the raw
+/// OAuth tokens for the LynShen account, stored separately from the raw
 /// `providers` map (which holds bring-your-own keys for openai/deepseek/…).
-/// The CLI no longer holds a JuCode API key — only these rotating tokens.
+/// The CLI no longer holds a LynShen API key — only these rotating tokens.
 #[derive(Debug, Clone)]
-pub struct JucodeTokens {
+pub struct LynShenTokens {
     pub access_token: String,
     pub refresh_token: String,
     pub access_expires_at: u64,
@@ -409,7 +409,7 @@ impl Config {
         ensure_system_prompt_file()?;
         if !path.exists() {
             let config = Self {
-                provider: "jucode".to_string(),
+                provider: "lynshen".to_string(),
                 protocol: "responses".to_string(),
                 model: "gpt-5.5".to_string(),
                 reasoning_effort: "medium".to_string(),
@@ -418,14 +418,14 @@ impl Config {
                 safety_model: "gpt-5.5".to_string(),
                 safety_reasoning_effort: DEFAULT_COMPACT_REASONING_EFFORT.to_string(),
                 title_model: String::new(),
-                models: models_for_provider("jucode"),
+                models: models_for_provider("lynshen"),
                 subagent_models: Vec::new(),
-                jucode_models: Vec::new(),
-                jucode_groups: BTreeMap::new(),
+                lynshen_models: Vec::new(),
+                lynshen_groups: BTreeMap::new(),
                 context_window_overrides: BTreeMap::new(),
-                base_url: "https://api.jucode.net/v1".to_string(),
-                jucode_web_url: "https://api.jucode.net".to_string(),
-                jucode_api_url: "https://api.jucode.net".to_string(),
+                base_url: "https://api.lynshen.net/v1".to_string(),
+                lynshen_web_url: "https://api.lynshen.net".to_string(),
+                lynshen_api_url: "https://api.lynshen.net".to_string(),
                 api_key_env: "OPENAI_API_KEY".to_string(),
                 retry_attempts: DEFAULT_RETRY_ATTEMPTS,
                 connect_timeout_seconds: DEFAULT_CONNECT_TIMEOUT_SECONDS,
@@ -503,17 +503,17 @@ impl Config {
             &safety_model,
             &models,
         );
-        let legacy_jucode_url = read_string(&value, "jucode_base_url", "");
-        let default_jucode_web_url =
-            if legacy_jucode_url.is_empty() || legacy_jucode_url == "http://localhost:8090" {
-                "https://api.jucode.net"
+        let legacy_lynshen_url = read_string(&value, "lynshen_base_url", "");
+        let default_lynshen_web_url =
+            if legacy_lynshen_url.is_empty() || legacy_lynshen_url == "http://localhost:8090" {
+                "https://api.lynshen.net"
             } else {
-                &legacy_jucode_url
+                &legacy_lynshen_url
             };
-        let default_jucode_api_url = if legacy_jucode_url.is_empty() {
-            "https://api.jucode.net"
+        let default_lynshen_api_url = if legacy_lynshen_url.is_empty() {
+            "https://api.lynshen.net"
         } else {
-            &legacy_jucode_url
+            &legacy_lynshen_url
         };
         let default_base_url = default_base_url_for_provider(&provider)
             .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
@@ -528,23 +528,23 @@ impl Config {
             title_model: read_string(&value, "title_model", ""),
             subagent_models: read_subagent_models(&value),
             models,
-            jucode_models: value
-                .get("jucode_models")
-                .map(|list| read_model_configs(&json!({ "models": list }), "jucode"))
+            lynshen_models: value
+                .get("lynshen_models")
+                .map(|list| read_model_configs(&json!({ "models": list }), "lynshen"))
                 .unwrap_or_default(),
-            jucode_groups: read_jucode_groups(&value),
+            lynshen_groups: read_lynshen_groups(&value),
             context_window_overrides: read_context_window_overrides(&value),
             base_url: normalize_base_url(&read_string(&value, "base_url", &default_base_url)),
             provider,
-            jucode_web_url: normalize_base_url(&read_string(
+            lynshen_web_url: normalize_base_url(&read_string(
                 &value,
-                "jucode_web_url",
-                default_jucode_web_url,
+                "lynshen_web_url",
+                default_lynshen_web_url,
             )),
-            jucode_api_url: normalize_base_url(&read_string(
+            lynshen_api_url: normalize_base_url(&read_string(
                 &value,
-                "jucode_api_url",
-                default_jucode_api_url,
+                "lynshen_api_url",
+                default_lynshen_api_url,
             )),
             api_key_env: read_api_key_env(&value),
             retry_attempts: read_usize(&value, "retry_attempts", DEFAULT_RETRY_ATTEMPTS),
@@ -608,12 +608,12 @@ impl Config {
                 "name": model.name,
                 "description": model.description,
             })).collect::<Vec<_>>(),
-            "jucode_models": self.jucode_models.iter().map(model_config_value).collect::<Vec<_>>(),
-            "jucode_groups": self.jucode_groups,
+            "lynshen_models": self.lynshen_models.iter().map(model_config_value).collect::<Vec<_>>(),
+            "lynshen_groups": self.lynshen_groups,
             "context_window_overrides": self.context_window_overrides,
             "base_url": normalize_base_url(&self.base_url),
-            "jucode_web_url": normalize_base_url(&self.jucode_web_url),
-            "jucode_api_url": normalize_base_url(&self.jucode_api_url),
+            "lynshen_web_url": normalize_base_url(&self.lynshen_web_url),
+            "lynshen_api_url": normalize_base_url(&self.lynshen_api_url),
             "api_key_env": self.api_key_env,
             "retry_attempts": self.retry_attempts,
             "connect_timeout_seconds": self.connect_timeout_seconds,
@@ -635,7 +635,7 @@ impl Config {
             "web_search_engine": self.web_search_engine,
             "web_fetch_engine": self.web_fetch_engine,
         });
-        // Keys this version does not know stay as they are: JuCode Desktop's
+        // Keys this version does not know stay as they are: LynShen Desktop's
         // own settings, and a newer CLI's when an older one saves.
         if let Ok(Value::Object(mut saved)) = fs::read_to_string(&self.path)
             .map_err(|_| ())
@@ -712,7 +712,7 @@ impl Config {
             .find(|entry| entry.name == model)
             .cloned()
             .unwrap_or_else(|| default_model_config(model));
-        let config = apply_group_window(config, &self.jucode_groups);
+        let config = apply_group_window(config, &self.lynshen_groups);
         apply_context_window_override(config, &self.context_window_overrides)
     }
 
@@ -727,7 +727,7 @@ impl AuthStore {
         if !path.exists() {
             let auth = Self {
                 keys: BTreeMap::new(),
-                jucode: None,
+                lynshen: None,
                 oauth: BTreeMap::new(),
                 encryption_key: if encrypt_secrets {
                     crate::secrets::find_key()?
@@ -753,11 +753,11 @@ impl AuthStore {
             .and_then(Value::as_object)
             .map(read_provider_keys)
             .unwrap_or_default();
-        // Clean break: a pre-OAuth install kept a raw JuCode API key under
-        // providers.jucode. It's no longer a valid auth path — drop it so
+        // Clean break: a pre-OAuth install kept a raw LynShen API key under
+        // providers.lynshen. It's no longer a valid auth path — drop it so
         // the user is forced through /login (which writes the token block).
-        keys.remove("jucode");
-        let jucode = value.get("jucode").and_then(read_jucode_tokens);
+        keys.remove("lynshen");
+        let lynshen = value.get("lynshen").and_then(read_lynshen_tokens);
         let oauth = value
             .get("oauth")
             .and_then(Value::as_object)
@@ -773,7 +773,7 @@ impl AuthStore {
 
         Ok(Self {
             keys,
-            jucode,
+            lynshen,
             oauth,
             encryption_key,
             path,
@@ -788,29 +788,29 @@ impl AuthStore {
         self.keys.insert(provider.to_string(), key);
     }
 
-    /// The current JuCode OAuth token bundle, if logged in on this computer.
+    /// The current LynShen OAuth token bundle, if logged in on this computer.
     /// A login copied from another computer is not one: refreshing it would
     /// sign that computer out.
-    pub fn jucode_tokens(&self) -> Option<&JucodeTokens> {
-        self.jucode
+    pub fn lynshen_tokens(&self) -> Option<&LynShenTokens> {
+        self.lynshen
             .as_ref()
             .filter(|t| crate::machine::is_this_machine(t.machine.as_deref()))
     }
 
-    /// The current JuCode access token (used as the gateway Bearer).
-    pub fn jucode_access_token(&self) -> Option<&str> {
-        self.jucode_tokens().map(|t| t.access_token.as_str())
+    /// The current LynShen access token (used as the gateway Bearer).
+    pub fn lynshen_access_token(&self) -> Option<&str> {
+        self.lynshen_tokens().map(|t| t.access_token.as_str())
     }
 
-    /// A JuCode login is saved but was made on another computer.
-    pub fn jucode_login_copied(&self) -> bool {
-        self.jucode.is_some() && self.jucode_tokens().is_none()
+    /// A LynShen login is saved but was made on another computer.
+    pub fn lynshen_login_copied(&self) -> bool {
+        self.lynshen.is_some() && self.lynshen_tokens().is_none()
     }
 
     /// A login saved here before computers were recorded: claimed for this
     /// one. Returns whether it changed.
-    pub fn claim_jucode_login(&mut self) -> bool {
-        match (self.jucode.as_mut(), crate::machine::machine_id()) {
+    pub fn claim_lynshen_login(&mut self) -> bool {
+        match (self.lynshen.as_mut(), crate::machine::machine_id()) {
             (Some(tokens), Some(id)) if tokens.machine.is_none() => {
                 tokens.machine = Some(id.to_string());
                 true
@@ -819,12 +819,12 @@ impl AuthStore {
         }
     }
 
-    pub fn set_jucode_tokens(&mut self, tokens: JucodeTokens) {
-        self.jucode = Some(tokens);
+    pub fn set_lynshen_tokens(&mut self, tokens: LynShenTokens) {
+        self.lynshen = Some(tokens);
     }
 
-    pub fn clear_jucode(&mut self) {
-        self.jucode = None;
+    pub fn clear_lynshen(&mut self) {
+        self.lynshen = None;
     }
 
     /// Stored OAuth credential for an omp provider (`oauth.<id>` block).
@@ -853,15 +853,15 @@ impl AuthStore {
         }
 
         let mut value = json!({ "providers": self.keys });
-        if let Some(t) = &self.jucode {
-            value["jucode"] = json!({
+        if let Some(t) = &self.lynshen {
+            value["lynshen"] = json!({
                 "access_token": t.access_token,
                 "refresh_token": t.refresh_token,
                 "access_expires_at": t.access_expires_at,
                 "refresh_expires_at": t.refresh_expires_at,
             });
             if let Some(machine) = &t.machine {
-                value["jucode"]["machine"] = json!(machine);
+                value["lynshen"]["machine"] = json!(machine);
             }
         }
         if !self.oauth.is_empty() {
@@ -899,7 +899,7 @@ fn write_atomically(path: &Path, contents: &str) -> io::Result<()> {
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
-        .unwrap_or("jucode");
+        .unwrap_or("lynshen");
     // Unique per call, not just per process: threads of one process (a
     // daemon's title and handoff writers) save the config at the same time,
     // and a shared temp file is renamed away under the other one.
@@ -934,19 +934,19 @@ fn offer_config_reset(path: &Path, error: &io::Error) -> io::Result<bool> {
 }
 
 pub fn profile_dir() -> io::Result<PathBuf> {
-    jucode_dir()
+    lynshen_dir()
 }
 
 pub fn normalize_base_url(value: &str) -> String {
-    migrate_jucode_host(value.trim().trim_end_matches('/'))
+    migrate_lynshen_host(value.trim().trim_end_matches('/'))
 }
 
-/// The JuCode gateway moved from api.jucode.cn to api.jucode.net; configs
+/// The LynShen gateway moved from api.lynshen.cn to api.lynshen.net; configs
 /// saved with the old host follow it.
-fn migrate_jucode_host(url: &str) -> String {
-    match url.strip_prefix("https://api.jucode.cn") {
+fn migrate_lynshen_host(url: &str) -> String {
+    match url.strip_prefix("https://api.lynshen.cn") {
         Some(rest) if rest.is_empty() || rest.starts_with('/') => {
-            format!("https://api.jucode.net{rest}")
+            format!("https://api.lynshen.net{rest}")
         }
         _ => url.to_string(),
     }
@@ -1509,7 +1509,7 @@ pub(crate) fn is_thinking_disabled(efforts: &[String]) -> bool {
 
 /// Reasoning-effort tiers for a catalog model. Upstream's exact ladders live
 /// in KDL class rules we don't compile; this maps the model's dialect to the
-/// tiers JuCode's wire protocols understand.
+/// tiers LynShen's wire protocols understand.
 fn efforts_for_catalog_model(model: &llm_provider_kit::omp::CatalogModel) -> Vec<String> {
     if !model.reasoning {
         return vec!["none".to_string()];
@@ -1561,14 +1561,14 @@ fn model_config_from_template(model: &llm_provider_kit::ModelTemplate) -> ModelC
     }
 }
 
-/// The JuCode models the user chose to show (empty before the first login).
+/// The LynShen models the user chose to show (empty before the first login).
 /// Only reads config.json: the daemon asks on every model menu.
-pub fn jucode_visible_models() -> Vec<ModelConfig> {
+pub fn lynshen_visible_models() -> Vec<ModelConfig> {
     Config::load_existing()
         .map(|c| {
-            c.jucode_models
+            c.lynshen_models
                 .into_iter()
-                .map(|m| apply_group_window(m, &c.jucode_groups))
+                .map(|m| apply_group_window(m, &c.lynshen_groups))
                 .map(|m| apply_context_window_override(m, &c.context_window_overrides))
                 .collect()
         })
@@ -1576,7 +1576,7 @@ pub fn jucode_visible_models() -> Vec<ModelConfig> {
 }
 
 /// The window range through the group the user pinned for `config.name`
-/// (`jucode_groups`), when the gateway gave one for that group; otherwise
+/// (`lynshen_groups`), when the gateway gave one for that group; otherwise
 /// the range over all of the user's groups.
 pub(crate) fn apply_group_window(
     mut config: ModelConfig,
@@ -1626,9 +1626,9 @@ fn read_context_window_overrides(value: &Value) -> BTreeMap<String, u64> {
         .unwrap_or_default()
 }
 
-fn read_jucode_groups(value: &Value) -> BTreeMap<String, String> {
+fn read_lynshen_groups(value: &Value) -> BTreeMap<String, String> {
     value
-        .get("jucode_groups")
+        .get("lynshen_groups")
         .and_then(Value::as_object)
         .map(|groups| {
             groups
@@ -1642,13 +1642,13 @@ fn read_jucode_groups(value: &Value) -> BTreeMap<String, String> {
         .unwrap_or_default()
 }
 
-/// `jucode_groups` as saved now: Desktop changes a model's group while
+/// `lynshen_groups` as saved now: Desktop changes a model's group while
 /// engines run, and the window follows the group (see `apply_group_window`).
-pub(crate) fn read_jucode_groups_at(path: &Path) -> io::Result<BTreeMap<String, String>> {
+pub(crate) fn read_lynshen_groups_at(path: &Path) -> io::Result<BTreeMap<String, String>> {
     let content = fs::read_to_string(path)?;
     let value = serde_json::from_str::<Value>(&content)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    Ok(read_jucode_groups(&value))
+    Ok(read_lynshen_groups(&value))
 }
 
 pub(crate) fn read_context_window_overrides_at(path: &Path) -> io::Result<BTreeMap<String, u64>> {
@@ -1659,17 +1659,17 @@ pub(crate) fn read_context_window_overrides_at(path: &Path) -> io::Result<BTreeM
 }
 
 /// Built-in providers as (id, default base_url, protocol) — for UIs to offer a
-/// picker. The jucode gateway comes first; the rest follows the vendored omp
+/// picker. The lynshen gateway comes first; the rest follows the vendored omp
 /// catalog's login order, listing providers with at least one servable model
 /// or no declared table (manual/BYOK providers like ollama).
 pub fn builtin_providers() -> Vec<(String, String, String)> {
     let catalog = llm_provider_kit::omp::catalog();
     let mut providers: Vec<(String, String, String)> = Vec::new();
-    if let Some(jucode) = crate::providers::template("jucode") {
+    if let Some(lynshen) = crate::providers::template("lynshen") {
         providers.push((
-            jucode.id.to_string(),
-            jucode.base_url.to_string(),
-            jucode.protocol.as_str().to_string(),
+            lynshen.id.to_string(),
+            lynshen.base_url.to_string(),
+            lynshen.protocol.as_str().to_string(),
         ));
     }
     for auth in catalog.auth_providers() {
@@ -1677,7 +1677,7 @@ pub fn builtin_providers() -> Vec<(String, String, String)> {
         let supported = catalog.supported_models(&auth.id, models);
         let template = crate::providers::template(&auth.id);
         if supported.is_empty() && template.is_none() {
-            // Either every declared model speaks a dialect JuCode doesn't
+            // Either every declared model speaks a dialect LynShen doesn't
             // serve, or the catalog has no models for it (discovery-driven
             // upstream) and no local template can fill in.
             continue;
@@ -1700,7 +1700,7 @@ pub fn builtin_providers() -> Vec<(String, String, String)> {
 
 /// Default model table for a provider. The omp catalog wins (it carries real
 /// costs and context sizes); providers without catalog entries keep the
-/// legacy template, and unknown ids fall back to the jucode set.
+/// legacy template, and unknown ids fall back to the lynshen set.
 pub fn models_for_provider(id: &str) -> Vec<ModelConfig> {
     let catalog = llm_provider_kit::omp::catalog();
     let models = catalog.models(id);
@@ -1712,7 +1712,7 @@ pub fn models_for_provider(id: &str) -> Vec<ModelConfig> {
             .collect();
     }
     crate::providers::template(id)
-        .or_else(|| crate::providers::template("jucode"))
+        .or_else(|| crate::providers::template("lynshen"))
         .map(|p| p.models.iter().map(model_config_from_template).collect())
         .unwrap_or_default()
 }
@@ -1796,10 +1796,10 @@ fn stored_credential_json(cred: &llm_provider_kit::auth::StoredCredential) -> Va
     value
 }
 
-fn read_jucode_tokens(value: &Value) -> Option<JucodeTokens> {
+fn read_lynshen_tokens(value: &Value) -> Option<LynShenTokens> {
     let access_token = read_nonempty_str(value, "access_token")?;
     let refresh_token = read_nonempty_str(value, "refresh_token")?;
-    Some(JucodeTokens {
+    Some(LynShenTokens {
         access_token,
         refresh_token,
         access_expires_at: value
@@ -1824,11 +1824,11 @@ fn read_nonempty_str(value: &Value, key: &str) -> Option<String> {
 }
 
 fn config_path() -> io::Result<PathBuf> {
-    Ok(jucode_dir()?.join("config.json"))
+    Ok(lynshen_dir()?.join("config.json"))
 }
 
 fn auth_path() -> io::Result<PathBuf> {
-    Ok(jucode_dir()?.join("auth.json"))
+    Ok(lynshen_dir()?.join("auth.json"))
 }
 
 pub(crate) fn mcp_auth_path() -> io::Result<PathBuf> {
@@ -1863,7 +1863,7 @@ pub(crate) fn load_mcp_oauth_tokens(server: &str) -> io::Result<Option<McpOAuthT
 }
 
 fn system_prompt_path() -> io::Result<PathBuf> {
-    Ok(jucode_dir()?.join(PROMPT_FILE_NAME))
+    Ok(lynshen_dir()?.join(PROMPT_FILE_NAME))
 }
 
 fn ensure_system_prompt_file() -> io::Result<()> {
@@ -1881,19 +1881,19 @@ fn ensure_system_prompt_file() -> io::Result<()> {
     fs::write(path, format!("{DEFAULT_SYSTEM_PROMPT}\n"))
 }
 
-/// The JuCode gateway's API base from the saved config, read without
+/// The LynShen gateway's API base from the saved config, read without
 /// rewriting the file (the default when there is none).
-pub(crate) fn saved_jucode_api_url() -> String {
+pub(crate) fn saved_lynshen_api_url() -> String {
     Config::load_existing()
-        .map(|config| config.jucode_api_url)
-        .unwrap_or_else(|_| "https://api.jucode.net".to_string())
+        .map(|config| config.lynshen_api_url)
+        .unwrap_or_else(|_| "https://api.lynshen.net".to_string())
 }
 
-pub(crate) fn jucode_dir() -> io::Result<PathBuf> {
+pub(crate) fn lynshen_dir() -> io::Result<PathBuf> {
     let home = env::var_os("USERPROFILE")
         .or_else(|| env::var_os("HOME"))
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "home directory not found"))?;
-    Ok(PathBuf::from(home).join(".jucode"))
+    Ok(PathBuf::from(home).join(".lynshen"))
 }
 
 #[cfg(test)]
@@ -1932,28 +1932,28 @@ mod tests {
     }
 
     #[test]
-    fn a_jucode_login_from_another_computer_is_not_used() {
+    fn a_lynshen_login_from_another_computer_is_not_used() {
         let Some(here) = crate::machine::machine_id() else {
             return;
         };
         let mut auth = AuthStore {
             keys: BTreeMap::new(),
-            jucode: read_jucode_tokens(&json!({
+            lynshen: read_lynshen_tokens(&json!({
                 "access_token": "a", "refresh_token": "r", "machine": "another-computer"
             })),
             oauth: BTreeMap::new(),
             encryption_key: None,
             path: PathBuf::from("auth.json"),
         };
-        assert!(auth.jucode_tokens().is_none());
-        assert!(auth.jucode_login_copied());
-        assert!(!auth.claim_jucode_login());
+        assert!(auth.lynshen_tokens().is_none());
+        assert!(auth.lynshen_login_copied());
+        assert!(!auth.claim_lynshen_login());
 
         // Saved before computers were recorded: claimed for this one.
-        auth.jucode = read_jucode_tokens(&json!({ "access_token": "a", "refresh_token": "r" }));
-        assert!(auth.claim_jucode_login());
-        assert_eq!(auth.jucode_tokens().unwrap().machine.as_deref(), Some(here));
-        assert!(!auth.jucode_login_copied());
+        auth.lynshen = read_lynshen_tokens(&json!({ "access_token": "a", "refresh_token": "r" }));
+        assert!(auth.claim_lynshen_login());
+        assert_eq!(auth.lynshen_tokens().unwrap().machine.as_deref(), Some(here));
+        assert!(!auth.lynshen_login_copied());
     }
 
     #[test]
@@ -1997,7 +1997,7 @@ mod tests {
             group_windows: BTreeMap::from([("g-big".to_string(), (1_050_000, 1_050_000))]),
         };
         // Saved and read back with its label and group windows.
-        let read = read_model_configs(&json!({ "models": [model_config_value(&model)] }), "jucode");
+        let read = read_model_configs(&json!({ "models": [model_config_value(&model)] }), "lynshen");
         assert_eq!(read[0].display_name.as_deref(), Some("GPT-6 Sol"));
         assert_eq!(read[0].group_windows, model.group_windows);
         // Pinned to the big group: its window. Unpinned or another group:
@@ -2055,18 +2055,18 @@ mod tests {
     }
 
     #[test]
-    fn configs_on_the_old_jucode_host_move_to_the_new_one() {
+    fn configs_on_the_old_lynshen_host_move_to_the_new_one() {
         assert_eq!(
-            normalize_base_url("https://api.jucode.cn/v1/"),
-            "https://api.jucode.net/v1"
+            normalize_base_url("https://api.lynshen.cn/v1/"),
+            "https://api.lynshen.net/v1"
         );
         assert_eq!(
-            normalize_base_url("https://api.jucode.cn"),
-            "https://api.jucode.net"
+            normalize_base_url("https://api.lynshen.cn"),
+            "https://api.lynshen.net"
         );
         assert_eq!(
-            normalize_base_url("https://api.jucode.cnx"),
-            "https://api.jucode.cnx"
+            normalize_base_url("https://api.lynshen.cnx"),
+            "https://api.lynshen.cnx"
         );
         assert_eq!(
             normalize_base_url("https://api.openai.com/v1"),
@@ -2076,11 +2076,11 @@ mod tests {
 
     #[test]
     fn builtin_providers_expose_vendor_templates_with_models() {
-        // `jucode providers` prints this list: JuCode's own gateway first,
+        // `lynshen providers` prints this list: LynShen's own gateway first,
         // then the vendored omp catalog's usable providers.
         let providers = builtin_providers();
         let ids: Vec<&str> = providers.iter().map(|(id, _, _)| id.as_str()).collect();
-        assert_eq!(ids[0], "jucode");
+        assert_eq!(ids[0], "lynshen");
         assert!(
             ids.len() > 5,
             "catalog providers should far exceed the old 5 templates"
@@ -2103,7 +2103,7 @@ mod tests {
     }
 
     #[test]
-    fn models_for_unknown_provider_fall_back_to_jucode_set() {
+    fn models_for_unknown_provider_fall_back_to_lynshen_set() {
         let fallback = models_for_provider("some-custom-gateway");
         assert!(fallback.iter().any(|m| m.name == "gpt-5.5"));
     }
@@ -2120,7 +2120,7 @@ mod tests {
                 "reasoning_efforts": ["none"]
             }]
         });
-        let configs = read_model_configs(&value, "jucode");
+        let configs = read_model_configs(&value, "lynshen");
         let claude = configs
             .iter()
             .find(|m| m.name == "claude-opus-4-8")
@@ -2140,7 +2140,7 @@ mod tests {
                 { "name": "claude-haiku-4-5-20251001", "reasoning_efforts": ["none", "low", "medium", "high"] }
             ]
         });
-        let configs = read_model_configs(&value, "jucode");
+        let configs = read_model_configs(&value, "lynshen");
         assert_eq!(
             configs[0].reasoning_efforts,
             vec!["none", "low", "medium", "high", "xhigh", "max"]
@@ -2162,7 +2162,7 @@ mod tests {
                 "reasoning_efforts": ["low", "medium", "high"]
             }]
         });
-        let configs = read_model_configs(&value, "jucode");
+        let configs = read_model_configs(&value, "lynshen");
         let claude = configs
             .iter()
             .find(|m| m.name == "claude-sonnet-4-6")
@@ -2211,8 +2211,8 @@ mod tests {
                 },
             ],
             base_url: "https://api.openai.com/v1".to_string(),
-            jucode_web_url: "https://api.jucode.net".to_string(),
-            jucode_api_url: "https://api.jucode.net".to_string(),
+            lynshen_web_url: "https://api.lynshen.net".to_string(),
+            lynshen_api_url: "https://api.lynshen.net".to_string(),
             api_key_env: "OPENAI_API_KEY".to_string(),
             retry_attempts: DEFAULT_RETRY_ATTEMPTS,
             connect_timeout_seconds: DEFAULT_CONNECT_TIMEOUT_SECONDS,
@@ -2227,8 +2227,8 @@ mod tests {
             sandbox: crate::sandbox::SandboxPolicy::default_for_platform(),
             web_search_engine: crate::web::DEFAULT_SEARCH_ENGINE.to_string(),
             web_fetch_engine: crate::web::DEFAULT_FETCH_ENGINE.to_string(),
-            jucode_models: Vec::new(),
-            jucode_groups: BTreeMap::new(),
+            lynshen_models: Vec::new(),
+            lynshen_groups: BTreeMap::new(),
             context_window_overrides: BTreeMap::new(),
             path: PathBuf::from("config.json"),
         };
@@ -2389,14 +2389,14 @@ mod tests {
     }
 
     #[test]
-    fn jucode_groups_skip_blank_entries() {
+    fn lynshen_groups_skip_blank_entries() {
         let config = Config::from_value(
-            r#"{"provider":"jucode","jucode_groups":{"claude-opus-5-5":"g1","gpt-6-sol":" ","x":3}}"#,
+            r#"{"provider":"lynshen","lynshen_groups":{"claude-opus-5-5":"g1","gpt-6-sol":" ","x":3}}"#,
             PathBuf::from("config.json"),
         )
         .unwrap();
         assert_eq!(
-            config.jucode_groups,
+            config.lynshen_groups,
             BTreeMap::from([("claude-opus-5-5".to_string(), "g1".to_string())])
         );
     }
@@ -2628,7 +2628,7 @@ mod tests {
     #[test]
     fn write_atomically_replaces_file_without_leaving_temp() {
         let dir = std::env::temp_dir().join(format!(
-            "jucode-atomic-test-{}",
+            "lynshen-atomic-test-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -2652,7 +2652,7 @@ mod tests {
     #[test]
     fn config_save_keeps_keys_it_does_not_know() {
         let dir = std::env::temp_dir().join(format!(
-            "jucode-config-keep-{}",
+            "lynshen-config-keep-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -2679,7 +2679,7 @@ mod tests {
     #[test]
     fn auth_save_preserves_mcp_servers_block() {
         let dir = std::env::temp_dir().join(format!(
-            "jucode-auth-test-{}",
+            "lynshen-auth-test-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -2695,7 +2695,7 @@ mod tests {
 
         let store = AuthStore {
             keys: BTreeMap::from([("openai".to_string(), "sk-test".to_string())]),
-            jucode: None,
+            lynshen: None,
             oauth: BTreeMap::new(),
             encryption_key: None,
             path: path.clone(),

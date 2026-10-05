@@ -4,7 +4,7 @@
 /dist
 /npm/*/bin
 /evals
-/.jucode
+/.lynshen
 **/node_modules
 .git
 crates/llm-provider-kit/.git

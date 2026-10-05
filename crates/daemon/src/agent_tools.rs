@@ -6,7 +6,7 @@ use crate::{
     hub::Hub,
     store::{now, Message, Question, Report, Timer},
 };
-use jucode_agent_core::host::HostExtensions;
+use lynshen_agent_core::host::HostExtensions;
 use serde_json::{json, Value};
 use std::sync::Arc;
 

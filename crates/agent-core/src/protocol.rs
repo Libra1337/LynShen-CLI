@@ -1,4 +1,4 @@
-//! The JSON wire format shared by `jucode serve` and the daemon: engine
+//! The JSON wire format shared by `lynshen serve` and the daemon: engine
 //! events serialize to `{"type": ...}` objects and client ops arrive as
 //! `{"op": ...}` objects. See `docs/serve-protocol.md`.
 

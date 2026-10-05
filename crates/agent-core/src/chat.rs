@@ -1,6 +1,6 @@
 //! Chat sessions: conversation and web research that are not tied to a code
 //! project. A session is a chat session when its working directory is
-//! `~/.jucode/chats` (or lies inside it); chats keep the files they write there
+//! `~/.lynshen/chats` (or lies inside it); chats keep the files they write there
 //! (reports, data the user hands over), and their transcripts are listed
 //! together by `/resume`.
 
@@ -11,7 +11,7 @@ use std::{
 
 use crate::config::profile_dir;
 
-pub const CHAT_SYSTEM_PROMPT: &str = r#"You are JuCode, a general assistant for conversation, research, analysis and planning.
+pub const CHAT_SYSTEM_PROMPT: &str = r#"You are LynShen, a general assistant for conversation, research, analysis and planning.
 
 Answer in the user's language. Lead with the answer and keep it as short as the question allows; give full depth when the task calls for it.
 

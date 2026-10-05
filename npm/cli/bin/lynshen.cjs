@@ -3,10 +3,10 @@
 const { spawnSync } = require("node:child_process");
 
 const packageByPlatform = {
-  "linux:x64": "@jucode/cli-linux-x64",
-  "win32:x64": "@jucode/cli-win32-x64",
-  "darwin:arm64": "@jucode/cli-darwin-arm64",
-  "darwin:x64": "@jucode/cli-darwin-x64"
+  "linux:x64": "@lynshen/cli-linux-x64",
+  "win32:x64": "@lynshen/cli-win32-x64",
+  "darwin:arm64": "@lynshen/cli-darwin-arm64",
+  "darwin:x64": "@lynshen/cli-darwin-x64"
 };
 
 const selector = `${process.platform}:${process.arch}`;
@@ -18,7 +18,7 @@ if (!packageName) {
   process.exit(1);
 }
 
-const executableName = process.platform === "win32" ? "jucode.exe" : "jucode";
+const executableName = process.platform === "win32" ? "lynshen.exe" : "lynshen";
 
 let executablePath;
 try {

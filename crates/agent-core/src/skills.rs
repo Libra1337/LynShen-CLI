@@ -87,18 +87,18 @@ pub fn fetch_marketplace(api_url: &str, api_key: Option<&str>) -> Result<Marketp
     parse_marketplace(&value)
 }
 
-/// The marketplace for the configured JuCode API. The endpoint is public, so
-/// without a JuCode login it is asked without a token.
-pub fn fetch_jucode_marketplace() -> Result<Marketplace, String> {
+/// The marketplace for the configured LynShen API. The endpoint is public, so
+/// without a LynShen login it is asked without a token.
+pub fn fetch_lynshen_marketplace() -> Result<Marketplace, String> {
     let config = crate::config::Config::load_or_create().map_err(|error| error.to_string())?;
-    let auth = crate::oauth::ensure_session(&config.jucode_api_url, config.encrypt_secrets).ok();
+    let auth = crate::oauth::ensure_session(&config.lynshen_api_url, config.encrypt_secrets).ok();
     fetch_marketplace(
-        &config.jucode_api_url,
-        auth.as_ref().and_then(|auth| auth.jucode_access_token()),
+        &config.lynshen_api_url,
+        auth.as_ref().and_then(|auth| auth.lynshen_access_token()),
     )
 }
 
-/// Where JuCode loads installed user skills from: `~/.jucode/skills`.
+/// Where LynShen loads installed user skills from: `~/.lynshen/skills`.
 pub fn profile_skills_dir() -> io::Result<PathBuf> {
     Ok(crate::config::profile_dir()?.join("skills"))
 }
@@ -124,7 +124,7 @@ pub fn fetch_extra_skill_source(spec: &str) -> Result<Option<SkillSource>, Strin
     let api_url = format!("https://api.github.com/repos/{owner}/{repository}/contents/skills");
     let response = ureq::get(&api_url)
         .set("Accept", "application/vnd.github+json")
-        .set("User-Agent", "jucode-cli")
+        .set("User-Agent", "lynshen-cli")
         .timeout(Duration::from_secs(30))
         .call()
         .map_err(|error| error.to_string())?;
@@ -356,7 +356,7 @@ fn install_github_skill(
 }
 
 /// Installs a marketplace skill into `skills_dir`; its enabled state (a
-/// JuCode profile's `skills-state.json`) is the caller's.
+/// LynShen profile's `skills-state.json`) is the caller's.
 pub fn install_marketplace_skill(
     skills_dir: &Path,
     skill: &MarketplaceSkill,
@@ -595,7 +595,7 @@ fn download(url: &str, limit: usize) -> io::Result<Vec<u8>> {
         return read_bounded(fs::File::open(url)?, limit);
     }
     let response = ureq::get(url)
-        .set("User-Agent", "jucode")
+        .set("User-Agent", "lynshen")
         .timeout(Duration::from_secs(60))
         .call()
         .map_err(|error| io::Error::other(error.to_string()))?;
@@ -1116,7 +1116,7 @@ mod tests {
 
     #[test]
     fn installs_the_whole_github_skill_directory_at_the_pinned_revision() {
-        let root = test_dir("jucode-github-skill-test");
+        let root = test_dir("lynshen-github-skill-test");
         let source = github_source();
         let tree = json!({ "truncated": false, "tree": [
             { "path": "skills/demo", "type": "tree", "mode": "040000" },
@@ -1165,7 +1165,7 @@ mod tests {
 
     #[test]
     fn github_install_rejects_escaping_paths_and_keeps_the_existing_skill() {
-        let root = test_dir("jucode-github-escape-test");
+        let root = test_dir("lynshen-github-escape-test");
         let installed = root.join("demo");
         fs::create_dir_all(&installed).unwrap();
         fs::write(installed.join("SKILL.md"), "old content").unwrap();
@@ -1208,7 +1208,7 @@ mod tests {
 
     #[test]
     fn installs_skill_file() {
-        let root = test_dir("jucode-marketplace-skill-test");
+        let root = test_dir("lynshen-marketplace-skill-test");
         let skill = MarketplaceSkill {
             id: "Code Review".to_string(),
             name: "Code Review".to_string(),
@@ -1233,7 +1233,7 @@ mod tests {
 
     #[test]
     fn extracts_zip_skill_package_contents() {
-        let root = test_dir("jucode-zip-skill-test");
+        let root = test_dir("lynshen-zip-skill-test");
         let package = root.join("skill.zip");
         fs::create_dir_all(&root).unwrap();
         create_zip(
@@ -1281,7 +1281,7 @@ mod tests {
 
     #[test]
     fn package_install_requires_sha256_and_preserves_existing_skill() {
-        let root = test_dir("jucode-package-sha-test");
+        let root = test_dir("lynshen-package-sha-test");
         let package = root.join("skill.zip");
         let installed = root.join("skills/packaged");
         fs::create_dir_all(&installed).unwrap();
@@ -1318,7 +1318,7 @@ mod tests {
 
     #[test]
     fn unsafe_archive_path_is_rejected_without_replacing_existing_skill() {
-        let root = test_dir("jucode-package-escape-test");
+        let root = test_dir("lynshen-package-escape-test");
         let package = root.join("skill.zip");
         let installed = root.join("skills/packaged");
         fs::create_dir_all(&installed).unwrap();
@@ -1360,7 +1360,7 @@ mod tests {
 
     #[test]
     fn lifecycle_enable_disable_and_uninstall_updates_state() {
-        let root = test_dir("jucode-skill-lifecycle-test");
+        let root = test_dir("lynshen-skill-lifecycle-test");
         let installed = root.join("skills/review");
         fs::create_dir_all(&installed).unwrap();
         fs::write(

@@ -1,5 +1,5 @@
 //! Notifications on the paired phones. A phone's browser gives the daemon
-//! its Web Push subscription over the encrypted channel, the JuCode Android
+//! its Web Push subscription over the encrypted channel, the LynShen Android
 //! app its 个推 (Getui) client id; to notify it, the daemon asks the relay,
 //! which signs the request for the push service (VAPID) or sends it through
 //! Getui, and passes the title and text on without keeping them.
@@ -120,7 +120,7 @@ pub fn test(hub: &Arc<Hub>, device: &str) -> Value {
         .cloned()
         .collect();
     let payload = json!({
-        "title": "JuCode",
+        "title": "LynShen",
         "body": "测试通知：这台设备能收到电脑发来的通知。",
         "tag": "push-test",
         "url": "/remote",
@@ -167,11 +167,11 @@ fn send(hub: &Arc<Hub>, payload: Value) {
                 let _ = hub.push.unsubscribe(key(&subscription));
             }
             Ok(status) if status >= 300 => {
-                jucode_agent_core::log_warn!("daemon", "push refused", status = status);
+                lynshen_agent_core::log_warn!("daemon", "push refused", status = status);
             }
             Ok(_) => {}
             Err(error) => {
-                jucode_agent_core::log_warn!("daemon", "push failed", error = error);
+                lynshen_agent_core::log_warn!("daemon", "push failed", error = error);
             }
         });
     }
@@ -192,7 +192,7 @@ mod tests {
 
     #[test]
     fn keeps_web_push_and_getui_subscriptions_per_device() {
-        let dir = std::env::temp_dir().join(format!("jucode-push-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("lynshen-push-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let push = Push::load(&dir);
         let web = json!({ "endpoint": "https://web.push.apple.com/a", "keys": { "p256dh": "p", "auth": "a" } });

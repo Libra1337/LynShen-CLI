@@ -1,11 +1,11 @@
 mod acp;
 mod daemon_admin;
 
-use jucode_agent_core::{
+use lynshen_agent_core::{
     protocol::{self, event_json},
     AgentCore, AgentEvent, ApprovalMode,
 };
-use jucode_tui::{TuiApp, TuiRuntime};
+use lynshen_tui::{TuiApp, TuiRuntime};
 use serde_json::{json, Value};
 use std::{
     env, io,
@@ -80,7 +80,7 @@ fn end_tool_processes_on_signal() {
         std::thread::spawn(move || {
             let mut signal = 0;
             if libc::sigwait(&set, &mut signal) == 0 {
-                jucode_agent_core::terminate_tool_processes();
+                lynshen_agent_core::terminate_tool_processes();
                 std::process::exit(128 + signal);
             }
         });
@@ -88,14 +88,14 @@ fn end_tool_processes_on_signal() {
 }
 
 fn main() -> io::Result<()> {
-    jucode_agent_core::logging::init_global();
+    lynshen_agent_core::logging::init_global();
     let mut args = env::args().skip(1).collect::<Vec<_>>();
     // Before anything that may touch the terminal: `--version` must work in
     // TTY-less contexts (CI release guard, the desktop's check_backend probe).
     if args.iter().any(|a| a == "--version" || a == "-V")
         || args.first().map(String::as_str) == Some("version")
     {
-        println!("jucode {}", env!("CARGO_PKG_VERSION"));
+        println!("lynshen {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
     if args.iter().any(|a| a == "--help" || a == "-h")
@@ -123,7 +123,7 @@ fn main() -> io::Result<()> {
         end_tool_processes_on_signal();
     }
     let exit = |code: io::Result<i32>| -> io::Result<()> {
-        jucode_agent_core::terminate_tool_processes();
+        lynshen_agent_core::terminate_tool_processes();
         std::process::exit(code?);
     };
     if args.first().map(String::as_str) == Some("--headless") {
@@ -146,7 +146,7 @@ fn main() -> io::Result<()> {
     if args.first().map(String::as_str) == Some("token") {
         // The desktop's own gateway calls take the token from here, so one
         // implementation refreshes it.
-        match jucode_agent_core::jucode_session() {
+        match lynshen_agent_core::lynshen_session() {
             Ok((api_url, access_token, expires_at)) => {
                 println!(
                     "{}",
@@ -161,7 +161,7 @@ fn main() -> io::Result<()> {
         }
     }
     if args.first().map(String::as_str) == Some("logout") {
-        match jucode_agent_core::jucode_logout() {
+        match lynshen_agent_core::lynshen_logout() {
             Ok(()) => std::process::exit(0),
             Err(error) => {
                 eprintln!("{error}");
@@ -170,15 +170,15 @@ fn main() -> io::Result<()> {
         }
     }
     if args.first().map(String::as_str) == Some("providers") {
-        // JuCode lists the models the user chose to show, once they have.
-        let jucode_models = jucode_agent_core::jucode_visible_models();
-        let list = jucode_agent_core::builtin_providers()
+        // LynShen lists the models the user chose to show, once they have.
+        let lynshen_models = lynshen_agent_core::lynshen_visible_models();
+        let list = lynshen_agent_core::builtin_providers()
             .into_iter()
             .map(|(id, base_url, protocol)| {
-                let models = if id == "jucode" && !jucode_models.is_empty() {
-                    jucode_models.clone()
+                let models = if id == "lynshen" && !lynshen_models.is_empty() {
+                    lynshen_models.clone()
                 } else {
-                    jucode_agent_core::models_for_provider(&id)
+                    lynshen_agent_core::models_for_provider(&id)
                 };
                 let models = models
                     .into_iter()
@@ -210,32 +210,32 @@ fn main() -> io::Result<()> {
 
 fn help_text() -> String {
     format!(
-        "jucode {} — a lightweight terminal coding agent
+        "lynshen {} — a lightweight terminal coding agent
 
 USAGE:
-    jucode [OPTIONS]                     start the interactive TUI
-    jucode --headless [PROMPT]           run one prompt non-interactively
+    lynshen [OPTIONS]                     start the interactive TUI
+    lynshen --headless [PROMPT]           run one prompt non-interactively
                                          (reads stdin when PROMPT is omitted;
                                          emits JSONL events + final_result;
                                          defaults to manual, approvals are
                                          auto-denied — pass --approval-mode
                                          full-access for unattended writes)
-    jucode serve                         newline-JSON protocol for GUI/IDE
-                                         front-ends (jucode's native schema)
-    jucode daemon [--listen <addr>]      host many sessions for Desktop and
+    lynshen serve                         newline-JSON protocol for GUI/IDE
+                                         front-ends (lynshen's native schema)
+    lynshen daemon [--listen <addr>]      host many sessions for Desktop and
                                          remote clients over a WebSocket
                                          (--relay <url> | --no-relay: reach
-                                         it through the JuCode relay once
+                                         it through the LynShen relay once
                                          Desktop turns that on)
-    jucode daemon install|uninstall      run the daemon at login (launchd /
+    lynshen daemon install|uninstall      run the daemon at login (launchd /
                                          systemd user service)
-    jucode acp                           Agent Client Protocol (ACP v1)
+    lynshen acp                           Agent Client Protocol (ACP v1)
                                          JSON-RPC adapter over stdio, for
                                          ACP-capable editors like Zed
-    jucode providers                     print built-in providers as JSON
-    jucode token                         print a JuCode access token as JSON (refreshed when needed)
-    jucode update                        update jucode to the latest release
-    jucode version                       print the version
+    lynshen providers                     print built-in providers as JSON
+    lynshen token                         print a LynShen access token as JSON (refreshed when needed)
+    lynshen update                        update lynshen to the latest release
+    lynshen version                       print the version
 
 OPTIONS:
     --approval-mode <manual|auto-edit|auto|full-access>
@@ -248,7 +248,7 @@ OPTIONS:
     -V, --version                        print the version
 
 The TUI also supports: ! <cmd> (run a local shell command), @file mentions,
-/image <path> (attach an image), and custom commands from ~/.jucode/commands.
+/image <path> (attach an image), and custom commands from ~/.lynshen/commands.
 ",
         env!("CARGO_PKG_VERSION")
     )
@@ -372,14 +372,14 @@ fn queue_headless_denial(event: &AgentEvent, pending_denials: &mut Vec<(String, 
     }
 }
 
-/// `jucode update`: npm installs update through npm, the copy JuCode Desktop
+/// `lynshen update`: npm installs update through npm, the copy LynShen Desktop
 /// manages updates with the app, and a release binary replaces itself.
 fn run_update() -> i32 {
-    use jucode_agent_core::update;
+    use lynshen_agent_core::update;
     let current = env!("CARGO_PKG_VERSION");
     let channel = update::install_channel();
     if channel == update::InstallChannel::Desktop {
-        println!("this jucode is managed by JuCode Desktop and updates with the app ({current})");
+        println!("this lynshen is managed by LynShen Desktop and updates with the app ({current})");
         return 0;
     }
     let release = match update::latest_release(std::time::Duration::from_secs(10)) {
@@ -413,9 +413,9 @@ fn run_update() -> i32 {
     }
 }
 
-/// `jucode daemon [--listen <addr>]`: host sessions for Desktop and remote
+/// `lynshen daemon [--listen <addr>]`: host sessions for Desktop and remote
 /// clients until killed. Listens on loopback unless told otherwise. The
-/// relay connection (`--relay`, default `wss://app.jucode.net/relay/v1`) is
+/// relay connection (`--relay`, default `wss://app.lynshen.net/relay/v1`) is
 /// made only once a local client turns it on; `--no-relay` rules it out.
 fn run_daemon(args: &[String]) -> io::Result<i32> {
     let (action, args) = match args.first().map(String::as_str) {
@@ -425,10 +425,10 @@ fn run_daemon(args: &[String]) -> io::Result<i32> {
             let state = args.get(1).filter(|arg| !arg.starts_with("--"));
             let rest = &args[1 + usize::from(state.is_some())..];
             let listen = match rest {
-                [] => jucode_daemon::DEFAULT_LISTEN.to_string(),
+                [] => lynshen_daemon::DEFAULT_LISTEN.to_string(),
                 [flag, address] if flag == "--listen" => address.clone(),
                 _ => {
-                    eprintln!("usage: jucode daemon relay [on|off|status] [--listen <host:port>]");
+                    eprintln!("usage: lynshen daemon relay [on|off|status] [--listen <host:port>]");
                     return Ok(2);
                 }
             };
@@ -436,9 +436,9 @@ fn run_daemon(args: &[String]) -> io::Result<i32> {
         }
         _ => ("run", args),
     };
-    let mut listen = jucode_daemon::DEFAULT_LISTEN.to_string();
+    let mut listen = lynshen_daemon::DEFAULT_LISTEN.to_string();
     let mut web = None;
-    let mut relay = Some(jucode_daemon::DEFAULT_RELAY.to_string());
+    let mut relay = Some(lynshen_daemon::DEFAULT_RELAY.to_string());
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
         if arg == "--no-relay" {
@@ -451,7 +451,7 @@ fn run_daemon(args: &[String]) -> io::Result<i32> {
             ("--relay", Some(url)) => relay = Some(url.clone()),
             _ => {
                 eprintln!(
-                    "usage: jucode daemon [install|uninstall|pair] [--listen <host:port>] [--web <dir>] [--relay <wss url> | --no-relay]\n       jucode daemon relay [on|off|status] [--listen <host:port>]"
+                    "usage: lynshen daemon [install|uninstall|pair] [--listen <host:port>] [--web <dir>] [--relay <wss url> | --no-relay]\n       lynshen daemon relay [on|off|status] [--listen <host:port>]"
                 );
                 return Ok(2);
             }
@@ -466,17 +466,17 @@ fn run_daemon(args: &[String]) -> io::Result<i32> {
     });
     let outcome = match action {
         // The service runs with the same relay choice as this command line.
-        "install" => Some(jucode_daemon::install::install(
+        "install" => Some(lynshen_daemon::install::install(
             &listen,
             match &relay {
                 None => vec!["--no-relay".to_string()],
-                Some(url) if url != jucode_daemon::DEFAULT_RELAY => {
+                Some(url) if url != lynshen_daemon::DEFAULT_RELAY => {
                     vec!["--relay".to_string(), url.clone()]
                 }
                 Some(_) => Vec::new(),
             },
         )),
-        "uninstall" => Some(jucode_daemon::install::uninstall()),
+        "uninstall" => Some(lynshen_daemon::install::uninstall()),
         "pair" => return daemon_admin::pair(&listen),
         _ => None,
     };
@@ -493,13 +493,13 @@ fn run_daemon(args: &[String]) -> io::Result<i32> {
         });
     }
     // A login started from a daemon session is the desktop's.
-    jucode_agent_core::set_login_client_label("JuCode Desktop");
-    let store = match jucode_daemon::Store::open(jucode_daemon::state_dir()?) {
+    lynshen_agent_core::set_login_client_label("LynShen Desktop");
+    let store = match lynshen_daemon::Store::open(lynshen_daemon::state_dir()?) {
         Ok(store) => store,
         // Another daemon holds the state directory: exit successfully, as for
         // a taken port below.
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            eprintln!("jucode daemon: {error}");
+            eprintln!("lynshen daemon: {error}");
             return Ok(0);
         }
         Err(error) => return Err(error),
@@ -513,17 +513,17 @@ fn run_daemon(args: &[String]) -> io::Result<i32> {
         // (launchd SuccessfulExit=false, systemd Restart=on-failure) does not
         // retry forever.
         Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
-            eprintln!("jucode daemon: {listen} is already in use; another daemon is running");
+            eprintln!("lynshen daemon: {listen} is already in use; another daemon is running");
             return Ok(0);
         }
         Err(error) => return Err(error),
     };
     eprintln!(
-        "jucode daemon listening on ws://{} (token in {})",
+        "lynshen daemon listening on ws://{} (token in {})",
         listener.local_addr()?,
-        jucode_daemon::state_dir()?.join("token").display()
+        lynshen_daemon::state_dir()?.join("token").display()
     );
-    let agents = jucode_daemon::Agents::open(jucode_daemon::agents_dir()?)?;
+    let agents = lynshen_daemon::Agents::open(lynshen_daemon::agents_dir()?)?;
     if let Some(dir) = &web {
         eprintln!(
             "remote page: http://{}/remote (from {})",
@@ -531,7 +531,7 @@ fn run_daemon(args: &[String]) -> io::Result<i32> {
             dir.display()
         );
     }
-    jucode_daemon::serve(
+    lynshen_daemon::serve(
         listener,
         store,
         agents,
@@ -548,10 +548,10 @@ fn run_daemon(args: &[String]) -> io::Result<i32> {
 /// `AgentEvent` stream as newline-delimited JSON on stdout (same schema as
 /// `--headless`). Runs until stdin closes or a `shutdown`/`/quit` command.
 ///
-/// `--chat` starts a chat session in `~/.jucode/chats`.
+/// `--chat` starts a chat session in `~/.lynshen/chats`.
 fn run_serve(approval_mode: Option<ApprovalMode>, chat: bool) -> io::Result<i32> {
     let core = if chat {
-        AgentCore::open(jucode_agent_core::chat::ensure_chats_dir()?)?
+        AgentCore::open(lynshen_agent_core::chat::ensure_chats_dir()?)?
     } else {
         AgentCore::new()?
     };
@@ -627,7 +627,7 @@ fn handle_serve_line(
     let value = match serde_json::from_str::<Value>(line) {
         Ok(value) => value,
         Err(error) => {
-            jucode_agent_core::log_warn!(
+            lynshen_agent_core::log_warn!(
                 "serve",
                 "failed to parse command line",
                 error = error.to_string()

@@ -1,7 +1,7 @@
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
-use jucode_tui::bench_support::RenderFrameBench;
+use lynshen_tui::bench_support::RenderFrameBench;
 
 const WIDTH: usize = 120;
 const HEIGHT: u16 = 40;

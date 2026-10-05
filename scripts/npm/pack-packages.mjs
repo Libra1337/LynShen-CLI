@@ -42,7 +42,7 @@ for (const target of selectedTargets) {
     throw new Error(`Missing staged binary for ${target.rustTarget}: ${binaryPath}`);
   }
 
-  if (target.binaryName !== "jucode.exe" && (statSync(binaryPath).mode & 0o111) === 0) {
+  if (target.binaryName !== "lynshen.exe" && (statSync(binaryPath).mode & 0o111) === 0) {
     throw new Error(`Staged binary is not executable for ${target.rustTarget}: ${binaryPath}`);
   }
 }
@@ -55,7 +55,7 @@ for (const directory of [...selectedTargets.map((target) => target.directory), r
   for (const file of ["LICENSE", "NOTICE"]) {
     copyFileSync(path.join(repoRoot, file), path.join(cwd, file));
   }
-  const thirdParty = path.join(repoRoot, "jucode-third-party-notices.txt");
+  const thirdParty = path.join(repoRoot, "lynshen-third-party-notices.txt");
   if (existsSync(thirdParty)) {
     copyFileSync(thirdParty, path.join(cwd, "THIRD-PARTY-NOTICES.txt"));
   }

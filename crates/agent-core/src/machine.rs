@@ -1,7 +1,7 @@
 //! A stable id for this computer. Credentials and identities under
-//! `~/.jucode` are only good on the computer that created them: copied to
+//! `~/.lynshen` are only good on the computer that created them: copied to
 //! another one (a migration assistant, synced dotfiles, a cloned disk) they
-//! would share one JuCode device login and one relay identity, and each
+//! would share one LynShen device login and one relay identity, and each
 //! computer would keep knocking the other off. Each records the id it was
 //! made on and is dropped where the id differs.
 
@@ -13,11 +13,11 @@ use std::sync::OnceLock;
 pub fn machine_id() -> Option<&'static str> {
     static ID: OnceLock<Option<String>> = OnceLock::new();
     ID.get_or_init(|| {
-        let raw = std::env::var("JUCODE_MACHINE_ID")
+        let raw = std::env::var("LYNSHEN_MACHINE_ID")
             .ok()
             .filter(|id| !id.trim().is_empty())
             .or_else(os_machine_id)?;
-        let digest = Sha256::digest(format!("jucode-machine:{}", raw.trim()).as_bytes());
+        let digest = Sha256::digest(format!("lynshen-machine:{}", raw.trim()).as_bytes());
         Some(digest[..16].iter().map(|b| format!("{b:02x}")).collect())
     })
     .as_deref()

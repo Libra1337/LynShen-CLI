@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use jucode_agent_core::{LoginProviderView, ModelOptionView, SessionListItemView, TreeNodeView};
+use lynshen_agent_core::{LoginProviderView, ModelOptionView, SessionListItemView, TreeNodeView};
 
 use crate::format_token_count;
 

@@ -21,10 +21,10 @@ jobs:
         target:
           - runner: windows-latest
             rust_target: x86_64-pc-windows-msvc
-            binary_name: jucode.exe
+            binary_name: lynshen.exe
           - runner: ubuntu-22.04
             rust_target: x86_64-unknown-linux-gnu
-            binary_name: jucode
+            binary_name: lynshen
 
     steps:
       - uses: actions/checkout@v4
@@ -118,7 +118,7 @@ jobs:
 
       - name: Write third-party notices
         run: |
-          node scripts/third-party-notices.mjs --cargo Cargo.toml --title "JuCode CLI: third-party software" --out jucode-third-party-notices.txt
+          node scripts/third-party-notices.mjs --cargo Cargo.toml --title "LynShen CLI: third-party software" --out lynshen-third-party-notices.txt
 
       - name: Sync npm versions
         env:
@@ -136,17 +136,17 @@ jobs:
       - name: Name binaries by target for the release
         shell: bash
         run: |
-          cp artifacts-normalized/x86_64-unknown-linux-gnu/jucode jucode-x86_64-unknown-linux-gnu
-          cp artifacts-normalized/x86_64-pc-windows-msvc/jucode.exe jucode-x86_64-pc-windows-msvc.exe
+          cp artifacts-normalized/x86_64-unknown-linux-gnu/lynshen lynshen-x86_64-unknown-linux-gnu
+          cp artifacts-normalized/x86_64-pc-windows-msvc/lynshen.exe lynshen-x86_64-pc-windows-msvc.exe
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.release_meta.outputs.tag }}
           files: |
-            jucode-x86_64-unknown-linux-gnu
-            jucode-x86_64-pc-windows-msvc.exe
-            jucode-third-party-notices.txt
+            lynshen-x86_64-unknown-linux-gnu
+            lynshen-x86_64-pc-windows-msvc.exe
+            lynshen-third-party-notices.txt
             dist/npm/*.tgz
 
       - name: Publish npm packages
@@ -154,5 +154,5 @@ jobs:
         shell: bash
         run: |
           version="${{ steps.release_meta.outputs.version }}"
-          npm view "@jucode/cli-linux-x64@${version}" version >/dev/null 2>&1 || npm publish ./npm/cli-linux-x64 --access public
-          npm view "@jucode/cli-win32-x64@${version}" version >/dev/null 2>&1 || npm publish ./npm/cli-win32-x64 --access public
+          npm view "@lynshen/cli-linux-x64@${version}" version >/dev/null 2>&1 || npm publish ./npm/cli-linux-x64 --access public
+          npm view "@lynshen/cli-win32-x64@${version}" version >/dev/null 2>&1 || npm publish ./npm/cli-win32-x64 --access public

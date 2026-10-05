@@ -943,66 +943,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "jucode-agent-core"
-version = "0.4.8"
-dependencies = [
- "base64",
- "chacha20poly1305 0.11.0",
- "flate2",
- "getrandom 0.2.17",
- "libc",
- "llm-provider-kit",
- "semver",
- "serde_json",
- "sha2",
- "tar",
- "tiktoken-rs",
- "ureq",
- "zip",
-]
-
-[[package]]
-name = "jucode-cli"
-version = "0.4.8"
-dependencies = [
- "jucode-agent-core",
- "jucode-daemon",
- "jucode-tui",
- "libc",
- "serde_json",
- "tungstenite",
-]
-
-[[package]]
-name = "jucode-daemon"
-version = "0.4.8"
-dependencies = [
- "base64",
- "chrono",
- "ed25519-dalek",
- "getrandom 0.2.17",
- "jucode-agent-core",
- "portable-pty",
- "rustls",
- "serde_json",
- "sha2",
- "snow",
- "tungstenite",
- "ureq",
-]
-
-[[package]]
-name = "jucode-tui"
-version = "0.4.8"
-dependencies = [
- "base64",
- "jucode-agent-core",
- "ratatui",
- "serde_json",
- "unicode-width 0.2.0",
-]
-
-[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1065,6 +1005,66 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "234cf4f4a04dc1f57e24b96cc0cd600cf2af460d4161ac5ecdd0af8e1f3b2a38"
 dependencies = [
  "hashbrown",
+]
+
+[[package]]
+name = "lynshen-agent-core"
+version = "0.4.8"
+dependencies = [
+ "base64",
+ "chacha20poly1305 0.11.0",
+ "flate2",
+ "getrandom 0.2.17",
+ "libc",
+ "llm-provider-kit",
+ "semver",
+ "serde_json",
+ "sha2",
+ "tar",
+ "tiktoken-rs",
+ "ureq",
+ "zip",
+]
+
+[[package]]
+name = "lynshen-cli"
+version = "0.4.8"
+dependencies = [
+ "libc",
+ "lynshen-agent-core",
+ "lynshen-daemon",
+ "lynshen-tui",
+ "serde_json",
+ "tungstenite",
+]
+
+[[package]]
+name = "lynshen-daemon"
+version = "0.4.8"
+dependencies = [
+ "base64",
+ "chrono",
+ "ed25519-dalek",
+ "getrandom 0.2.17",
+ "lynshen-agent-core",
+ "portable-pty",
+ "rustls",
+ "serde_json",
+ "sha2",
+ "snow",
+ "tungstenite",
+ "ureq",
+]
+
+[[package]]
+name = "lynshen-tui"
+version = "0.4.8"
+dependencies = [
+ "base64",
+ "lynshen-agent-core",
+ "ratatui",
+ "serde_json",
+ "unicode-width 0.2.0",
 ]
 
 [[package]]

@@ -1,20 +1,20 @@
-# Releasing JuCode CLI
+# Releasing LynShen CLI
 
-JuCode CLI follows the same distribution shape as Codex CLI:
+LynShen CLI follows the same distribution shape as Codex CLI:
 
 - GitHub Releases are the canonical native artifacts.
 - npm is a convenience install channel for the native binaries.
-- The public npm entrypoint is `@jucode/cli`.
+- The public npm entrypoint is `@lynshen/cli`.
 
 ## Package layout
 
-- `npm/cli`: meta package with the `jucode` launcher.
+- `npm/cli`: meta package with the `lynshen` launcher.
 - `npm/cli-win32-x64`: Windows x64 native binary.
 - `npm/cli-linux-x64`: Linux x64 native binary.
 
 ## One-time setup
 
-1. Create the npm scope and grant publish access for `@jucode`.
+1. Create the npm scope and grant publish access for `@lynshen`.
 2. Add `NPM_TOKEN` to the GitHub repository secrets.
 3. Confirm the repository has permission to create releases with `GITHUB_TOKEN`.
 

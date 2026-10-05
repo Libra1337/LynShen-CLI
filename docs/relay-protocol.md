@@ -1,10 +1,10 @@
 # Relay protocol (v1)
 
-Lets a paired phone (the PWA at `https://app.jucode.net`) reach a desktop's
-`jucode daemon` from outside the LAN. Three parties:
+Lets a paired phone (the PWA at `https://app.lynshen.net`) reach a desktop's
+`lynshen daemon` from outside the LAN. Three parties:
 
 - **host**: the daemon. Keeps one outbound WebSocket to the relay.
-- **relay**: `jucode-relay` (Go, JuCode-backend `cmd/jucode-relay`). Forwards
+- **relay**: `lynshen-relay` (Go, LynShen-backend `cmd/lynshen-relay`). Forwards
   opaque bytes between a client and its host. Holds no keys, sees no content,
   stores nothing on disk.
 - **client**: the PWA (or any device). Opens one WebSocket per session to the
@@ -30,7 +30,7 @@ The daemon keeps two keypairs in `<daemon state dir>/relay-identity.json`
 22 characters. It names the host at the relay and in pairing links.
 
 Each client keeps its own X25519 static keypair (the PWA: localStorage key
-`jucode-relay-device`, JSON `{priv, pub}`, base64url). A paired device is
+`lynshen-relay-device`, JSON `{priv, pub}`, base64url). A paired device is
 identified to the daemon by its static public key.
 
 ## 2. Pairing link
@@ -42,19 +42,19 @@ https://<relay host>/remote#pair=<host_id>.<host_static_pub>.<code>
 ```
 
 The link is on the relay's own origin (`--relay wss://host/relay/v1` →
-`https://host/remote`; `app.jucode.net` by default).
+`https://host/remote`; `app.lynshen.net` by default).
 
 - `host_static_pub`: the daemon's X25519 public key (32 bytes, base64url).
 - `code`: a one-time pairing code from the existing `pair_start` op (8 chars,
   5 minutes, single use).
 - The fragment is never sent to any server. The PWA reads it, stores
   `{host_id, host_static_pub, relay: "wss://<link origin>/relay/v1"}` under
-  localStorage `jucode-relay-host`, then clears the fragment
+  localStorage `lynshen-relay-host`, then clears the fragment
   (`history.replaceState`).
 
 ## 3. Relay endpoints
 
-Base: `wss://app.jucode.net/relay/v1` (Caddy terminates TLS and proxies to the
+Base: `wss://app.lynshen.net/relay/v1` (Caddy terminates TLS and proxies to the
 relay on `127.0.0.1:18095`; the relay itself speaks plain WS/HTTP).
 
 ### 3.1 Host connection: `GET /relay/v1/host`
@@ -63,7 +63,7 @@ After the WebSocket upgrade:
 
 1. relay → host, text: `{"t":"challenge","nonce":"<32 random bytes, b64>"}`
 2. host → relay, text:
-   `{"t":"auth","pub":"<ed25519 pub, b64>","sig":"<sig over \"jucode-relay-v1:\" || nonce bytes, b64>","v":"<daemon version>"}`
+   `{"t":"auth","pub":"<ed25519 pub, b64>","sig":"<sig over \"lynshen-relay-v1:\" || nonce bytes, b64>","v":"<daemon version>"}`
 3. relay verifies the signature, derives the host id from `pub`, and replies
    `{"t":"ready","host":"<host_id>"}`. A newer authenticated connection for the
    same host id replaces the older one (the older one is closed with code 4409).
@@ -114,15 +114,15 @@ Logs: connects/disconnects with host id and stream counts; never payloads.
 ### Web Push and Getui
 
 The relay sends Web Push notifications, and 个推 (Getui) notifications to the
-JuCode Android app, for connected hosts; it keeps no subscriptions and stores
+LynShen Android app, for connected hosts; it keeps no subscriptions and stores
 nothing it passes on.
 
 - `GET /relay/v1/push/key` → `{"key":"<VAPID public key, base64url>"}`: the
   `applicationServerKey` a browser subscribes with.
 - `POST /relay/v1/push`, body
   `{"pub":"<host Ed25519 public key>","ts":<ms>,"subscription":{"endpoint","keys":{"p256dh","auth"}},"payload":{…}}`,
-  header `X-JuCode-Signature`: base64url Ed25519 signature over
-  `"jucode-relay-push-v1:" + body`. Accepted only from a host connected now,
+  header `X-LynShen-Signature`: base64url Ed25519 signature over
+  `"lynshen-relay-push-v1:" + body`. Accepted only from a host connected now,
   within 5 minutes of `ts`, at most 60 per host per minute, for endpoints of
   the browser push services, payload at most 3 KB. Replies `204` sent, `410`
   the subscription is gone (forget it), `401`/`403`/`400`/`429`/`502`
@@ -144,7 +144,7 @@ these endpoints are not served.
 
 ## 4. Noise session (client ⇄ daemon, inside one stream)
 
-`Noise_IK_25519_ChaChaPoly_SHA256`, prologue = ASCII `jucode-relay-v1`.
+`Noise_IK_25519_ChaChaPoly_SHA256`, prologue = ASCII `lynshen-relay-v1`.
 The client is the initiator and knows the daemon static key from pairing.
 
 1. **msg 1** (client → daemon, `-> e, es, s, ss`), payload = JSON
@@ -178,15 +178,15 @@ on device clients. Revoking a device closes its relay streams.
 
 ## 5. Daemon configuration
 
-`jucode daemon` flags / config:
+`lynshen daemon` flags / config:
 
-- `--relay <wss url>` (default `wss://app.jucode.net/relay/v1`),
+- `--relay <wss url>` (default `wss://app.lynshen.net/relay/v1`),
   `--no-relay` to disable. Desktop turns it on with a setting
   ("允许通过中继远程访问").
 - New local-client ops (not allowed for device clients):
   - `relay_status` → `{type:"relay_status", enabled, connected, host, url}`
   - `pair_link` → like `pair_start` but also returns
-    `{link:"https://app.jucode.net/remote#pair=..."}`; an error while the
+    `{link:"https://app.lynshen.net/remote#pair=..."}`; an error while the
     relay is off.
   - `relay_set {enabled}` → turns the relay on or off (persisted in
     `settings.json`) and replies `relay_status`. Off by default.

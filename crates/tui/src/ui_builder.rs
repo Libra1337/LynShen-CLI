@@ -558,7 +558,7 @@ impl UiBuilder {
         let right_lines: Vec<Vec<Span<'static>>> = vec![
             vec![
                 Span::styled("Welcome to ", STARTUP_TEXT),
-                Span::styled("JuCode", brand),
+                Span::styled("LynShen", brand),
             ],
             vec![
                 Span::styled(format!("v{version}"), STARTUP_STRONG),

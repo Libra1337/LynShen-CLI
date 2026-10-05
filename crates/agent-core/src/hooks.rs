@@ -8,7 +8,7 @@ use std::{
 };
 
 /// User-configured shell hooks that run at lifecycle points. Loaded from
-/// `~/.jucode/hooks.json` (global) and `<cwd>/.jucode/hooks.json` (project,
+/// `~/.lynshen/hooks.json` (global) and `<cwd>/.lynshen/hooks.json` (project,
 /// only when the project is trusted). Cheap to clone — shared via `Arc`.
 #[derive(Debug, Clone, Default)]
 pub struct Hooks {
@@ -51,7 +51,7 @@ impl Hooks {
         let mut set = HookSet::default();
         merge_file(&mut set, &profile_dir.join("hooks.json"));
         if project_trusted {
-            merge_file(&mut set, &cwd.join(".jucode").join("hooks.json"));
+            merge_file(&mut set, &cwd.join(".lynshen").join("hooks.json"));
         }
         Self {
             inner: Arc::new(set),
@@ -178,7 +178,7 @@ fn run_command(command: &str, payload: &Value, cwd: &Path) -> Outcome {
         .arg(flag)
         .arg(command)
         .current_dir(cwd)
-        .env("JUCODE_HOOK_EVENT", event)
+        .env("LYNSHEN_HOOK_EVENT", event)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

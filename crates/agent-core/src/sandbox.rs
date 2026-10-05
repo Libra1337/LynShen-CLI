@@ -5,10 +5,10 @@
 //! - `read-only`: commands can read, not write.
 //! - `workspace-write`: the working directory, the agent's read-write
 //!   directories, temp and package-cache directories are writable. Inside
-//!   them `.git`, `.jucode` and `.agents` stay read-only.
+//!   them `.git`, `.lynshen` and `.agents` stay read-only.
 //! - `full-access`: no sandbox.
 //!
-//! Credentials (`~/.ssh`, `~/.gnupg`, `~/.aws`, JuCode's own auth and daemon
+//! Credentials (`~/.ssh`, `~/.gnupg`, `~/.aws`, LynShen's own auth and daemon
 //! state) are unreadable in every sandboxed mode. macOS uses Seatbelt
 //! (`sandbox-exec`), Linux `bwrap`; Windows supports `full-access` only.
 //! File tools run in-process and check writes against the same rules.
@@ -131,18 +131,18 @@ impl SandboxPolicy {
         roots
     }
 
-    /// `.git` (and a worktree's real git directory), `.jucode` and `.agents`
+    /// `.git` (and a worktree's real git directory), `.lynshen` and `.agents`
     /// under the working directory and the read-write directories, and the
     /// read-only directories. A path
     /// that contains `cwd` itself is left writable, so a subagent working
-    /// inside `.jucode/agents/…` can still write its own worktree.
+    /// inside `.lynshen/agents/…` can still write its own worktree.
     pub fn protected_paths(&self, cwd: &Path) -> Vec<PathBuf> {
         let cwd = real(cwd);
         let mut roots = vec![cwd.clone()];
         roots.extend(self.writable_dirs.iter().map(|dir| real(dir)));
         let mut protected = Vec::new();
         for root in roots {
-            for name in [".git", ".jucode", ".agents"] {
+            for name in [".git", ".lynshen", ".agents"] {
                 let path = root.join(name);
                 if path.is_dir() {
                     protected.push(path);
@@ -339,7 +339,7 @@ impl SandboxPolicy {
         let writable = match self.mode {
             SandboxMode::ReadOnly => "Nothing is writable.".to_string(),
             _ => format!(
-                "Writable: the working directory{}, temp and package-cache directories; .git, .jucode and .agents inside them are read-only.",
+                "Writable: the working directory{}, temp and package-cache directories; .git, .lynshen and .agents inside them are read-only.",
                 if self.writable_dirs.is_empty() {
                     String::new()
                 } else {
@@ -509,8 +509,8 @@ pub fn denied_reads() -> Vec<PathBuf> {
         ".ssh",
         ".gnupg",
         ".aws",
-        ".jucode/auth.json",
-        ".jucode/daemon",
+        ".lynshen/auth.json",
+        ".lynshen/daemon",
     ]
     .iter()
     .map(|path| real(&home.join(path)))
@@ -624,10 +624,10 @@ mod tests {
     }
 
     fn work(label: &str) -> PathBuf {
-        let dir = env::temp_dir().join(format!("jucode-sandbox-{label}-{}", std::process::id()));
+        let dir = env::temp_dir().join(format!("lynshen-sandbox-{label}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join(".git")).unwrap();
-        fs::create_dir_all(dir.join(".jucode/agents/sub")).unwrap();
+        fs::create_dir_all(dir.join(".lynshen/agents/sub")).unwrap();
         real(&dir)
     }
 
@@ -650,10 +650,10 @@ mod tests {
         let policy = policy(SandboxMode::WorkspaceWrite);
         assert!(policy.check_write(&dir, &dir.join("src/new.rs")).is_ok());
         assert!(policy.check_write(&dir, &dir.join(".git/config")).is_err());
-        assert!(policy.check_write(&dir, &dir.join(".jucode/x")).is_err());
+        assert!(policy.check_write(&dir, &dir.join(".lynshen/x")).is_err());
         assert!(policy.check_write(&dir, Path::new("/etc/hosts")).is_err());
-        // A subagent working inside .jucode can still write its own worktree.
-        let sub = dir.join(".jucode/agents/sub");
+        // A subagent working inside .lynshen can still write its own worktree.
+        let sub = dir.join(".lynshen/agents/sub");
         fs::write(sub.join(".git"), "gitdir: ../../../.git/worktrees/sub\n").unwrap();
         assert!(policy.check_write(&sub, &sub.join("file.txt")).is_ok());
         assert!(policy.check_write(&sub, &sub.join(".git")).is_err());
@@ -709,7 +709,7 @@ mod tests {
         let outside = real(&env::temp_dir())
             .parent()
             .unwrap()
-            .join(format!("jucode-sbx-outside-{}", std::process::id()));
+            .join(format!("lynshen-sbx-outside-{}", std::process::id()));
         let _ = fs::remove_file(&outside);
         let policy = policy(SandboxMode::WorkspaceWrite);
         let run = |script: &str| {

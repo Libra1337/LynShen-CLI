@@ -9,7 +9,7 @@ use crate::config::profile_dir;
 
 /// Remembers which project directories the user has trusted to load project-local
 /// resources (skills, hooks). Stored as an absolute-path -> decision map in
-/// `~/.jucode/trust.json`.
+/// `~/.lynshen/trust.json`.
 #[derive(Debug, Clone)]
 pub struct TrustStore {
     decisions: BTreeMap<String, bool>,
@@ -79,7 +79,7 @@ impl TrustStore {
 /// Whether `cwd` ships project-local resources that can run code or inject
 /// instructions, and therefore require a trust decision before loading.
 pub fn project_has_local_resources(cwd: &Path) -> bool {
-    let base = cwd.join(".jucode");
+    let base = cwd.join(".lynshen");
     base.join("skills").exists()
         || base.join("hooks.json").exists()
         || base.join("commands").exists()

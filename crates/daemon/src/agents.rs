@@ -1,4 +1,4 @@
-//! Long-lived agents: `~/.jucode/agents/<id>/` holds an agent's brief
+//! Long-lived agents: `~/.lynshen/agents/<id>/` holds an agent's brief
 //! (`role.md`, `capabilities.md`, `policy.md`, `state.md`), its `memory/`
 //! notes, `agent.json` (name, working directory, settings) and
 //! `schedules.json` (its scheduled tasks, see `schedules`). The daemon
@@ -6,7 +6,7 @@
 //! it current with the `brief` tool.
 
 use crate::store::{random_hex, write_private};
-use jucode_agent_core::sandbox::{
+use lynshen_agent_core::sandbox::{
     default_rules_json, directories_from_json, rules_from_json, rules_to_json, CommandRule,
     SandboxMode, SandboxPolicy,
 };
@@ -630,7 +630,7 @@ mod tests {
 
     fn agents(label: &str) -> (Agents, PathBuf) {
         let root = std::env::temp_dir().join(format!(
-            "jucode-daemon-agents-{label}-{}",
+            "lynshen-daemon-agents-{label}-{}",
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&root);
@@ -665,7 +665,7 @@ mod tests {
             .is_err());
     }
 
-    use jucode_agent_core::sandbox::RuleAction;
+    use lynshen_agent_core::sandbox::RuleAction;
 
     #[test]
     fn update_changes_only_the_given_settings() {

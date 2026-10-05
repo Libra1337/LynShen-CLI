@@ -172,9 +172,9 @@ pub fn definitions() -> Vec<Value> {
                     "workdir": { "type": "string", "description": "Working directory for the command. Relative paths are resolved from the current workspace. Defaults to current workspace." },
                     "timeout": { "type": "number", "description": "Timeout in seconds. Defaults to 60." },
                     "yield_time_ms": { "type": "number", "description": "Return early after this many milliseconds if the command is still running." },
-                    "max_output_tokens": { "type": "number", "description": "Optional compatibility hint. JuCode may still project very large outputs through its global output budget." },
-                    "tty": { "type": "boolean", "description": "Compatibility hint accepted for Codex-style calls; JuCode command execution does not require it." },
-                    "login": { "type": "boolean", "description": "Compatibility hint accepted for Codex-style calls; JuCode uses its configured shell invocation." }
+                    "max_output_tokens": { "type": "number", "description": "Optional compatibility hint. LynShen may still project very large outputs through its global output budget." },
+                    "tty": { "type": "boolean", "description": "Compatibility hint accepted for Codex-style calls; LynShen command execution does not require it." },
+                    "login": { "type": "boolean", "description": "Compatibility hint accepted for Codex-style calls; LynShen uses its configured shell invocation." }
                 },
                 "required": ["cmd"],
                 "additionalProperties": false
@@ -245,7 +245,7 @@ pub fn definitions() -> Vec<Value> {
         json!({
             "type": "function",
             "name": "checkpoint",
-            "description": "Create, list, or restore lightweight file checkpoints under .jucode/checkpoints. This is for local rollback, not git.",
+            "description": "Create, list, or restore lightweight file checkpoints under .lynshen/checkpoints. This is for local rollback, not git.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1754,7 +1754,7 @@ pub fn project_model_output(name: &str, output: &str, cwd: &Path) -> String {
 }
 
 fn project_read_model_output(name: &str, output: &str, cwd: &Path) -> Option<String> {
-    if env::var("JUCODE_PROJECT_READ_MODEL_OUTPUT")
+    if env::var("LYNSHEN_PROJECT_READ_MODEL_OUTPUT")
         .ok()
         .is_some_and(|value| matches!(value.trim(), "0" | "false" | "FALSE" | "off" | "OFF"))
     {
@@ -1885,7 +1885,7 @@ pub fn image_attachment_error(path: &Path) -> Option<String> {
 }
 
 fn project_diff_model_output(name: &str, output: &str, cwd: &Path) -> Option<String> {
-    if env::var("JUCODE_PROJECT_DIFF_MODEL_OUTPUT")
+    if env::var("LYNSHEN_PROJECT_DIFF_MODEL_OUTPUT")
         .ok()
         .is_some_and(|value| matches!(value.trim(), "0" | "false" | "FALSE" | "off" | "OFF"))
     {
@@ -2041,7 +2041,7 @@ fn write_full_tool_output(name: &str, output: &str, cwd: &Path) -> PathBuf {
             }
         })
         .collect::<String>();
-    let dir = cwd.join(".jucode").join("truncated-results");
+    let dir = cwd.join(".lynshen").join("truncated-results");
     let _ = fs::create_dir_all(&dir);
     let path = dir.join(format!("{safe_name}-{}.json", &hash[..16]));
     let _ = fs::write(&path, output);
@@ -2533,7 +2533,7 @@ impl ToolState {
         self.inner.lock().ok().and_then(|inner| inner.web.clone())
     }
 
-    /// web_search runs through the gateway, so it needs a JuCode session.
+    /// web_search runs through the gateway, so it needs a LynShen session.
     pub fn web_search_enabled(&self) -> bool {
         self.web().is_some_and(|web| web.signed_in)
     }
@@ -2644,8 +2644,8 @@ fn create_checkpoint(cwd: &Path, name: &str, paths: &[PathBuf]) -> io::Result<Va
     });
     let dir = checkpoint_dir(cwd);
     fs::create_dir_all(&dir)?;
-    // Keep .jucode out of the user's git history.
-    let ignore = cwd.join(".jucode").join(".gitignore");
+    // Keep .lynshen out of the user's git history.
+    let ignore = cwd.join(".lynshen").join(".gitignore");
     if !ignore.exists() {
         let _ = fs::write(&ignore, "*\n");
     }
@@ -2862,7 +2862,7 @@ pub(crate) fn restore_to_timestamp(cwd: &Path, t: u64, state: &ToolState) -> io:
 }
 
 fn checkpoint_dir(cwd: &Path) -> PathBuf {
-    cwd.join(".jucode").join("checkpoints")
+    cwd.join(".lynshen").join("checkpoints")
 }
 
 fn resolve_existing_or_future(cwd: &Path, path: &Path) -> PathBuf {
@@ -3209,7 +3209,7 @@ fn filter_internal_diff_sections(diff: &str) -> String {
 fn diff_header_is_internal(line: &str) -> bool {
     line.split_whitespace().skip(2).any(|path| {
         let path = strip_diff_prefix(path);
-        path == ".jucode" || path.starts_with(".jucode/")
+        path == ".lynshen" || path.starts_with(".lynshen/")
     })
 }
 
@@ -3223,7 +3223,7 @@ fn is_internal_tool_path(cwd: &Path, path: &Path) -> bool {
     relative
         .components()
         .next()
-        .is_some_and(|component| component.as_os_str() == ".jucode")
+        .is_some_and(|component| component.as_os_str() == ".lynshen")
 }
 
 fn command_failure_message(command: &str, result: &CommandResult) -> String {
@@ -3438,7 +3438,7 @@ fn temp_output_path(label: &str) -> PathBuf {
     // when two tool calls (or two hosted sessions) ask in the same tick.
     static NEXT: AtomicU64 = AtomicU64::new(0);
     env::temp_dir().join(format!(
-        "jucode-tool-{label}-{}-{}-{}.log",
+        "lynshen-tool-{label}-{}-{}-{}.log",
         std::process::id(),
         now_nanos(),
         NEXT.fetch_add(1, Ordering::Relaxed)
@@ -3726,7 +3726,7 @@ mod tests {
 
     #[test]
     fn write_root_guard_blocks_targets_outside_workspace() {
-        let root = Path::new("/work/.jucode/agents/worker-1");
+        let root = Path::new("/work/.lynshen/agents/worker-1");
 
         // Relative writes inside the workspace pass.
         assert!(write_target_escapes_root(
@@ -3767,7 +3767,7 @@ mod tests {
 
     #[test]
     fn write_root_guard_blocks_escaping_patches() {
-        let root = Path::new("/work/.jucode/agents/worker-1");
+        let root = Path::new("/work/.lynshen/agents/worker-1");
         let safe = "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-a\n+b\n";
         assert!(write_target_escapes_root(
             "apply_patch",
@@ -4067,12 +4067,12 @@ mod tests {
     }
 
     #[test]
-    fn git_diff_excludes_jucode_internal_files() {
+    fn git_diff_excludes_lynshen_internal_files() {
         let dir = test_dir("diff-internal");
-        fs::create_dir_all(dir.join(".jucode").join("checkpoints")).unwrap();
+        fs::create_dir_all(dir.join(".lynshen").join("checkpoints")).unwrap();
         run_command("git", &["init"], &dir, Duration::from_secs(30)).unwrap();
         fs::write(
-            dir.join(".jucode").join("checkpoints").join("cp.json"),
+            dir.join(".lynshen").join("checkpoints").join("cp.json"),
             "{}\n",
         )
         .unwrap();
@@ -4081,7 +4081,7 @@ mod tests {
         let diff = git_diff(&dir, None).unwrap();
 
         assert!(diff.contains("new.txt"));
-        assert!(!diff.contains(".jucode"));
+        assert!(!diff.contains(".lynshen"));
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -4652,7 +4652,7 @@ mod tests {
         assert_ne!(result.output, result.model_output);
         assert!(result.model_output.contains("model_output_truncated"));
         assert_eq!(fs::read_to_string(full_output_path).unwrap(), result.output);
-        assert!(dir.join(".jucode").join("truncated-results").exists());
+        assert!(dir.join(".lynshen").join("truncated-results").exists());
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -5177,7 +5177,7 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn workspace_path_allows_inside_and_rejects_outside() {
-        let dir = env::temp_dir().join(format!("jucode-policy-basic-{}", std::process::id()));
+        let dir = env::temp_dir().join(format!("lynshen-policy-basic-{}", std::process::id()));
         fs::create_dir_all(dir.join("sub")).unwrap();
         fs::write(dir.join("inside.txt"), "ok").unwrap();
 
@@ -5199,9 +5199,9 @@ mod tests {
     #[test]
     fn read_only_tools_allow_extra_read_roots() {
         let pid = std::process::id();
-        let workspace = env::temp_dir().join(format!("jucode-read-roots-ws-{pid}"));
-        let skill = env::temp_dir().join(format!("jucode-read-roots-skill-{pid}"));
-        let outside = env::temp_dir().join(format!("jucode-read-roots-out-{pid}"));
+        let workspace = env::temp_dir().join(format!("lynshen-read-roots-ws-{pid}"));
+        let skill = env::temp_dir().join(format!("lynshen-read-roots-skill-{pid}"));
+        let outside = env::temp_dir().join(format!("lynshen-read-roots-out-{pid}"));
         fs::create_dir_all(&workspace).unwrap();
         fs::create_dir_all(skill.join("refs")).unwrap();
         fs::create_dir_all(&outside).unwrap();
@@ -5276,7 +5276,7 @@ mod tests {
 
     #[test]
     fn file_tools_reject_paths_outside_the_workspace() {
-        let dir = env::temp_dir().join(format!("jucode-policy-tools-{}", std::process::id()));
+        let dir = env::temp_dir().join(format!("lynshen-policy-tools-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let cases: [(&str, Value); 7] = [
             ("read", json!({ "path": "/etc/passwd" })),
@@ -5311,7 +5311,7 @@ mod tests {
 
     #[test]
     fn apply_patch_rejects_targets_outside_the_workspace() {
-        let dir = env::temp_dir().join(format!("jucode-policy-patch-{}", std::process::id()));
+        let dir = env::temp_dir().join(format!("lynshen-policy-patch-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let patch = "--- /dev/null\n+++ b/../evil.txt\n@@ -0,0 +1 @@\n+evil\n";
         let result = run_tool("apply_patch", &json!({ "patch": patch }).to_string(), &dir);
@@ -5328,10 +5328,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn file_tools_reject_symlinks_that_point_outside_the_workspace() {
-        let outside = env::temp_dir().join(format!("jucode-policy-outside-{}", std::process::id()));
+        let outside = env::temp_dir().join(format!("lynshen-policy-outside-{}", std::process::id()));
         fs::create_dir_all(&outside).unwrap();
         fs::write(outside.join("secret.txt"), "secret").unwrap();
-        let dir = env::temp_dir().join(format!("jucode-policy-symlink-{}", std::process::id()));
+        let dir = env::temp_dir().join(format!("lynshen-policy-symlink-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         std::os::unix::fs::symlink(&outside, dir.join("link")).unwrap();
 
@@ -5584,6 +5584,6 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        env::temp_dir().join(format!("jucode-tools-test-{name}-{nanos}"))
+        env::temp_dir().join(format!("lynshen-tools-test-{name}-{nanos}"))
     }
 }

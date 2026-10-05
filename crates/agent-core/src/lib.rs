@@ -29,7 +29,7 @@ mod web;
 mod web_fetch;
 
 pub use config::{
-    builtin_providers, jucode_visible_models, models_for_provider, ApprovalMode, ModelConfig,
+    builtin_providers, lynshen_visible_models, models_for_provider, ApprovalMode, ModelConfig,
     SubagentModel,
 };
 pub use core::{title_completion, AgentCore};
@@ -41,36 +41,36 @@ pub use hunks::HunkView;
 pub use session::SessionSummary;
 pub use tools::{git_diff, terminate_tool_processes};
 
-/// The JuCode gateway URL and an access token good for at least two more
+/// The LynShen gateway URL and an access token good for at least two more
 /// minutes (refreshed first when needed), for tools spawned to call the
-/// gateway on the user's JuCode login.
-pub fn jucode_gateway_credentials() -> Result<(String, String), String> {
-    let (api, token, _) = jucode_session()?;
+/// gateway on the user's LynShen login.
+pub fn lynshen_gateway_credentials() -> Result<(String, String), String> {
+    let (api, token, _) = lynshen_session()?;
     Ok((api, token))
 }
 
-/// `jucode_gateway_credentials` plus when the token expires (unix seconds).
-pub fn jucode_session() -> Result<(String, String, u64), String> {
+/// `lynshen_gateway_credentials` plus when the token expires (unix seconds).
+pub fn lynshen_session() -> Result<(String, String, u64), String> {
     let config = config::Config::load_or_create().map_err(|error| error.to_string())?;
     gateway_credentials(config)
 }
 
 /// The same for each request of the daemon's local gateway: config.json is
 /// read, never rewritten (concurrent requests would race on it).
-pub fn jucode_gateway_token() -> Result<(String, String), String> {
+pub fn lynshen_gateway_token() -> Result<(String, String), String> {
     let config = config::Config::load_existing().map_err(|error| error.to_string())?;
     let (api, token, _) = gateway_credentials(config)?;
     Ok((api, token))
 }
 
-/// Which kind of channel a provider id is, for usage records: `jucode`
-/// (the JuCode gateway), `third_party` (a provider from the built-in
+/// Which kind of channel a provider id is, for usage records: `lynshen`
+/// (the LynShen gateway), `third_party` (a provider from the built-in
 /// catalog, on the user's key or plan) or `local` (anything the user set up
 /// themselves: their own Claude / ChatGPT login, a custom provider, a local
 /// model server).
 pub fn provider_channel_kind(provider: &str) -> &'static str {
     match provider {
-        "jucode" | "jucode_gateway" => "jucode",
+        "lynshen" | "lynshen_gateway" => "lynshen",
         // The same subscriptions Claude Code and Codex sign in to.
         "anthropic" | "openai-codex" | "openai-codex-device" => "local",
         _ if llm_provider_kit::omp::catalog()
@@ -83,32 +83,32 @@ pub fn provider_channel_kind(provider: &str) -> &'static str {
     }
 }
 
-/// Whether this computer is signed in to JuCode (no network, no refresh).
-pub fn jucode_signed_in() -> bool {
+/// Whether this computer is signed in to LynShen (no network, no refresh).
+pub fn lynshen_signed_in() -> bool {
     config::Config::load_existing()
         .and_then(|config| config::AuthStore::load_or_create(config.encrypt_secrets))
-        .is_ok_and(|auth| auth.jucode_tokens().is_some())
+        .is_ok_and(|auth| auth.lynshen_tokens().is_some())
 }
 
-/// Signs this computer out of JuCode and revokes its device login.
-pub fn jucode_logout() -> Result<(), String> {
+/// Signs this computer out of LynShen and revokes its device login.
+pub fn lynshen_logout() -> Result<(), String> {
     let config = config::Config::load_existing().map_err(|error| error.to_string())?;
-    oauth::logout(&config.jucode_api_url, config.encrypt_secrets)
+    oauth::logout(&config.lynshen_api_url, config.encrypt_secrets)
 }
 
-/// Names the app in the device label of the next JuCode login.
+/// Names the app in the device label of the next LynShen login.
 pub fn set_login_client_label(label: &'static str) {
     oauth::set_client_label(label);
 }
 
 fn gateway_credentials(config: config::Config) -> Result<(String, String, u64), String> {
-    let auth = oauth::ensure_session(&config.jucode_api_url, config.encrypt_secrets)?;
+    let auth = oauth::ensure_session(&config.lynshen_api_url, config.encrypt_secrets)?;
     let tokens = auth
-        .jucode_tokens()
+        .lynshen_tokens()
         .filter(|tokens| !tokens.access_token.is_empty())
-        .ok_or("not logged in to JuCode. Run /login.")?;
+        .ok_or("not logged in to LynShen. Run /login.")?;
     Ok((
-        config.jucode_api_url,
+        config.lynshen_api_url,
         tokens.access_token.clone(),
         tokens.access_expires_at,
     ))

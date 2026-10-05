@@ -1,5 +1,5 @@
 //! Scheduled tasks: a prompt an agent receives at set local times, saved in
-//! `~/.jucode/agents/<id>/schedules.json`. A due task fires once and its
+//! `~/.lynshen/agents/<id>/schedules.json`. A due task fires once and its
 //! `next_run_at` moves past now, so times missed while the daemon (or the
 //! computer) was off fire once on start, never as a burst. A task of a
 //! disabled agent waits, neither firing nor moving on, and fires once when
@@ -372,7 +372,7 @@ impl Hub {
             }
             let key = format!("schedule:{}:{due}", schedule.id);
             if let Err(error) = self.record_schedule_run(schedule, key) {
-                jucode_agent_core::log_warn!("daemon", "schedule not fired", error = error);
+                lynshen_agent_core::log_warn!("daemon", "schedule not fired", error = error);
                 continue;
             }
             schedule.last_run_at = Some(at);
@@ -386,7 +386,7 @@ impl Hub {
         }
         for agent in &fired {
             if let Err(error) = self.persist_schedules(&list, agent) {
-                jucode_agent_core::log_warn!("daemon", "schedules not saved", error = error);
+                lynshen_agent_core::log_warn!("daemon", "schedules not saved", error = error);
             }
         }
         drop(list);
@@ -406,7 +406,7 @@ impl Hub {
         schedule.last_session = Some(session.to_string());
         let agent = schedule.agent.clone();
         if let Err(error) = self.persist_schedules(&list, &agent) {
-            jucode_agent_core::log_warn!("daemon", "schedules not saved", error = error);
+            lynshen_agent_core::log_warn!("daemon", "schedules not saved", error = error);
         }
         drop(list);
         self.broadcast(&self.schedules_json(None));

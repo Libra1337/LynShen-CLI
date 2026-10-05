@@ -1,8 +1,8 @@
-# `jucode daemon` Protocol
+# `lynshen daemon` Protocol
 
-`jucode daemon` hosts many JuCode sessions in one long-running process.
+`lynshen daemon` hosts many LynShen sessions in one long-running process.
 Sessions keep running when every client disconnects. Clients (Desktop, the
-remote web page) connect over a WebSocket and speak the `jucode serve`
+remote web page) connect over a WebSocket and speak the `lynshen serve`
 protocol version 2 (`docs/serve-protocol.md`), with a `session` field that
 says which hosted session an op or event belongs to.
 
@@ -11,11 +11,11 @@ Background and roadmap: `docs/agent-daemon-plan.md`.
 ## Running
 
 ```sh
-jucode daemon                      # ws://127.0.0.1:7788
-jucode daemon --listen 127.0.0.1:9000
-jucode daemon --web path/to/JuCode-Desktop/build   # serve the remote page
-jucode daemon --relay wss://relay.example/relay/v1  # another relay
-jucode daemon --no-relay           # never connect to a relay
+lynshen daemon                      # ws://127.0.0.1:7788
+lynshen daemon --listen 127.0.0.1:9000
+lynshen daemon --web path/to/LynShen-Desktop/build   # serve the remote page
+lynshen daemon --relay wss://relay.example/relay/v1  # another relay
+lynshen daemon --no-relay           # never connect to a relay
 ```
 
 Without `--web`, the daemon serves a `web/` directory next to its binary
@@ -24,15 +24,15 @@ when one exists (release packages ship it there).
 To start it at login and restart it if it exits:
 
 ```sh
-jucode daemon install              # launchd on macOS, systemd user unit on Linux
-jucode daemon uninstall
+lynshen daemon install              # launchd on macOS, systemd user unit on Linux
+lynshen daemon uninstall
 ```
 
 `install` writes the PATH of the shell that ran it into the service, so the
 agent finds the same commands as in that shell; rerun it after changing PATH.
-The service logs to `~/.jucode/daemon/daemon.log`.
+The service logs to `~/.lynshen/daemon/daemon.log`.
 
-State lives in `~/.jucode/daemon/`:
+State lives in `~/.lynshen/daemon/`:
 
 | File | Contents |
 | --- | --- |
@@ -84,15 +84,15 @@ TLS of its own. Or use the relay (below).
 
 ## Relay
 
-With the relay on, the daemon keeps one outbound WebSocket to the JuCode
-relay (`--relay`, default `wss://app.jucode.net/relay/v1`) and phones reach
+With the relay on, the daemon keeps one outbound WebSocket to the LynShen
+relay (`--relay`, default `wss://app.lynshen.net/relay/v1`) and phones reach
 it from anywhere through end-to-end encrypted streams
 (`docs/relay-protocol.md`). It is off until a local client sends
 `relay_set` with `enabled: true`; the setting survives restarts.
 `--no-relay` keeps it off whatever the setting says.
 
 1. A local client sends `pair_link` and shows the returned `link`
-   (`https://app.jucode.net/remote#pair=<host>.<key>.<code>`, the origin
+   (`https://app.lynshen.net/remote#pair=<host>.<key>.<code>`, the origin
    taken from the relay URL) as a QR code. The code is a `pair_start` code.
 2. The phone's page connects through the relay with the code in its first
    Noise message and is paired as a device keyed by its Noise static key.
@@ -106,7 +106,7 @@ A relay stream then behaves exactly like a device's local WebSocket.
 Connect to `ws://<listen>/?token=<token>` (or send
 `Authorization: Bearer <token>`). A missing or wrong token fails the
 handshake with HTTP 401. Local clients read the daemon token from
-`~/.jucode/daemon/token`; paired devices use their own token.
+`~/.lynshen/daemon/token`; paired devices use their own token.
 
 Each WebSocket text message is one JSON frame. The daemon first sends:
 
@@ -133,11 +133,11 @@ every connected client.
 | Op | Fields | Reply |
 | --- | --- | --- |
 | `session_list` | — | `sessions`: each with `session`, `cwd`, `chat`, `agent`, `open`, `watchers`, `title` (set with `session_meta`, else the engine's label), `archived`, `updated_at` |
-| `gateway_catalog` | — | `gateway_catalog`: `models` (the JuCode models the user chose to show, `jucode_models` in config.json) and `groups` (the gateway's groups with their models and multipliers); empty when not signed in or offline. For clients that cannot read this machine's login (the remote page) |
+| `gateway_catalog` | — | `gateway_catalog`: `models` (the LynShen models the user chose to show, `lynshen_models` in config.json) and `groups` (the gateway's groups with their models and multipliers); empty when not signed in or offline. For clients that cannot read this machine's login (the remote page) |
 | `restart_when_idle` | — | none. Desktop only: this daemon exits once no session is running (after a `daemon_restarting` broadcast), so the desktop can start a newer one without cutting off a task |
 | `session_meta` | `session`, and any of `title`, `archived`, `hidden`, `group` | none; every client receives the new `sessions` list. An empty title goes back to the engine's label; a hidden session leaves `session_list` and `session_history` (its conversation stays on disk). A session created here is titled after its first user message (first line, 40 characters) unless a client titled it first. After its 1st and 3rd turns, then every 5th, the title model (`title_model` in config.json, else the main `model`) renames it from the project name, the current title, the first and latest requests and the start of the latest reply. A title a client set with `session_meta` is never replaced |
-| `session_history` | `cwd` | `session_history`: every session saved in `cwd`, newest first, whoever ran it (daemon, TUI, `jucode serve`), with `title`, `updated_at`, `entries`, `archived`, `agent`, `open` |
-| `session_create` | `cwd`, optional `engine` (`jucode`, default, `claude`, `codex` or `acp`) and `options` | `session_created` with `session`; the session's startup events follow. See "Other engines" |
+| `session_history` | `cwd` | `session_history`: every session saved in `cwd`, newest first, whoever ran it (daemon, TUI, `lynshen serve`), with `title`, `updated_at`, `entries`, `archived`, `agent`, `open` |
+| `session_create` | `cwd`, optional `engine` (`lynshen`, default, `claude`, `codex` or `acp`) and `options` | `session_created` with `session`; the session's startup events follow. See "Other engines" |
 | `session_open` | `session`, optional `cwd`, `engine`, `options` | `session_opened`; with `cwd`, also opens a session saved there that the daemon never hosted. Reopens a closed session (or one from before a restart), resuming its transcript and its undecided deferred actions |
 | `session_close` | `session` | none; every client receives `session_closed` once the engine has stopped |
 | `watch` / `unwatch` | `session` | `watching` with `watching: true/false`; `watch` also sends this client a snapshot of the session: its state events (`startup`, `model_status`, `command_list`, `approval_mode`, `approval_mode_pending`, `mcp_servers`), a `transcript` of the conversation so far and `attended` |
@@ -147,7 +147,7 @@ every connected client.
 | `device_revoke` | `device` | `device_revoked` (local clients only) |
 | `relay_status` | — | `relay_status` with `enabled`, `connected`, `host` (the host id), `url` (null with `--no-relay`) (local clients only) |
 | `relay_set` | `enabled` | `relay_status`; turns the relay connection on or off and remembers it (local clients only) |
-| `mcp_set` / `mcp_remove` / `mcp_toggle` | as the session ops (`server`; `name`; `name`, `enabled`), with no `session` | `mcp_saved`; saves the change to `config.json` and sends the op to every open JuCode session, which answers with `mcp_servers`. Local clients only, with or without `session` |
+| `mcp_set` / `mcp_remove` / `mcp_toggle` | as the session ops (`server`; `name`; `name`, `enabled`), with no `session` | `mcp_saved`; saves the change to `config.json` and sends the op to every open LynShen session, which answers with `mcp_servers`. Local clients only, with or without `session` |
 | `pair_link` | — | `pair_link` with `link`, `code` and `expires_at`; an error while the relay is off (local clients only) |
 | `ping` | — | `pong`. Clients behind the relay send it every minute so an idle stream is not closed |
 | `workspaces` | — | `workspaces` with `rev` and `workspaces: [{id, name, is_default?, color?, icon?, projects: [{id, name, path, chats?, worktree?, color?, icon?}]}]`. A project's `color` and `icon` are kept as the client sent them (shaped as an agent's, see "Agents") |
@@ -176,17 +176,17 @@ every connected client.
 | `question_answer` | `question`, `answer` | `question_answered`; the answer is delivered to the session that asked |
 | `report_list` | optional `limit` (50) | `reports`, newest first, with `read` |
 | `report_read` | `report` | `report_read` |
-| `skills_catalog` | optional `backend` (`jucode`, default, or `claude`) | `skills_catalog` with `skills: [{id, name, description, tags, source, isDefault, installed, license, redistributable, homepage}]`, `warnings` and `installDir` (local clients only). See "Skills" |
-| `skill_install` | `source` (`jucode` or `anthropic`), `skill` (its `id` in the catalog), optional `backend` | `skill_installed` with `path` (local clients only) |
+| `skills_catalog` | optional `backend` (`lynshen`, default, or `claude`) | `skills_catalog` with `skills: [{id, name, description, tags, source, isDefault, installed, license, redistributable, homepage}]`, `warnings` and `installDir` (local clients only). See "Skills" |
+| `skill_install` | `source` (`lynshen` or `anthropic`), `skill` (its `id` in the catalog), optional `backend` | `skill_installed` with `path` (local clients only) |
 
 `decide_action` (a session op) also works for a session that is closed or
 was hosted before a restart: the daemon reopens it first.
 
 `session_create` also accepts `agent` instead of `cwd`: the session runs in
 the agent's directory as that agent. With `chat: true` instead, the session is
-a chat: it runs in `~/.jucode/chats` with the chat prompt (conversation and
+a chat: it runs in `~/.lynshen/chats` with the chat prompt (conversation and
 web research) and without project instructions or project skills. Any session
-whose directory is `~/.jucode/chats` or lies inside it is a chat session, so
+whose directory is `~/.lynshen/chats` or lies inside it is a chat session, so
 reopening one keeps it a chat.
 
 Changes to workspaces are broadcast to every client as a `workspaces` frame.
@@ -194,24 +194,24 @@ Changes to workspaces are broadcast to every client as a `workspaces` frame.
 `fs_*` and `git_*` read only inside known directories: projects, session
 directories and agent directories. `fs_list` with `dirs_only` may browse
 folders anywhere under the home directory (for picking a new project).
-Credentials (`~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.jucode/auth.json`,
-`~/.jucode/daemon`) are never readable. Paths are resolved (symlinks
+Credentials (`~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.lynshen/auth.json`,
+`~/.lynshen/daemon`) are never readable. Paths are resolved (symlinks
 followed) before the check.
 
 ## Skills
 
-`skills_catalog` lists the JuCode marketplace (`/v1/skills/marketplace` on
-the configured JuCode API, with the JuCode login's token when there is one)
+`skills_catalog` lists the LynShen marketplace (`/v1/skills/marketplace` on
+the configured LynShen API, with the LynShen login's token when there is one)
 and the bundled index of github.com/anthropics/skills. When the marketplace
 cannot be reached its error is one of `warnings` and only the Anthropic
-skills are listed. `source` is `jucode` or `anthropic`; `redistributable` is
+skills are listed. `source` is `lynshen` or `anthropic`; `redistributable` is
 false for Anthropic's source-available document skills, which `skill_install`
 refuses.
 
 `backend` picks the directory: `claude` installs into `~/.claude/skills`,
-anything else into `~/.jucode/skills`. `installed` means
+anything else into `~/.lynshen/skills`. `installed` means
 `<installDir>/<id>/SKILL.md` exists. `skill_install` looks the skill up again
-in its source, then downloads it: a JuCode skill's inline content or
+in its source, then downloads it: a LynShen skill's inline content or
 checksummed package, or an Anthropic skill's whole directory at the index's
 pinned commit. The new install replaces an old one only once complete. Both
 ops are refused for paired devices: an installed skill is instructions and
@@ -221,10 +221,10 @@ scripts that later sessions run.
 
 `session_create` with `engine: "claude"` runs Claude Code
 (`claude --print --input-format stream-json ...`) and `engine: "codex"` runs
-Codex (`codex app-server`) in `cwd` instead of a jucode engine. The binary
+Codex (`codex app-server`) in `cwd` instead of a lynshen engine. The binary
 comes from `CLAUDE_BIN` / `CODEX_BIN`, then PATH, then the usual install
 directories. The daemon translates its stream into the same session
-events a jucode session sends and client ops into Claude Code frames, so
+events a lynshen session sends and client ops into Claude Code frames, so
 clients need nothing engine-specific. `options`:
 
 | Field | Meaning |
@@ -233,12 +233,12 @@ clients need nothing engine-specific. `options`:
 | `model` | Model to start with |
 | `resume_at` | Claude Code: resume the conversation as it was at this assistant message uuid |
 | `effort`, `ultracode`, `fast`, `thinking` | Claude Code: start with this thinking effort, ultracode on, fast mode on, thinking summaries shown (`false` hides them). A restart (full access, gateway switch) keeps the session's own |
-| `jucode_gateway` | Claude Code / Codex: `true` runs this session through the JuCode gateway on the user's JuCode login; `false` on the provider in the user's own Claude Code / Codex config. The endpoint and key go to this process only (Claude: `--settings` file; Codex: `-c` overrides and an env var), never to the user's config files. Omitted on `session_open`: as the session last ran |
+| `lynshen_gateway` | Claude Code / Codex: `true` runs this session through the LynShen gateway on the user's LynShen login; `false` on the provider in the user's own Claude Code / Codex config. The endpoint and key go to this process only (Claude: `--settings` file; Codex: `-c` overrides and an env var), never to the user's config files. Omitted on `session_open`: as the session last ran |
 | `command`, `args` | ACP: the agent's command line |
 | `bin` | Claude Code / Codex: the engine binary to run instead of the one found on `PATH` |
 | `env` | Extra environment variables for the engine process (plain names; no `DYLD_*`/`LD_*`) |
 
-`engine: "acp"` runs an Agent Client Protocol agent (`jucode acp`,
+`engine: "acp"` runs an Agent Client Protocol agent (`lynshen acp`,
 `gemini --experimental-acp`, ...) from `options.command`. Only local
 clients may start or reopen one, or pass `bin` or `env` for any engine,
 since that names a program to run; paired devices watch and drive such
@@ -255,7 +255,7 @@ too, with their `engine`. `session_created` for Codex comes once its thread
 is open.
 Every session in `session_list` carries its `engine`.
 
-Differences from a jucode session:
+Differences from a lynshen session:
 
 - A watching client gets a snapshot rebuilt by the daemon: the latest state
   events, the conversation so far (text and tool results; a reopened
@@ -266,7 +266,7 @@ Differences from a jucode session:
   conversation (it only honors that mode as a start flag), after the running
   turn. Codex applies a new mode, and a model picked with `/model`, from the
   next turn.
-- `steer`, `decide_action`, `mcp_set`/`mcp_remove` and the jucode-only
+- `steer`, `decide_action`, `mcp_set`/`mcp_remove` and the lynshen-only
   commands (`/resume`, `/rewind`, `/tree`, ...) are refused with an `error`
   event. Other slash commands go to Claude Code as a user message, as Claude
   Code expects.
@@ -322,7 +322,7 @@ has for the session becomes its title.
 
 ## Agents
 
-A long-lived agent is a directory `~/.jucode/agents/<id>/`: its brief
+A long-lived agent is a directory `~/.lynshen/agents/<id>/`: its brief
 (`role.md`, `capabilities.md`, `policy.md`, `state.md`), `memory/<topic>.md`
 notes and `agent.json`:
 
@@ -341,7 +341,7 @@ notes and `agent.json`:
 `agent_update` changes any of these fields except `cwd`, and rewrites
 `role.md` from `role`.
 
-`agent_delete` removes `~/.jucode/agents/<id>/` (brief, memory, settings,
+`agent_delete` removes `~/.lynshen/agents/<id>/` (brief, memory, settings,
 scheduled tasks), cancels the agent's active timers, closes its open
 questions and its open sessions. It is refused while one of its sessions is
 running. Its sessions stay in `session_list` with their `agent`; a message
@@ -357,11 +357,11 @@ An agent's shell commands run in an OS sandbox (Seatbelt on macOS,
 - `read-only`: nothing is writable.
 - `workspace-write`: `cwd`, the `rw` directories, temp and package-cache
   directories are writable; `.git` (and a worktree's real git directory),
-  `.jucode`, `.agents` inside them and the `ro` directories stay read-only.
+  `.lynshen`, `.agents` inside them and the `ro` directories stay read-only.
 - `full-access`: no sandbox.
 
-`~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.jucode/auth.json` and
-`~/.jucode/daemon` are unreadable in every sandboxed mode. File tools check
+`~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.lynshen/auth.json` and
+`~/.lynshen/daemon` are unreadable in every sandboxed mode. File tools check
 writes against the same rules and can also read and write the agent's
 directories.
 
@@ -405,7 +405,7 @@ and an updated `actions` list when an action is deferred or decided.
 ### Scheduled tasks
 
 A scheduled task sends its prompt to an agent at set local times. Each
-agent's tasks are saved in `~/.jucode/agents/<id>/schedules.json`.
+agent's tasks are saved in `~/.lynshen/agents/<id>/schedules.json`.
 
 ```json
 {
@@ -482,7 +482,7 @@ given one.
 ```json
 {"type":"dispatches","dispatches":[{
   "id":"s…","text":"…","plan":true,"mode":"auto","status":"running",
-  "tasks":[{"id":1,"title":"…","project":"/path","session":"s…","engine":"jucode",
+  "tasks":[{"id":1,"title":"…","project":"/path","session":"s…","engine":"lynshen",
             "status":"running","reply":"…"}],
   "summary":"","created_at":0,"updated_at":0}]}
 ```
@@ -506,8 +506,8 @@ frames, end to end encrypted; the relay stores nothing.
 | `{"op":"upload","upload":"u-…","offset":262144,"data":"<base64>","last":true}` | `uploaded` with `upload`, `path`, `name`, `size`, `image` | `offset` must be the size received so far. The reply to the `last` chunk carries the file's path. |
 
 A chunk is at most 4 MB decoded, a file at most 100 MB. Files land in
-`~/.jucode/uploads/<date>/<id>-<name>` (outside the daemon's state directory,
-so the jucode sandbox lets tools read them) and are written as `<path>.part`
+`~/.lynshen/uploads/<date>/<id>-<name>` (outside the daemon's state directory,
+so the lynshen sandbox lets tools read them) and are written as `<path>.part`
 until the last chunk; parts left over and files older than 30 days are
 removed when the daemon starts. A message names them as the desktop does
 its attachments: images in `user_message`'s `images`, other files as paths
@@ -548,7 +548,7 @@ PowerShell on Windows, with the daemon's environment plus
 ### A conversation in its TUI
 
 `{"op":"session_tui","session":"<id>","cols":120,"rows":40}` moves a
-claude, codex or jucode conversation from the client's chat view into the
+claude, codex or lynshen conversation from the client's chat view into the
 engine's own terminal interface, on a pty of the daemon. The reply is
 `term_opened`; the terminal then works like one from `term_open` (only the
 requesting client gets its output and may type into it, `term_close` ends
@@ -556,7 +556,7 @@ it). It is refused while a turn runs, for an ACP engine, and for an agent's
 session.
 
 The engine process stops first and the TUI resumes the same conversation
-(`claude --resume <id>`, `codex resume <id>`, jucode's `/resume <id>`) with
+(`claude --resume <id>`, `codex resume <id>`, lynshen's `/resume <id>`) with
 the session's approval mode and model; under the gateway it gets its own
 key. Every client of the session gets
 `{"type":"surface","session":"<id>","surface":"tui","term":"t-…","client":1}`.
@@ -582,14 +582,14 @@ requirement's id comes as `requirement` (`id` is the request's).
 | Op | Reply | |
 | --- | --- | --- |
 | `{"op":"requirement_list"}` | `requirements` | |
-| `{"op":"requirement_create","text":"…","projects":["/path"],"images":["/…/.jucode/uploads/…/u-…-shot.png"],"source":"phone","session":"s…"}` | `requirement_created` with `requirement` | All but `text` optional. `session`: noted in that session (its project, when `projects` is empty). `images`: up to 4 uploaded images (see "Uploads"; any other path is refused), moved to `~/.jucode/uploads/requirements/<id>/`. |
+| `{"op":"requirement_create","text":"…","projects":["/path"],"images":["/…/.lynshen/uploads/…/u-…-shot.png"],"source":"phone","session":"s…"}` | `requirement_created` with `requirement` | All but `text` optional. `session`: noted in that session (its project, when `projects` is empty). `images`: up to 4 uploaded images (see "Uploads"; any other path is refused), moved to `~/.lynshen/uploads/requirements/<id>/`. |
 | `{"op":"requirement_update","requirement":"R-1","text":"…","projects":[…],"state":"done"}` | `requirement_saved` | Any of the fields. `state`: `idea`, `open`, `done`, `parked`. |
 | `{"op":"requirement_delete","requirement":"R-1"}` | `requirement_deleted` | Its sessions stay. |
 | `{"op":"requirement_link","requirement":"R-1","session":"s…"}` | `requirement_linked` | The session leaves any other requirement; the requirement becomes `open`. |
 | `{"op":"requirement_unlink","requirement":"R-1","session":"s…"}` | `requirement_unlinked` | |
 | `{"op":"requirement_image","requirement":"R-1","index":0}` | `requirement_image` with `data` (a data URL) | |
 | `{"op":"requirement_prompt","requirement":"R-1","text":"…","lang":"en"}` | `requirement_prompt` with `text` | The first message of a session that starts on it: words, progress, `text` (the user's feedback, optional) and how to work on it. `lang`: `zh` (default) or `en`. |
-| `{"op":"requirement_reply","requirement":"R-1","text":"…","new_session":false,"cwd":"/path","engine":"claude","lang":"zh"}` | `requirement_replied` with `session` | Sends `text` to its latest session (reopened if closed). With `new_session`, or no session yet, starts one in `cwd` on `engine` (defaults: the latest session's, else its first project on jucode) with `requirement_prompt`'s text, and links it. |
+| `{"op":"requirement_reply","requirement":"R-1","text":"…","new_session":false,"cwd":"/path","engine":"claude","lang":"zh"}` | `requirement_replied` with `session` | Sends `text` to its latest session (reopened if closed). With `new_session`, or no session yet, starts one in `cwd` on `engine` (defaults: the latest session's, else its first project on lynshen) with `requirement_prompt`'s text, and links it. |
 
 `dispatch_send` also takes `requirement`: its tasks' sessions are linked to it.
 
@@ -617,7 +617,7 @@ session's reply) comes with `review` and `failed`.
 
 A paired device's browser registers its Web Push subscription with
 `{"op":"push_subscribe","subscription":{"endpoint":"…","keys":{"p256dh":"…","auth":"…"}}}`,
-the JuCode Android app its 个推 (Getui) client id with
+the LynShen Android app its 个推 (Getui) client id with
 `{"op":"push_subscribe","subscription":{"provider":"getui","client_id":"…"}}`
 (only paired devices; dropped when the device is revoked) and removes it with
 `{"op":"push_unsubscribe","endpoint":"…"}` or `{"op":"push_unsubscribe","client_id":"…"}`.
@@ -638,7 +638,7 @@ Every op from `docs/serve-protocol.md` (`user_message`, `command`, `steer`,
 accepted with a `session` field and forwarded to that session's engine. Its
 events carry the same `session` field.
 
-`set_approval_mode` applies at once where the engine allows it: a JuCode
+`set_approval_mode` applies at once where the engine allows it: a LynShen
 session's running turn (and its subagents) gates its next tool call by the
 new mode, and calls waiting for a decision the new mode no longer needs run.
 Codex takes the mode with each turn, and Claude Code goes in or out of full
@@ -648,11 +648,11 @@ ends (`mode: null` then; a client can `interrupt` to apply it sooner). A
 switch to full access answers the turn's open and later approvals at once.
 
 `set_gateway` (`gateway`: bool, optional `model`) moves a Claude Code or Codex
-session between this machine's own login and the JuCode gateway: the engine
+session between this machine's own login and the LynShen gateway: the engine
 restarts once the running turn ends and resumes the conversation, and the
 session's `gateway` flag in `session_list` follows.
 
-Differences from `jucode serve`:
+Differences from `lynshen serve`:
 
 - A hosted engine keeps one session for its whole life. `/new` and
   `/resume <id>` are refused; use `session_create` and `session_open`.

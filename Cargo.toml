@@ -1,12 +1,12 @@
 [package]
-name = "jucode-cli"
+name = "lynshen-cli"
 version.workspace = true
 license.workspace = true
 authors.workspace = true
 edition = "2021"
 
 [[bin]]
-name = "jucode"
+name = "lynshen"
 path = "src/main.rs"
 
 [workspace]
@@ -16,12 +16,12 @@ resolver = "2"
 [workspace.package]
 version = "0.4.8"
 license = "Apache-2.0"
-authors = ["Jucode Innovations INC."]
+authors = ["LynShen Innovations INC."]
 
 [dependencies]
-jucode-agent-core = { path = "crates/agent-core" }
-jucode-daemon = { path = "crates/daemon" }
-jucode-tui = { path = "crates/tui" }
+lynshen-agent-core = { path = "crates/agent-core" }
+lynshen-daemon = { path = "crates/daemon" }
+lynshen-tui = { path = "crates/tui" }
 serde_json = "1"
 tungstenite = "0.30"
 

@@ -4,7 +4,7 @@ const output = new URL('../crates/agent-core/src/anthropic-skills.json', import.
 const repository = 'https://github.com/anthropics/skills';
 const headers = {
 	Accept: 'application/vnd.github+json',
-	'User-Agent': 'jucode-index-refresh'
+	'User-Agent': 'lynshen-index-refresh'
 };
 
 async function get(url, optional = false) {

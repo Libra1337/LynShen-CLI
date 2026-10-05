@@ -2,11 +2,11 @@
 
 ## 结论
 
-保留 `jucode serve`，并新增 `jucode acp`，不以 ACP 替换现有 `serve`。Fable 与 Sol 的独立评估得出了相同结论。
+保留 `lynshen serve`，并新增 `lynshen acp`，不以 ACP 替换现有 `serve`。Fable 与 Sol 的独立评估得出了相同结论。
 
 两者面向不同集成场景：
 
-- `serve` 继续作为 JuCode Desktop 的完整内部协议。
+- `serve` 继续作为 LynShen Desktop 的完整内部协议。
 - ACP 作为标准化 IDE 接口，服务 Zed、JetBrains 等客户端。
 
 ## 不能删除 `serve` 的原因
@@ -29,6 +29,6 @@ ACP 当前无法无损承载 Desktop 已依赖的完整语义，包括：
 
 ## 实施边界
 
-`jucode acp` 应复用同一套 agent core，但保持独立协议适配层。新增能力可按需要映射到两条协议；不应为了追求单一协议而削弱 Desktop 功能，或把 JuCode 私有扩展强塞进 ACP。
+`lynshen acp` 应复用同一套 agent core，但保持独立协议适配层。新增能力可按需要映射到两条协议；不应为了追求单一协议而削弱 Desktop 功能，或把 LynShen 私有扩展强塞进 ACP。
 
 `serve` 的完整命令/事件格式见 [serve-protocol.md](serve-protocol.md)。

@@ -52,7 +52,7 @@ jobs:
           else
             expected="${GITHUB_REF_NAME#v}"
           fi
-          actual="$(./target/${{ matrix.target.rust_target }}/release/jucode --version | awk '{print $NF}')"
+          actual="$(./target/${{ matrix.target.rust_target }}/release/lynshen --version | awk '{print $NF}')"
           echo "expected=${expected} actual=${actual}"
           if [ "${actual}" != "${expected}" ]; then
             echo "::error::built binary reports ${actual} but the release is ${expected} — bump Cargo.toml (and commit) before tagging"
@@ -63,12 +63,12 @@ jobs:
         shell: bash
         run: |
           mkdir -p artifacts/${{ matrix.target.rust_target }}
-          cp target/${{ matrix.target.rust_target }}/release/jucode artifacts/${{ matrix.target.rust_target }}/jucode
+          cp target/${{ matrix.target.rust_target }}/release/lynshen artifacts/${{ matrix.target.rust_target }}/lynshen
 
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target.rust_target }}
-          path: artifacts/${{ matrix.target.rust_target }}/jucode
+          path: artifacts/${{ matrix.target.rust_target }}/lynshen
 
   release-macos:
     name: Publish macOS release assets
@@ -119,7 +119,7 @@ jobs:
 
       - name: Write third-party notices
         run: |
-          node scripts/third-party-notices.mjs --cargo Cargo.toml --title "JuCode CLI: third-party software" --out jucode-third-party-notices.txt
+          node scripts/third-party-notices.mjs --cargo Cargo.toml --title "LynShen CLI: third-party software" --out lynshen-third-party-notices.txt
 
       - name: Sync npm versions
         env:
@@ -135,15 +135,15 @@ jobs:
       - name: Name macOS binaries uniquely for the release
         shell: bash
         run: |
-          cp artifacts-normalized/aarch64-apple-darwin/jucode jucode-aarch64-apple-darwin
-          cp artifacts-normalized/x86_64-apple-darwin/jucode jucode-x86_64-apple-darwin
+          cp artifacts-normalized/aarch64-apple-darwin/lynshen lynshen-aarch64-apple-darwin
+          cp artifacts-normalized/x86_64-apple-darwin/lynshen lynshen-x86_64-apple-darwin
 
       - name: Upload macOS assets to GitHub release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.release_meta.outputs.tag }}
           files: |
-            jucode-*-apple-darwin
+            lynshen-*-apple-darwin
             dist/npm/*darwin*.tgz
 
       - name: Publish macOS npm packages
@@ -151,8 +151,8 @@ jobs:
         shell: bash
         run: |
           version="${{ steps.release_meta.outputs.version }}"
-          npm view "@jucode/cli-darwin-arm64@${version}" version >/dev/null 2>&1 || npm publish ./npm/cli-darwin-arm64 --access public
-          npm view "@jucode/cli-darwin-x64@${version}" version >/dev/null 2>&1 || npm publish ./npm/cli-darwin-x64 --access public
+          npm view "@lynshen/cli-darwin-arm64@${version}" version >/dev/null 2>&1 || npm publish ./npm/cli-darwin-arm64 --access public
+          npm view "@lynshen/cli-darwin-x64@${version}" version >/dev/null 2>&1 || npm publish ./npm/cli-darwin-x64 --access public
 
       - name: Publish root npm package after all platforms
         if: ${{ env.NODE_AUTH_TOKEN != '' }}
@@ -160,9 +160,9 @@ jobs:
         run: |
           version="${{ steps.release_meta.outputs.version }}"
           for _ in {1..30}; do
-            if npm view "@jucode/cli-linux-x64@${version}" version >/dev/null 2>&1 && \
-               npm view "@jucode/cli-win32-x64@${version}" version >/dev/null 2>&1; then
-              npm view "@jucode/cli@${version}" version >/dev/null 2>&1 || npm publish ./npm/cli --access public
+            if npm view "@lynshen/cli-linux-x64@${version}" version >/dev/null 2>&1 && \
+               npm view "@lynshen/cli-win32-x64@${version}" version >/dev/null 2>&1; then
+              npm view "@lynshen/cli@${version}" version >/dev/null 2>&1 || npm publish ./npm/cli --access public
               exit 0
             fi
             sleep 10

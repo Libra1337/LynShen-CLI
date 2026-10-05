@@ -55,7 +55,7 @@ for (const target of targets) {
 
   const destinationPath = path.join(destinationDirectory, target.binaryName);
   copyFileSync(sourcePath, destinationPath);
-  if (target.binaryName !== "jucode.exe") {
+  if (target.binaryName !== "lynshen.exe") {
     chmodSync(destinationPath, 0o755);
   }
   console.log(`Staged ${target.rustTarget} -> npm/${target.directory}/bin/${target.binaryName}`);

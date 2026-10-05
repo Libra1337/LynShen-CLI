@@ -1,4 +1,4 @@
-# JuCode CLI 差距清单（已锁定）
+# LynShen CLI 差距清单（已锁定）
 
 > 配套文档：`docs/coding-agent-audit.md`（审计基线 `main@0758fef` / v0.1.11）。
 > Owner decisions 已于 2026-08-28 锁定。`[x]` 表示接受并纳入计划；`[ ]` 仅表示明确否决或推迟，不再表示“待拍板”。

@@ -1,12 +1,12 @@
-//! JuCode gateway OAuth: the `/cli/oauth` authorization-code flow against the
-//! JuCode web/API pair, plus the token refresh the LLM client uses.
+//! LynShen gateway OAuth: the `/cli/oauth` authorization-code flow against the
+//! LynShen web/API pair, plus the token refresh the LLM client uses.
 //!
 //! Provider-agnostic pieces (PKCE, loopback callbacks, URL encoding, browser
 //! launch, JSON plumbing) live in `llm_provider_kit::oauth`; this module owns
-//! what is JuCode's own: the gateway endpoints, the device label, and the
+//! what is LynShen's own: the gateway endpoints, the device label, and the
 //! marketplace model list.
 
-use crate::config::{AuthStore, JucodeTokens};
+use crate::config::{AuthStore, LynShenTokens};
 use llm_provider_kit::oauth::{
     open_browser, parse_callback_query, pkce_challenge, random_token, unix_now, url_encode,
     write_callback_response,
@@ -21,13 +21,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-const CLIENT_ID: &str = "jucode-cli";
+const CLIENT_ID: &str = "lynshen-cli";
 /// How a revoke may hold up a logout or a new login: it is only tidying.
 const REVOKE_TIMEOUT: Duration = Duration::from_secs(5);
 const CALLBACK_TIMEOUT: Duration = Duration::from_secs(300);
 /// Text the browser shows after landing on the CLI callback.
-const CALLBACK_LOGIN_COMPLETE: &str = "JuCode CLI login complete. You can close this tab.";
-const CALLBACK_LOGIN_FAILED: &str = "JuCode CLI login failed. Return to the terminal.";
+const CALLBACK_LOGIN_COMPLETE: &str = "LynShen CLI login complete. You can close this tab.";
+const CALLBACK_LOGIN_FAILED: &str = "LynShen CLI login failed. Return to the terminal.";
 
 #[derive(Debug)]
 pub struct OAuthLoginResult {
@@ -67,10 +67,10 @@ pub fn login(web_url: &str, api_url: &str) -> Result<OAuthLoginResult, String> {
     let web_url = web_url.trim().trim_end_matches('/').to_string();
     let api_url = api_url.trim().trim_end_matches('/').to_string();
     if web_url.is_empty() {
-        return Err("JuCode web URL cannot be empty".to_string());
+        return Err("LynShen web URL cannot be empty".to_string());
     }
     if api_url.is_empty() {
-        return Err("JuCode API URL cannot be empty".to_string());
+        return Err("LynShen API URL cannot be empty".to_string());
     }
 
     let verifier = random_token(32)?;
@@ -173,7 +173,7 @@ fn exchange_code(
 pub fn refresh(api_url: &str, refresh_token: &str) -> Result<Tokens, String> {
     let api_url = api_url.trim().trim_end_matches('/');
     if api_url.is_empty() {
-        return Err("JuCode API URL cannot be empty".to_string());
+        return Err("LynShen API URL cannot be empty".to_string());
     }
     let url = format!("{}/v1/oauth/token", api_url);
     // ureq::Error is large; it is ureq's own type, passed through as is.
@@ -196,7 +196,7 @@ pub fn refresh(api_url: &str, refresh_token: &str) -> Result<Tokens, String> {
 static SESSION_REFRESH: Mutex<()> = Mutex::new(());
 
 /// Serializes session checks across processes: the desktop, the daemon and
-/// every `jucode serve` share auth.json, and the gateway revokes a refresh
+/// every `lynshen serve` share auth.json, and the gateway revokes a refresh
 /// token as soon as it is used, so two processes refreshing at once leave one
 /// of them saving a dead token. Held from the reload to the save; the lock is
 /// released when the file closes.
@@ -215,48 +215,48 @@ fn lock_auth_refresh() -> Result<std::fs::File, String> {
     Ok(file)
 }
 
-/// Reloads auth.json and returns it holding a JuCode access token that is good
+/// Reloads auth.json and returns it holding a LynShen access token that is good
 /// for at least two more minutes, refreshing the session first when needed.
 pub fn ensure_session(api_url: &str, encrypt_secrets: bool) -> Result<AuthStore, String> {
     let _guard = SESSION_REFRESH
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let _file_guard = lock_auth_refresh()?;
-    // Reload from disk first. The Desktop shell shares ~/.jucode/auth.json and
+    // Reload from disk first. The Desktop shell shares ~/.lynshen/auth.json and
     // may have rotated the refresh token out-of-band; picking up its tokens
     // avoids refreshing with a stale one and a spurious "session expired".
     let mut auth = AuthStore::load_or_create(encrypt_secrets)
         .map_err(|error| format!("failed to reload auth.json: {error}"))?;
-    if auth.jucode_login_copied() {
+    if auth.lynshen_login_copied() {
         return Err(
-            "this JuCode login was copied from another computer. Run /login to sign in on this one."
+            "this LynShen login was copied from another computer. Run /login to sign in on this one."
                 .to_string(),
         );
     }
-    if auth.claim_jucode_login() {
+    if auth.claim_lynshen_login() {
         auth.save().map_err(|error| error.to_string())?;
     }
     let now = unix_now();
-    let (access_ok, refresh_token, refresh_alive) = match auth.jucode_tokens() {
+    let (access_ok, refresh_token, refresh_alive) = match auth.lynshen_tokens() {
         Some(t) => (
             t.access_expires_at > now + 120,
             t.refresh_token.clone(),
             t.refresh_expires_at > now,
         ),
-        None => return Err("not logged in to JuCode. Run /login.".to_string()),
+        None => return Err("not logged in to LynShen. Run /login.".to_string()),
     };
     if access_ok {
         return Ok(auth);
     }
     if !refresh_alive {
-        auth.clear_jucode();
+        auth.clear_lynshen();
         let _ = auth.save();
-        return Err("JuCode session expired. Run /login to sign in again.".to_string());
+        return Err("LynShen session expired. Run /login to sign in again.".to_string());
     }
     match refresh(api_url, &refresh_token) {
         Ok(t) => {
-            crate::log_info!("oauth", "refreshed jucode access token");
-            auth.set_jucode_tokens(JucodeTokens {
+            crate::log_info!("oauth", "refreshed lynshen access token");
+            auth.set_lynshen_tokens(LynShenTokens {
                 access_token: t.access_token,
                 refresh_token: t.refresh_token,
                 access_expires_at: t.access_expires_at,
@@ -269,7 +269,7 @@ pub fn ensure_session(api_url: &str, encrypt_secrets: bool) -> Result<AuthStore,
         Err(error) => {
             crate::log_error!("oauth", "token refresh failed", error = error.clone());
             Err(format!(
-                "failed to refresh JuCode session: {error}. Run /login."
+                "failed to refresh LynShen session: {error}. Run /login."
             ))
         }
     }
@@ -286,12 +286,12 @@ pub fn logout(api_url: &str, encrypt_secrets: bool) -> Result<(), String> {
     let _file_guard = lock_auth_refresh()?;
     let mut auth = AuthStore::load_or_create(encrypt_secrets)
         .map_err(|error| format!("failed to reload auth.json: {error}"))?;
-    if let Some(tokens) = auth.jucode_tokens() {
+    if let Some(tokens) = auth.lynshen_tokens() {
         if let Err(error) = revoke(api_url, &tokens.refresh_token) {
             crate::log_error!("oauth", "device revoke failed", error = error);
         }
     }
-    auth.clear_jucode();
+    auth.clear_lynshen();
     auth.save().map_err(|error| error.to_string())
 }
 
@@ -362,7 +362,7 @@ fn fetch_models(base_url: &str, access_token: &str) -> Result<Vec<OAuthModel>, S
 
 static CLIENT_LABEL: OnceLock<&'static str> = OnceLock::new();
 
-/// Names the app in device labels ("JuCode CLI" unless set): the daemon
+/// Names the app in device labels ("LynShen CLI" unless set): the daemon
 /// signs in for the desktop.
 pub fn set_client_label(label: &'static str) {
     let _ = CLIENT_LABEL.set(label);
@@ -372,7 +372,7 @@ pub fn set_client_label(label: &'static str) {
 /// OS and the start of the machine id, which tells apart two computers
 /// with the same default hostname. Never fails.
 fn device_name() -> String {
-    let app = CLIENT_LABEL.get().copied().unwrap_or("JuCode CLI");
+    let app = CLIENT_LABEL.get().copied().unwrap_or("LynShen CLI");
     let host = hostname().unwrap_or_else(|| "unknown-host".to_string());
     let mut name = format!("{app} · {host} ({})", std::env::consts::OS);
     if let Some(id) = crate::machine::machine_id() {
@@ -484,7 +484,7 @@ fn send_with_retry(
 
 fn json_response(response: Result<ureq::Response, ureq::Error>) -> Result<Value, String> {
     llm_provider_kit::oauth::json_response(response)
-        .map_err(|error| format!("JuCode OAuth returned {error}"))
+        .map_err(|error| format!("LynShen OAuth returned {error}"))
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-//! `jucode daemon install` / `uninstall`: run the daemon as a per-user
+//! `lynshen daemon install` / `uninstall`: run the daemon as a per-user
 //! service that starts at login and restarts if it exits (launchd on macOS,
 //! a systemd user unit on Linux).
 //!
@@ -12,8 +12,8 @@ use std::{
     process::Command,
 };
 
-const LAUNCHD_LABEL: &str = "cn.jucode.daemon";
-const SYSTEMD_UNIT: &str = "jucode-daemon.service";
+const LAUNCHD_LABEL: &str = "cn.lynshen.daemon";
+const SYSTEMD_UNIT: &str = "lynshen-daemon.service";
 
 pub struct ServiceSpec {
     pub program: PathBuf,
@@ -32,7 +32,7 @@ pub fn install(listen: &str, relay_args: Vec<String>) -> io::Result<String> {
         listen: listen.to_string(),
         relay_args,
         path_env: env::var("PATH").unwrap_or_default(),
-        log: home.join(".jucode").join("daemon").join("daemon.log"),
+        log: home.join(".lynshen").join("daemon").join("daemon.log"),
     };
     fs::create_dir_all(spec.log.parent().expect("log has a parent"))?;
     // A daemon already on the port (one Desktop started, say) would keep the
@@ -56,7 +56,7 @@ pub fn install(listen: &str, relay_args: Vec<String>) -> io::Result<String> {
     } else {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "jucode daemon install supports macOS and Linux; run `jucode daemon` directly or under WSL2",
+            "lynshen daemon install supports macOS and Linux; run `lynshen daemon` directly or under WSL2",
         ))
     }
 }
@@ -137,7 +137,7 @@ pub fn launchd_plist(spec: &ServiceSpec) -> String {
 pub fn systemd_unit(spec: &ServiceSpec) -> String {
     format!(
         "[Unit]\n\
-         Description=JuCode daemon\n\
+         Description=LynShen daemon\n\
          \n\
          [Service]\n\
          ExecStart={program} daemon --listen {listen}{relay}\n\
@@ -160,15 +160,15 @@ pub fn systemd_unit(spec: &ServiceSpec) -> String {
     )
 }
 
-/// The program the service should run: the `jucode` on PATH when there is
+/// The program the service should run: the `lynshen` on PATH when there is
 /// one, else this executable. An npm install runs from a versioned path inside
 /// node_modules that the next upgrade or uninstall removes; the PATH entry
 /// (a link or shim) keeps pointing at whatever is installed.
 fn stable_program() -> io::Result<PathBuf> {
     let name = if cfg!(windows) {
-        "jucode.exe"
+        "lynshen.exe"
     } else {
-        "jucode"
+        "lynshen"
     };
     let on_path = env::var_os("PATH").and_then(|path| {
         env::split_paths(&path)
@@ -263,18 +263,18 @@ mod tests {
 
     fn spec() -> ServiceSpec {
         ServiceSpec {
-            program: PathBuf::from("/opt/Ju Code/bin/jucode"),
+            program: PathBuf::from("/opt/Ju Code/bin/lynshen"),
             listen: "127.0.0.1:7788".to_string(),
             relay_args: Vec::new(),
             path_env: "/opt/homebrew/bin:/usr/bin".to_string(),
-            log: PathBuf::from("/home/u/.jucode/daemon/daemon.log"),
+            log: PathBuf::from("/home/u/.lynshen/daemon/daemon.log"),
         }
     }
 
     #[test]
     fn launchd_plist_runs_the_daemon_with_the_install_path() {
         let plist = launchd_plist(&spec());
-        assert!(plist.contains("<string>/opt/Ju Code/bin/jucode</string>"));
+        assert!(plist.contains("<string>/opt/Ju Code/bin/lynshen</string>"));
         assert!(plist.contains("<string>daemon</string>"));
         assert!(plist.contains("<string>127.0.0.1:7788</string>"));
         assert!(plist.contains("<string>/opt/homebrew/bin:/usr/bin</string>"));
@@ -288,7 +288,7 @@ mod tests {
     fn systemd_unit_quotes_paths_with_spaces() {
         let unit = systemd_unit(&spec());
         assert!(
-            unit.contains("ExecStart=\"/opt/Ju Code/bin/jucode\" daemon --listen 127.0.0.1:7788")
+            unit.contains("ExecStart=\"/opt/Ju Code/bin/lynshen\" daemon --listen 127.0.0.1:7788")
         );
         assert!(unit.contains("Environment=\"PATH=/opt/homebrew/bin:/usr/bin\""));
         assert!(unit.contains("WantedBy=default.target"));

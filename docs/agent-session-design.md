@@ -1,6 +1,6 @@
 # Agent Session Design Notes
 
-This document records reusable design ideas for JuCode-CLI's future agent, session, and context system. It is a design reference, not a commitment to copy another project's implementation.
+This document records reusable design ideas for LynShen-CLI's future agent, session, and context system. It is a design reference, not a commitment to copy another project's implementation.
 
 ## Core Philosophy
 
@@ -14,7 +14,7 @@ Prefer simple, explicit mechanisms:
 - Store summaries as explicit entries, not hidden side state.
 - Keep provider-facing message conversion as the final step.
 
-This fits JuCode-CLI's goals: lightweight, fast, testable, and easy to reason about.
+This fits LynShen-CLI's goals: lightweight, fast, testable, and easy to reason about.
 
 ## Suggested Layering
 
@@ -105,7 +105,7 @@ Keep internal entries richer than provider messages. Convert at the boundary:
 
 This avoids provider details leaking into storage.
 
-## Implementation Rules for JuCode-CLI
+## Implementation Rules for LynShen-CLI
 
 Keep this design lightweight. Do not introduce a database, async framework, or complex event bus until file-backed sessions and projection tests prove they are needed. Start with in-memory structs and focused unit tests, then add JSONL persistence once the tree behavior is correct.
 

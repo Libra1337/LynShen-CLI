@@ -1,10 +1,10 @@
 # TUI Architecture
 
-This document explains how JuCode-CLI's TUI is structured today and how data flows from the agent runtime to terminal output.
+This document explains how LynShen-CLI's TUI is structured today and how data flows from the agent runtime to terminal output.
 
 ## Overview
 
-JuCode's TUI is a ratatui application running on the terminal's alternate screen. It keeps a thin state layer but renders natively with ratatui's `Layout` and widgets. The pipeline is:
+LynShen's TUI is a ratatui application running on the terminal's alternate screen. It keeps a thin state layer but renders natively with ratatui's `Layout` and widgets. The pipeline is:
 
 1. `AgentCore` produces `AgentEvent`s.
 2. `TuiApp` owns the interactive TUI state and applies those events.
@@ -33,7 +33,7 @@ The renderer derives these regions from the flat `UiDocument.controls` list usin
 The binary entry point is `src/main.rs`.
 
 - `Runtime(AgentCore)` is a thin adapter.
-- It implements the `jucode_tui::TuiRuntime` trait.
+- It implements the `lynshen_tui::TuiRuntime` trait.
 - `main()` creates `AgentCore`, starts the update check, and runs `TuiApp::new(Runtime(core)).run()`.
 
 `TuiRuntime` is the main boundary between the TUI crate and the agent runtime:

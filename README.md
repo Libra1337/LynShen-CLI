@@ -1,6 +1,6 @@
-# JuCode CLI
+# LynShen CLI
 
-JuCode CLI is a compact coding-agent CLI for repository work. It provides an interactive terminal UI, a headless JSONL mode, context-aware editing tools, lightweight subagents, and real token-usage reporting.
+LynShen CLI is a compact coding-agent CLI for repository work. It provides an interactive terminal UI, a headless JSONL mode, context-aware editing tools, lightweight subagents, and real token-usage reporting.
 
 The project is intentionally small: the agent harness is designed to give the model enough autonomy to implement and verify tasks without loading a large framework prompt or exposing high-noise tools by default.
 
@@ -20,65 +20,65 @@ The project is intentionally small: the agent harness is designed to give the mo
 ## Installation
 
 Prebuilt binaries for macOS (Apple Silicon and Intel), Linux x64 and Windows x64
-are published on [GitHub Releases](https://github.com/JuCode-Team/JuCode-CLI/releases/latest)
+are published on [GitHub Releases](https://github.com/LynShen-Team/LynShen-CLI/releases/latest)
 and on npm:
 
 ```bash
-npm install -g @jucode/cli
-jucode
+npm install -g @lynshen/cli
+lynshen
 ```
 
-[JuCode Desktop](https://github.com/JuCode-Team/JuCode-Desktop) ships its own copy
-of the CLI in `~/.jucode/bin` and updates it with the app.
+[LynShen Desktop](https://github.com/LynShen-Team/LynShen-Desktop) ships its own copy
+of the CLI in `~/.lynshen/bin` and updates it with the app.
 
 ### From source
 
 ```bash
-git clone https://github.com/JuCode-Team/JuCode-CLI.git
-cd JuCode-CLI
+git clone https://github.com/LynShen-Team/LynShen-CLI.git
+cd LynShen-CLI
 cargo build --release
-./target/release/jucode
+./target/release/lynshen
 ```
 
 ### With Cargo from Git
 
 ```bash
-cargo install --git https://github.com/JuCode-Team/JuCode-CLI.git jucode-cli
-jucode
+cargo install --git https://github.com/LynShen-Team/LynShen-CLI.git lynshen-cli
+lynshen
 ```
 
-JuCode is written in Rust and uses the workspace binary name `jucode`.
+LynShen is written in Rust and uses the workspace binary name `lynshen`.
 
 ### Updating
 
-JuCode checks for new versions at startup and prints a notice when one is
+LynShen checks for new versions at startup and prints a notice when one is
 available. Update with:
 
 ```bash
-jucode update
+lynshen update
 ```
 
-- npm installs run `npm i -g @jucode/cli@latest` (on Windows right after the
+- npm installs run `npm i -g @lynshen/cli@latest` (on Windows right after the
   process exits, since the running executable is locked).
 - Release binaries download the new binary from GitHub Releases, or from the
-  JuCode server when GitHub is unreachable or slow, verify it and replace
+  LynShen server when GitHub is unreachable or slow, verify it and replace
   themselves; the new version runs from the next start.
-- The copy JuCode Desktop keeps in `~/.jucode/bin` updates with the app.
+- The copy LynShen Desktop keeps in `~/.lynshen/bin` updates with the app.
 
 ## Configuration
 
-On first run, JuCode creates its configuration under the user profile directory. By default it targets the JuCode gateway (an OpenAI-compatible Responses API):
+On first run, LynShen creates its configuration under the user profile directory. By default it targets the LynShen gateway (an OpenAI-compatible Responses API):
 
-- default provider: `jucode`
+- default provider: `lynshen`
 - default model: `gpt-5.5`
-- default API base URL: `https://api.jucode.net/v1`
+- default API base URL: `https://api.lynshen.net/v1`
 - default API key environment variable: `OPENAI_API_KEY`
 
-Sign in with `/login` to use the JuCode gateway, or set an API key and point the config at any compatible endpoint. Built-in provider templates: `jucode` and `openai` (Responses), `deepseek` (Anthropic Messages), and `ollama` and `openrouter` (Chat Completions). List them with `jucode providers`, or override the `protocol` setting for custom endpoints:
+Sign in with `/login` to use the LynShen gateway, or set an API key and point the config at any compatible endpoint. Built-in provider templates: `lynshen` and `openai` (Responses), `deepseek` (Anthropic Messages), and `ollama` and `openrouter` (Chat Completions). List them with `lynshen providers`, or override the `protocol` setting for custom endpoints:
 
 ```bash
 export OPENAI_API_KEY="..."
-jucode
+lynshen
 ```
 
 The vendored provider catalog adds the subscription and cloud endpoints on top of those templates:
@@ -98,7 +98,7 @@ You can switch model and reasoning effort inside the TUI:
 
 The config also supports custom OpenAI-compatible base URLs, retry settings, model metadata, and project-instruction discovery.
 
-On the JuCode gateway, each model's context window, output cap and effort levels come from the gateway; values it does not set stay unknown rather than guessed. `context_window_overrides` in `config.json` (`{"<model>": tokens}`) sets a window by hand: it fills in a missing one or raises the advertised window up to the gateway's largest. With no known window JuCode does not compact on a guess; when the model rejects a request as too long, it compacts and retries the turn.
+On the LynShen gateway, each model's context window, output cap and effort levels come from the gateway; values it does not set stay unknown rather than guessed. `context_window_overrides` in `config.json` (`{"<model>": tokens}`) sets a window by hand: it fills in a missing one or raises the advertised window up to the gateway's largest. With no known window LynShen does not compact on a guess; when the model rejects a request as too long, it compacts and retries the turn.
 
 ### Edit tools (`edit_tools`)
 
@@ -136,11 +136,11 @@ Under `auto`, every shell command first goes through a one-shot safety classific
 
 ### Interactive mode
 
-Run JuCode in a repository:
+Run LynShen in a repository:
 
 ```bash
 cd path/to/project
-jucode
+lynshen
 ```
 
 Then ask for implementation, debugging, refactoring, or verification work in natural language.
@@ -179,7 +179,7 @@ Other TUI conveniences:
 - **`!` shell escape** — input starting with `!` (for example `!git log -3`) runs in your local shell and shows its output in the history; it is never sent to the model.
 - **`@` file mentions** — type `@` plus a few characters to fuzzy-pick a project file (gitignore-aware via `rg --files`, falling back to `git ls-files` or a capped walk); Tab/Enter inserts the path.
 - **Git status bar** — the bottom bar shows the current branch with a `*` dirty marker, refreshed by a cheap cached `git` call on a background thread.
-- **Custom commands** — Markdown prompt files in `~/.jucode/commands/*.md` appear as `/name` commands; project-local `.jucode/commands/*.md` load after you trust the project (same gate as skills). `$ARGUMENTS` in the file body is replaced with whatever you type after the command.
+- **Custom commands** — Markdown prompt files in `~/.lynshen/commands/*.md` appear as `/name` commands; project-local `.lynshen/commands/*.md` load after you trust the project (same gate as skills). `$ARGUMENTS` in the file body is replaced with whatever you type after the command.
 - **Images** — paste or drag-and-drop an image file path into the TUI (it attaches automatically), or use `/image <path>`.
 
 ### Headless mode
@@ -189,19 +189,19 @@ Headless mode emits JSONL events and finishes with a `final_result` event contai
 Headless runs default to the `manual` approval mode: tool calls that would need interactive approval (edits, shell commands) are auto-denied with a clear message instead of hanging. Pass `--approval-mode` explicitly for tasks that change files or run commands:
 
 ```bash
-jucode --headless --approval-mode full-access "Fix the failing test and verify the focused suite"
+lynshen --headless --approval-mode full-access "Fix the failing test and verify the focused suite"
 ```
 
 Read-only tasks work without a flag:
 
 ```bash
-jucode --headless "List the repository structure and stop."
+lynshen --headless "List the repository structure and stop."
 ```
 
 You can also pipe the task through stdin:
 
 ```bash
-cat task.md | jucode --headless
+cat task.md | lynshen --headless
 ```
 
 `full-access` runs the model's shell commands and file writes with your user
@@ -212,19 +212,19 @@ The `final_result` event reports the effective `approval_mode` and how many appr
 
 This mode is useful for evaluation harnesses and reproducible agent experiments. A minimal in-repo harness lives in [`evals/`](evals/README.md).
 
-### Daemon (`jucode daemon`)
+### Daemon (`lynshen daemon`)
 
-`jucode daemon` is the local background service JuCode Desktop and the JuCode web app talk to (`ws://127.0.0.1:7788`). It hosts every session — JuCode's own engine, Claude Code, Codex and ACP agents — translated into one event stream, plus long-lived agents with schedules, and keeps them running when no window is open. With remote access turned on it also holds an end-to-end encrypted relay connection for the web app. The protocol is documented in [docs/daemon-protocol.md](docs/daemon-protocol.md).
+`lynshen daemon` is the local background service LynShen Desktop and the LynShen web app talk to (`ws://127.0.0.1:7788`). It hosts every session — LynShen's own engine, Claude Code, Codex and ACP agents — translated into one event stream, plus long-lived agents with schedules, and keeps them running when no window is open. With remote access turned on it also holds an end-to-end encrypted relay connection for the web app. The protocol is documented in [docs/daemon-protocol.md](docs/daemon-protocol.md).
 
-`jucode logout` signs this computer out of JuCode and revokes its device.
+`lynshen logout` signs this computer out of LynShen and revokes its device.
 
-### ACP mode (`jucode acp`)
+### ACP mode (`lynshen acp`)
 
-`jucode acp` speaks the [Agent Client Protocol](https://agentclientprotocol.com) (JSON-RPC over stdio) so ACP-capable editors such as Zed can drive JuCode as an external agent. It maps prompts, streaming message/thought chunks, tool-call progress, plan updates, cancellation, and permission requests; features ACP cannot express (session loading, hunk-subset approvals, the conversation tree) are explicitly rejected rather than half-implemented. `jucode serve` (the native newline-JSON protocol) is unchanged and remains the richer interface; its command/event schema is documented in [docs/serve-protocol.md](docs/serve-protocol.md).
+`lynshen acp` speaks the [Agent Client Protocol](https://agentclientprotocol.com) (JSON-RPC over stdio) so ACP-capable editors such as Zed can drive LynShen as an external agent. It maps prompts, streaming message/thought chunks, tool-call progress, plan updates, cancellation, and permission requests; features ACP cannot express (session loading, hunk-subset approvals, the conversation tree) are explicitly rejected rather than half-implemented. `lynshen serve` (the native newline-JSON protocol) is unchanged and remains the richer interface; its command/event schema is documented in [docs/serve-protocol.md](docs/serve-protocol.md).
 
 ## Agent tools
 
-JuCode exposes a small set of direct tools to the model:
+LynShen exposes a small set of direct tools to the model:
 
 | Tool | Purpose |
 | --- | --- |
@@ -238,14 +238,14 @@ JuCode exposes a small set of direct tools to the model:
 | `ls` | List directory entries. |
 | `ripgrep` | Search with ripgrep and optional limits. |
 | `outline` | Get lightweight source-file symbols without reading full bodies. |
-| `checkpoint` | Create/list/restore local `.jucode/checkpoints` snapshots. |
+| `checkpoint` | Create/list/restore local `.lynshen/checkpoints` snapshots. |
 | `spawn_agent`, `wait_agent`, `list_agents`, `send_message`, `close_agent` | Coordinate lightweight subagents. |
 
 `diff` is intentionally not exposed as an agent tool. Edit tools still return diff data for the TUI and for compact model-facing summaries, but workspace diff inspection should happen through scoped shell commands when needed.
 
 ## Context and token efficiency
 
-JuCode focuses on reducing unnecessary context growth without hiding useful information:
+LynShen focuses on reducing unnecessary context growth without hiding useful information:
 
 - tool outputs have separate full output and model-projected output paths;
 - large command output is truncated before entering model context;
@@ -266,13 +266,13 @@ The comparison used the `agent-eval` harness's aggregated test-set results (the 
 
 | Agent | Passed | Input + output tokens | Output tokens | Reasoning tokens | Raw cache rate | Filtered cache rate |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| JuCode | 5/5 | 735,437 | 16,028 | 1,657 | 66.5% | 80.5% |
+| LynShen | 5/5 | 735,437 | 16,028 | 1,657 | 66.5% | 80.5% |
 | Codex baseline | 5/5 | 1,082,512 | 24,847 | 2,109 | 81.3% | 81.3% |
 | OpenCode | 5/5 | 1,095,558 | 24,045 | 699 | 62.2% | 74.7% |
 | PI | 5/5 | 372,037 | 20,382 | 0 | 36.4% | 71.9% |
 | Reasonix | 4/5 | 1,586,304 | 18,311 | 0 | 68.4% | 68.4% |
 
-In this test-set snapshot, JuCode completed all five tasks and used **347,075 fewer input+output tokens than the Codex baseline**, a **32.1% reduction**. After excluding zero-cache noise requests, JuCode's cache rate was **80.5%**, close to the Codex baseline's **81.3%**.
+In this test-set snapshot, LynShen completed all five tasks and used **347,075 fewer input+output tokens than the Codex baseline**, a **32.1% reduction**. After excluding zero-cache noise requests, LynShen's cache rate was **80.5%**, close to the Codex baseline's **81.3%**.
 
 ## Development
 
@@ -287,25 +287,25 @@ cargo test --workspace
 Build the CLI:
 
 ```bash
-cargo build -p jucode-cli
+cargo build -p lynshen-cli
 ```
 
 Run a quick headless smoke task:
 
 ```bash
-./target/debug/jucode --headless "List the repository structure and stop."
+./target/debug/lynshen --headless "List the repository structure and stop."
 ```
 
 ## Project status
 
-JuCode CLI is an active experimental coding-agent harness. The current direction is to keep the framework small, improve task completion reliability, and optimize context quality rather than adding broad agent abstractions.
+LynShen CLI is an active experimental coding-agent harness. The current direction is to keep the framework small, improve task completion reliability, and optimize context quality rather than adding broad agent abstractions.
 
 ## License
 
 Apache License 2.0, see [LICENSE](LICENSE) and [NOTICE](NOTICE).
-Copyright 2026 Jucode Innovations INC.
+Copyright 2026 LynShen Innovations INC.
 
 `crates/llm-provider-kit` includes code and data from
 [oh-my-pi](https://github.com/can1357/oh-my-pi) under the MIT License; see
-[its NOTICE](crates/llm-provider-kit/NOTICE). The JuCode name and logo are
-trademarks of Jucode Innovations INC. and are not licensed for use by forks.
+[its NOTICE](crates/llm-provider-kit/NOTICE). The LynShen name and logo are
+trademarks of LynShen Innovations INC. and are not licensed for use by forks.

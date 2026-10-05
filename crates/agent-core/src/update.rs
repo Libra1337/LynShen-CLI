@@ -11,14 +11,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-const UPDATE_COMMAND: &str = "jucode update";
+const UPDATE_COMMAND: &str = "lynshen update";
 /// Redirects to the newest release's tag page. Read instead of GitHub's API,
 /// whose unauthenticated rate limit is shared by everyone behind one address.
-const RELEASES_URL: &str = "https://github.com/JuCode-Team/JuCode-CLI/releases/latest";
-const DOWNLOAD_URL: &str = "https://github.com/JuCode-Team/JuCode-CLI/releases/download";
+const RELEASES_URL: &str = "https://github.com/LynShen-Team/LynShen-CLI/releases/latest";
+const DOWNLOAD_URL: &str = "https://github.com/LynShen-Team/LynShen-CLI/releases/download";
 const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(3);
 /// A download from GitHub slower than this after `RATE_WINDOW` moves to the
-/// JuCode server (GitHub is often slow or unreachable from mainland China).
+/// LynShen server (GitHub is often slow or unreachable from mainland China).
 const MIN_DOWNLOAD_RATE: u64 = 200 * 1024;
 const RATE_WINDOW: Duration = Duration::from_secs(5);
 
@@ -31,7 +31,7 @@ pub struct UpdateNotice {
 impl UpdateNotice {
     pub fn message(&self) -> String {
         format!(
-            "update available: JuCode {} -> {}, run {}",
+            "update available: LynShen {} -> {}, run {}",
             self.current_version, self.latest_version, UPDATE_COMMAND
         )
     }
@@ -39,7 +39,7 @@ impl UpdateNotice {
 
 pub fn spawn_update_check(current_version: &'static str) -> Receiver<UpdateNotice> {
     let (tx, rx) = mpsc::channel();
-    // JuCode Desktop updates the copy it manages; no notice for it.
+    // LynShen Desktop updates the copy it manages; no notice for it.
     if install_channel() == InstallChannel::Desktop {
         return rx;
     }
@@ -78,7 +78,7 @@ pub struct Asset {
 }
 
 impl Release {
-    /// This platform's binary (`jucode-<target>`, `.exe` on Windows).
+    /// This platform's binary (`lynshen-<target>`, `.exe` on Windows).
     pub fn binary(&self) -> Option<&Asset> {
         let name = binary_name()?;
         self.assets.iter().find(|asset| asset.name == name)
@@ -95,9 +95,9 @@ fn binary_name() -> Option<String> {
         _ => return None,
     };
     Some(if cfg!(windows) {
-        format!("jucode-{target}.exe")
+        format!("lynshen-{target}.exe")
     } else {
-        format!("jucode-{target}")
+        format!("lynshen-{target}")
     })
 }
 
@@ -108,15 +108,15 @@ fn agent(timeout: Duration) -> ureq::Agent {
         .build()
 }
 
-/// The newest CLI version: GitHub first, then the JuCode server.
+/// The newest CLI version: GitHub first, then the LynShen server.
 pub fn latest_cli_version() -> Result<String, String> {
     latest_release(UPDATE_CHECK_TIMEOUT).map(|release| release.version)
 }
 
-/// The newest release: from GitHub, else from the JuCode server.
+/// The newest release: from GitHub, else from the LynShen server.
 pub fn latest_release(timeout: Duration) -> Result<Release, String> {
     github_release(timeout).or_else(|github| {
-        server_release(timeout).map_err(|server| format!("GitHub: {github}; JuCode: {server}"))
+        server_release(timeout).map_err(|server| format!("GitHub: {github}; LynShen: {server}"))
     })
 }
 
@@ -127,7 +127,7 @@ fn github_release(timeout: Duration) -> Result<Release, String> {
         .redirects(0)
         .build()
         .get(RELEASES_URL)
-        .set("User-Agent", "jucode-cli")
+        .set("User-Agent", "lynshen-cli")
         .call()
         .map_err(|error| error.to_string())?;
     let location = response.header("location").unwrap_or_default();
@@ -135,7 +135,7 @@ fn github_release(timeout: Duration) -> Result<Release, String> {
 }
 
 /// The release a `releases/latest` redirect points at (`…/releases/tag/v1.2.3`).
-/// Its binaries are named by target (`jucode-<target>`).
+/// Its binaries are named by target (`lynshen-<target>`).
 fn github_release_at(location: &str) -> Result<Release, String> {
     let tag = location
         .rsplit_once("/releases/tag/")
@@ -157,7 +157,7 @@ fn github_release_at(location: &str) -> Result<Release, String> {
 fn server_release(timeout: Duration) -> Result<Release, String> {
     let url = format!(
         "{}/v1/public/releases/cli/latest",
-        crate::config::saved_jucode_api_url().trim_end_matches('/')
+        crate::config::saved_lynshen_api_url().trim_end_matches('/')
     );
     let value = agent(timeout)
         .get(&url)
@@ -173,7 +173,7 @@ fn text(value: &Value) -> &str {
     value.as_str().unwrap_or_default()
 }
 
-/// The JuCode server's `/v1/public/releases/cli/latest`.
+/// The LynShen server's `/v1/public/releases/cli/latest`.
 fn parse_server_release(value: &Value) -> Result<Release, String> {
     let version = text(&value["version"]).trim_start_matches('v').to_string();
     if version.is_empty() {
@@ -206,9 +206,9 @@ pub fn is_newer_version(current_version: &str, latest_version: &str) -> bool {
 /// How the running binary was installed, detected from its own path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstallChannel {
-    /// Inside an npm global `node_modules/@jucode/` tree — `npm i -g` manages it.
+    /// Inside an npm global `node_modules/@lynshen/` tree — `npm i -g` manages it.
     Npm,
-    /// The copy JuCode Desktop keeps in `~/.jucode/bin` — it updates with the app.
+    /// The copy LynShen Desktop keeps in `~/.lynshen/bin` — it updates with the app.
     Desktop,
     /// Anything else: GitHub release binary, cargo install, dev build.
     Other,
@@ -219,7 +219,7 @@ pub fn install_channel() -> InstallChannel {
         .map(|path| fs::canonicalize(&path).unwrap_or(path))
         .map(|path| path.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let desktop = crate::config::jucode_dir()
+    let desktop = crate::config::lynshen_dir()
         .map(|dir| fs::canonicalize(dir.join("bin")).unwrap_or(dir.join("bin")))
         .map(|dir| dir.to_string_lossy().into_owned())
         .unwrap_or_default();
@@ -229,7 +229,7 @@ pub fn install_channel() -> InstallChannel {
 fn channel_for_path(path: &str, desktop_bin: &str) -> InstallChannel {
     let path = path.replace('\\', "/");
     let desktop_bin = desktop_bin.replace('\\', "/");
-    if path.contains("node_modules/@jucode/") {
+    if path.contains("node_modules/@lynshen/") {
         InstallChannel::Npm
     } else if !desktop_bin.is_empty()
         && path.starts_with(&format!("{}/", desktop_bin.trim_end_matches('/')))
@@ -240,8 +240,8 @@ fn channel_for_path(path: &str, desktop_bin: &str) -> InstallChannel {
     }
 }
 
-/// `jucode update` for a binary installed from a release: downloads this
-/// platform's binary of `release` (GitHub first, the JuCode server when
+/// `lynshen update` for a binary installed from a release: downloads this
+/// platform's binary of `release` (GitHub first, the LynShen server when
 /// GitHub fails or is too slow), checks it, and puts it in place of the
 /// running one. The new version runs from the next start.
 pub fn self_update(release: &Release) -> Result<String, String> {
@@ -255,7 +255,7 @@ pub fn self_update(release: &Release) -> Result<String, String> {
     if result.is_err() {
         let _ = fs::remove_file(&partial);
     }
-    result.map(|()| format!("updated to {}: restart jucode to use it", release.version))
+    result.map(|()| format!("updated to {}: restart lynshen to use it", release.version))
 }
 
 fn download_release_binary(release: &Release, name: &str, dest: &Path) -> Result<(), String> {
@@ -280,7 +280,7 @@ fn download_release_binary(release: &Release, name: &str, dest: &Path) -> Result
     };
     match server {
         Some(asset) => download(&asset, dest, false).map_err(|error| {
-            errors.push(format!("JuCode: {error}"));
+            errors.push(format!("LynShen: {error}"));
             errors.join("; ")
         }),
         None => {
@@ -295,7 +295,7 @@ fn download_release_binary(release: &Release, name: &str, dest: &Path) -> Result
 fn download(asset: &Asset, dest: &Path, need_rate: bool) -> Result<(), String> {
     let response = agent(Duration::from_secs(15))
         .get(&asset.url)
-        .set("User-Agent", "jucode-cli")
+        .set("User-Agent", "lynshen-cli")
         .call()
         .map_err(|error| error.to_string())?;
     let mut reader = response.into_reader();
@@ -382,7 +382,7 @@ fn replace_binary(new: &Path, exe: &Path) -> Result<(), String> {
     }
 }
 
-/// Runs `npm i -g @jucode/cli@latest` for an npm-installed binary.
+/// Runs `npm i -g @lynshen/cli@latest` for an npm-installed binary.
 ///
 /// On Unix the foreground npm replaces the package files while this process
 /// keeps running; the new version takes effect on the next launch. On Windows
@@ -397,7 +397,7 @@ pub fn run_npm_update() -> Result<String, String> {
         Command::new("cmd")
             .args([
                 "/C",
-                "timeout /t 2 /nobreak >nul && npm i -g @jucode/cli@latest",
+                "timeout /t 2 /nobreak >nul && npm i -g @lynshen/cli@latest",
             ])
             .creation_flags(FLAGS)
             .stdin(Stdio::null())
@@ -405,16 +405,16 @@ pub fn run_npm_update() -> Result<String, String> {
             .stderr(Stdio::null())
             .spawn()
             .map_err(|error| format!("failed to start the updater: {error}"))?;
-        Ok("update scheduled: npm i -g runs after jucode exits; check `jucode --version` in a few seconds".to_string())
+        Ok("update scheduled: npm i -g runs after lynshen exits; check `lynshen --version` in a few seconds".to_string())
     }
     #[cfg(not(windows))]
     {
         let status = Command::new("npm")
-            .args(["i", "-g", "@jucode/cli@latest"])
+            .args(["i", "-g", "@lynshen/cli@latest"])
             .status()
             .map_err(|error| format!("failed to run npm (is it on PATH?): {error}"))?;
         if status.success() {
-            Ok("updated: restart jucode to use the new version".to_string())
+            Ok("updated: restart lynshen to use the new version".to_string())
         } else {
             Err(format!("npm i -g failed ({status})"))
         }
@@ -435,71 +435,71 @@ mod tests {
     }
 
     #[test]
-    fn notice_points_at_jucode_update() {
+    fn notice_points_at_lynshen_update() {
         let notice = UpdateNotice {
             current_version: "0.1.3".to_string(),
             latest_version: "0.1.4".to_string(),
         };
-        assert!(notice.message().contains("jucode update"));
+        assert!(notice.message().contains("lynshen update"));
     }
 
     #[test]
     fn detects_install_channels_across_platforms() {
-        let desktop = "/home/x/.jucode/bin";
+        let desktop = "/home/x/.lynshen/bin";
         assert_eq!(
             channel_for_path(
-                "/usr/local/lib/node_modules/@jucode/cli-darwin-arm64/bin/jucode",
+                "/usr/local/lib/node_modules/@lynshen/cli-darwin-arm64/bin/lynshen",
                 desktop
             ),
             InstallChannel::Npm
         );
         assert_eq!(
             channel_for_path(
-                "C:\\Users\\x\\AppData\\Roaming\\npm\\node_modules\\@jucode\\cli-win32-x64\\bin\\jucode.exe",
+                "C:\\Users\\x\\AppData\\Roaming\\npm\\node_modules\\@lynshen\\cli-win32-x64\\bin\\lynshen.exe",
                 desktop
             ),
             InstallChannel::Npm
         );
         assert_eq!(
-            channel_for_path("/home/x/.jucode/bin/jucode", desktop),
+            channel_for_path("/home/x/.lynshen/bin/lynshen", desktop),
             InstallChannel::Desktop
         );
         assert_eq!(
             channel_for_path(
-                "C:\\Users\\x\\.jucode\\bin\\jucode.exe",
-                "C:\\Users\\x\\.jucode\\bin"
+                "C:\\Users\\x\\.lynshen\\bin\\lynshen.exe",
+                "C:\\Users\\x\\.lynshen\\bin"
             ),
             InstallChannel::Desktop
         );
         assert_eq!(
-            channel_for_path("/home/x/.jucode/binaries/jucode", desktop),
+            channel_for_path("/home/x/.lynshen/binaries/lynshen", desktop),
             InstallChannel::Other
         );
         assert_eq!(
-            channel_for_path("/home/x/bin/jucode", desktop),
+            channel_for_path("/home/x/bin/lynshen", desktop),
             InstallChannel::Other
         );
         assert_eq!(
-            channel_for_path("/repo/target/debug/jucode", desktop),
+            channel_for_path("/repo/target/debug/lynshen", desktop),
             InstallChannel::Other
         );
     }
 
     #[test]
-    fn reads_releases_from_github_and_the_jucode_server() {
+    fn reads_releases_from_github_and_the_lynshen_server() {
         let github =
-            github_release_at("https://github.com/JuCode-Team/JuCode-CLI/releases/tag/v0.4.0")
+            github_release_at("https://github.com/LynShen-Team/LynShen-CLI/releases/tag/v0.4.0")
                 .unwrap();
         assert_eq!(github.version, "0.4.0");
         let binary = github.binary().unwrap();
         assert!(binary.url.starts_with(
-            "https://github.com/JuCode-Team/JuCode-CLI/releases/download/v0.4.0/jucode-"
+            "https://github.com/LynShen-Team/LynShen-CLI/releases/download/v0.4.0/lynshen-"
         ));
         assert_eq!(binary.sha256, None);
-        assert!(github_release_at("https://github.com/JuCode-Team/JuCode-CLI/releases").is_err());
+        assert!(github_release_at("https://github.com/LynShen-Team/LynShen-CLI/releases").is_err());
         let server = parse_server_release(&serde_json::json!({
             "version": "0.4.0",
-            "assets": [{ "name": "jucode-aarch64-apple-darwin", "url": "https://api.jucode.net/v1/public/releases/cli/0.4.0/files/jucode-aarch64-apple-darwin", "sha256": "cd34" }],
+            "assets": [{ "name": "lynshen-aarch64-apple-darwin", "url": "https://api.lynshen.net/v1/public/releases/cli/0.4.0/files/lynshen-aarch64-apple-darwin", "sha256": "cd34" }],
         }))
         .unwrap();
         assert_eq!(server.assets[0].sha256.as_deref(), Some("cd34"));
@@ -510,7 +510,7 @@ mod tests {
     fn serve_once(body: &'static [u8]) -> String {
         use std::io::{BufRead, BufReader};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}/jucode", listener.local_addr().unwrap());
+        let url = format!("http://{}/lynshen", listener.local_addr().unwrap());
         thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let mut reader = BufReader::new(stream.try_clone().unwrap());
@@ -530,13 +530,13 @@ mod tests {
 
     #[test]
     fn a_download_is_checked_against_its_checksum() {
-        let dir = std::env::temp_dir().join(format!("jucode-update-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("lynshen-update-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
-        let dest = dir.join("jucode");
+        let dest = dir.join("lynshen");
         // sha256("binary")
         let good = "9a3a45d01531a20e89ac6ae10b0b0beb0492acd7216a368aa062d1a5fecaf9cd";
         let asset = |url: String, sha: &str| Asset {
-            name: "jucode".into(),
+            name: "lynshen".into(),
             url,
             sha256: Some(sha.into()),
         };

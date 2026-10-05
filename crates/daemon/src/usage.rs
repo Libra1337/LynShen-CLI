@@ -1,15 +1,15 @@
 //! What each agent turn used: tokens per turn, whatever engine ran it.
 //!
 //! Records are kept in `usage.jsonl` with the project they ran in (that
-//! never leaves this computer) and, while signed in to JuCode, uploaded
+//! never leaves this computer) and, while signed in to LynShen, uploaded
 //! without it to the account (`POST /v1/oauth/agent-usage`) so every
-//! computer on the account shows the same totals. JuCode gateway requests
-//! carry the turn id (`X-JuCode-Turn`), so the gateway puts their cost and
+//! computer on the account shows the same totals. LynShen gateway requests
+//! carry the turn id (`X-LynShen-Turn`), so the gateway puts their cost and
 //! group on the same turn.
 //!
 //! A turn opens at its first usage (or, for Claude Code and Codex, at the
 //! user message, so the local gateway can tag its requests) and is written
-//! when the session is ready again. The JuCode engine tags its own turns;
+//! when the session is ready again. The LynShen engine tags its own turns;
 //! its usage events carry the tag as `turn`.
 
 use crate::store::{now, random_hex, Store};
@@ -41,9 +41,9 @@ const TOKEN_FIELDS: [&str; 5] = [
 
 /// The session facts a record needs, read from the session list.
 pub struct SessionInfo {
-    /// jucode, claude, codex or acp.
+    /// lynshen, claude, codex or acp.
     pub engine: String,
-    /// Claude / Codex through the JuCode gateway.
+    /// Claude / Codex through the LynShen gateway.
     pub gateway: bool,
     pub cwd: String,
 }
@@ -102,8 +102,8 @@ impl Usage {
             }
             Some("user_message") => {
                 let Some(info) = info() else { return };
-                // The JuCode engine tags its own turns.
-                if info.engine != "jucode" {
+                // The LynShen engine tags its own turns.
+                if info.engine != "lynshen" {
                     let mut state = self.lock();
                     if !state.current.contains_key(session) {
                         let turn = new_turn_id();
@@ -129,7 +129,7 @@ impl Usage {
                 Some(turn) => turn.clone(),
                 None => {
                     let turn = new_turn_id();
-                    if info.engine != "jucode" {
+                    if info.engine != "lynshen" {
                         crate::gateway::set_turn(session, Some(&turn));
                     }
                     state.current.insert(session.to_string(), turn.clone());
@@ -189,7 +189,7 @@ impl Usage {
             return;
         }
         // Records made while signed in go to that account; the rest stay here.
-        let upload = jucode_agent_core::jucode_signed_in();
+        let upload = lynshen_agent_core::lynshen_signed_in();
         let ended = now();
         let lines: String = records
             .into_iter()
@@ -205,7 +205,7 @@ impl Usage {
             })
             .collect();
         if let Err(error) = self.append(&lines) {
-            jucode_agent_core::log_warn!("usage", "cannot record usage", error = error.to_string());
+            lynshen_agent_core::log_warn!("usage", "cannot record usage", error = error.to_string());
             return;
         }
         if upload {
@@ -323,7 +323,7 @@ impl Usage {
             return Ok(false);
         }
         if !turns.is_empty() {
-            let (api, token) = jucode_agent_core::jucode_gateway_token()?;
+            let (api, token) = lynshen_agent_core::lynshen_gateway_token()?;
             let url = format!("{}/v1/oauth/agent-usage", api.trim_end_matches('/'));
             match ureq::post(&url)
                 .timeout(Duration::from_secs(30))
@@ -333,7 +333,7 @@ impl Usage {
                 Ok(_) => {}
                 // The gateway refused these records for good: skip them.
                 Err(ureq::Error::Status(400, response)) => {
-                    jucode_agent_core::log_warn!(
+                    lynshen_agent_core::log_warn!(
                         "usage",
                         "usage upload rejected",
                         error = response.into_string().unwrap_or_default()
@@ -386,14 +386,14 @@ fn pending(text: &str, offset: u64) -> (Vec<Value>, u64) {
 /// The channel a turn ran on: (kind, id). See `provider_channel_kind`.
 fn channel(engine: &str, gateway: bool, provider: &str) -> (&'static str, String) {
     match engine {
-        "jucode" => (
-            jucode_agent_core::provider_channel_kind(provider),
+        "lynshen" => (
+            lynshen_agent_core::provider_channel_kind(provider),
             provider.to_string(),
         ),
-        "claude" if gateway => ("jucode", "jucode".to_string()),
+        "claude" if gateway => ("lynshen", "lynshen".to_string()),
         "claude" => ("local", "anthropic".to_string()),
-        "codex" if provider == "jucode_gateway" || (gateway && provider.is_empty()) => {
-            ("jucode", "jucode".to_string())
+        "codex" if provider == "lynshen_gateway" || (gateway && provider.is_empty()) => {
+            ("lynshen", "lynshen".to_string())
         }
         "codex" => (
             "local",
@@ -475,11 +475,11 @@ fn local_summary(records: &[Value], days: u64, tz_offset: i64, now_ms: u64) -> V
                 .add_in_out(&in_out);
             for (provider, usage) in record["prov"].as_object().into_iter().flatten() {
                 let key = match provider.as_str() {
-                    "jucode" | "jucode_gateway" => ("jucode".to_string(), "jucode".to_string()),
+                    "lynshen" | "lynshen_gateway" => ("lynshen".to_string(), "lynshen".to_string()),
                     // Claude through the gateway and on its own login alike.
                     "anthropic" => ("legacy".to_string(), "anthropic".to_string()),
                     other => (
-                        jucode_agent_core::provider_channel_kind(other).to_string(),
+                        lynshen_agent_core::provider_channel_kind(other).to_string(),
                         other.to_string(),
                     ),
                 };
@@ -553,7 +553,7 @@ mod tests {
     }
 
     fn usage_in(name: &str) -> (Usage, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("jucode-usage-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("lynshen-usage-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let usage = Usage {
             dir: dir.clone(),
@@ -569,7 +569,7 @@ mod tests {
         let (usage, _dir) = usage_in("turn");
         usage.observe(
             "s1",
-            &json!({ "type": "model_status", "provider": "jucode_gateway", "model": "gpt-5.5" }),
+            &json!({ "type": "model_status", "provider": "lynshen_gateway", "model": "gpt-5.5" }),
             || None,
         );
         usage.observe(
@@ -592,17 +592,17 @@ mod tests {
         assert_eq!(record["cached_input_tokens"], 2);
         assert_eq!(record["output_tokens"], 5);
         assert_eq!(record["requests"], 2);
-        assert_eq!(record["channel_kind"], "jucode");
+        assert_eq!(record["channel_kind"], "lynshen");
         assert_eq!(record["model"], "gpt-5.5");
         assert_eq!(record["cwd"], "/p");
     }
 
     #[test]
-    fn jucode_engine_turns_are_keyed_by_the_engine_tag() {
+    fn lynshen_engine_turns_are_keyed_by_the_engine_tag() {
         let (usage, _dir) = usage_in("tag");
         let tagged = |turn: &str| json!({ "type": "usage", "turn": turn, "input_tokens": 4, "output_tokens": 1 });
-        usage.observe("s", &tagged("t-a"), || info("jucode", false));
-        usage.observe("s", &tagged("t-b"), || info("jucode", false));
+        usage.observe("s", &tagged("t-a"), || info("lynshen", false));
+        usage.observe("s", &tagged("t-b"), || info("lynshen", false));
         usage.observe(
             "s",
             &json!({ "type": "status", "message": "ready" }),
@@ -619,13 +619,13 @@ mod tests {
 
     #[test]
     fn channels_follow_the_route() {
-        assert_eq!(channel("claude", true, "anthropic").0, "jucode");
+        assert_eq!(channel("claude", true, "anthropic").0, "lynshen");
         assert_eq!(channel("claude", false, "anthropic").0, "local");
         assert_eq!(channel("codex", false, "openai").0, "local");
-        assert_eq!(channel("codex", true, "jucode_gateway").0, "jucode");
-        assert_eq!(channel("jucode", false, "jucode").0, "jucode");
-        assert_eq!(channel("jucode", false, "kimi-code").0, "third_party");
-        assert_eq!(channel("jucode", false, "my-relay").0, "local");
+        assert_eq!(channel("codex", true, "lynshen_gateway").0, "lynshen");
+        assert_eq!(channel("lynshen", false, "lynshen").0, "lynshen");
+        assert_eq!(channel("lynshen", false, "kimi-code").0, "third_party");
+        assert_eq!(channel("lynshen", false, "my-relay").0, "local");
         assert_eq!(channel("acp", false, "").0, "local");
     }
 
@@ -655,10 +655,10 @@ mod tests {
             .date_naive()
             .to_string();
         let records = vec![
-            json!({ "started_at": now_ms, "cwd": "/a", "channel_kind": "jucode", "channel": "jucode", "model": "m", "engine": "jucode", "input_tokens": 10, "output_tokens": 1 }),
+            json!({ "started_at": now_ms, "cwd": "/a", "channel_kind": "lynshen", "channel": "lynshen", "model": "m", "engine": "lynshen", "input_tokens": 10, "output_tokens": 1 }),
             json!({ "started_at": now_ms - day_ms, "cwd": "/b", "channel_kind": "local", "channel": "anthropic", "model": "c", "engine": "claude", "input_tokens": 5, "output_tokens": 2 }),
             json!({ "started_at": now_ms - 40 * day_ms, "cwd": "/old", "input_tokens": 99 }),
-            json!({ "legacy": true, "day": yesterday, "input_tokens": 7, "output_tokens": 0, "prov": { "jucode_gateway": { "in": 4, "out": 0 }, "anthropic": { "in": 3, "out": 0 } } }),
+            json!({ "legacy": true, "day": yesterday, "input_tokens": 7, "output_tokens": 0, "prov": { "lynshen_gateway": { "in": 4, "out": 0 }, "anthropic": { "in": 3, "out": 0 } } }),
         ];
         let summary = local_summary(&records, 30, 0, now_ms);
         assert_eq!(summary["totals"]["input_tokens"], 15 + 7);
@@ -668,10 +668,10 @@ mod tests {
         assert!(channels
             .iter()
             .any(|c| c["channel_kind"] == "legacy" && c["input_tokens"] == 3));
-        let jucode = channels
+        let lynshen = channels
             .iter()
-            .find(|c| c["channel_kind"] == "jucode")
+            .find(|c| c["channel_kind"] == "lynshen")
             .unwrap();
-        assert_eq!(jucode["input_tokens"], 14);
+        assert_eq!(lynshen["input_tokens"], 14);
     }
 }

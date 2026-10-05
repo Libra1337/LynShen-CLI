@@ -2,7 +2,7 @@ use crate::providers::CLIENT_NAME;
 use crate::{
     actions::{action_digest, decision_message, DeferredAction},
     config::{
-        models_for_provider, profile_dir, ApprovalMode, AuthStore, Config, JucodeTokens,
+        models_for_provider, profile_dir, ApprovalMode, AuthStore, Config, LynShenTokens,
         LiveApprovalMode, ModelConfig,
     },
     event::{
@@ -128,7 +128,7 @@ enum WorkerEvent {
 pub struct AgentCore {
     config: Config,
     auth: AuthStore,
-    /// Tag each turn's JuCode gateway requests (`X-JuCode-Turn`) so the
+    /// Tag each turn's LynShen gateway requests (`X-LynShen-Turn`) so the
     /// gateway can put their cost on the turn the daemon records.
     tag_turns: bool,
     /// The current turn's tag, new for every turn.
@@ -198,7 +198,7 @@ pub struct AgentCore {
     tool_state: crate::tools::ToolState,
     /// Tools and prompt text added by a host process (the daemon).
     host: Option<crate::host::HostExtensions>,
-    /// Chat session (cwd under `~/.jucode/chats/`): chat prompt, no project
+    /// Chat session (cwd under `~/.lynshen/chats/`): chat prompt, no project
     /// instructions or project skills.
     chat: bool,
     plan: Vec<PlanItem>,
@@ -701,13 +701,13 @@ impl AgentCore {
             "/usage" => self.usage_events(),
             "/new" => self.new_session_events(),
             "/config" => vec![AgentEvent::Info(format!(
-                "provider={} model={} reasoning_effort={} base_url={} jucode_web_url={} jucode_api_url={} auth_key={} api_key_env={} retry_attempts={}",
+                "provider={} model={} reasoning_effort={} base_url={} lynshen_web_url={} lynshen_api_url={} auth_key={} api_key_env={} retry_attempts={}",
                 self.config.provider,
                 self.config.model,
                 self.config.reasoning_effort,
                 self.config.base_url,
-                self.config.jucode_web_url,
-                self.config.jucode_api_url,
+                self.config.lynshen_web_url,
+                self.config.lynshen_api_url,
                 mask_key(self.provider_api_key().as_deref()),
                 self.config.api_key_env,
                 self.config.retry_attempts
@@ -868,7 +868,7 @@ impl AgentCore {
             Err(error) => format!("Installed skills: failed to read ({error})"),
         };
         let project_roots = [
-            self.cwd.join(".jucode").join("skills"),
+            self.cwd.join(".lynshen").join("skills"),
             self.cwd.join(".agents").join("skills"),
         ];
         let user_agents_root = crate::secrets::home_dir().map(|home| home.join(".agents"));
@@ -914,7 +914,7 @@ impl AgentCore {
         };
         let marketplace = match self.fetch_marketplace() {
             Ok(marketplace) if marketplace.skills.is_empty() => {
-                "Source: JuCode marketplace\nNo skills available".to_string()
+                "Source: LynShen marketplace\nNo skills available".to_string()
             }
             Ok(marketplace) => {
                 let defaults = marketplace
@@ -931,9 +931,9 @@ impl AgentCore {
                     };
                     lines.push(format!("{}{} — {}", skill.id, marker, skill.description));
                 }
-                format!("Source: JuCode marketplace\n{}", lines.join("\n"))
+                format!("Source: LynShen marketplace\n{}", lines.join("\n"))
             }
-            Err(error) => format!("Source: JuCode marketplace (unavailable: {error})"),
+            Err(error) => format!("Source: LynShen marketplace (unavailable: {error})"),
         };
         let extra = match self.fetch_extra_skill_source() {
             Ok(Some(source)) => {
@@ -976,7 +976,7 @@ impl AgentCore {
         sections.push(marketplace);
         sections.extend(extra);
         sections.push(
-            "Install with /skills install <id>; update with /skills update <id>; sync JuCode defaults with /skills sync."
+            "Install with /skills install <id>; update with /skills update <id>; sync LynShen defaults with /skills sync."
                 .to_string(),
         );
         vec![AgentEvent::Info(sections.join("\n\n"))]
@@ -998,7 +998,7 @@ impl AgentCore {
                 return match installed {
                     Ok(()) => vec![
                         AgentEvent::Status(format!(
-                            "{verb} skill {} from JuCode marketplace",
+                            "{verb} skill {} from LynShen marketplace",
                             skill.id
                         )),
                         self.command_list_event(),
@@ -1048,7 +1048,7 @@ impl AgentCore {
         match marketplace {
             Ok(_) => vec![AgentEvent::Error(format!("skill not found in configured sources: {id}"))],
             Err(error) => vec![AgentEvent::Error(format!(
-                "skill not found in configured extra source and JuCode marketplace is unavailable: {error}"
+                "skill not found in configured extra source and LynShen marketplace is unavailable: {error}"
             ))],
         }
     }
@@ -1114,7 +1114,7 @@ impl AgentCore {
     }
 
     fn fetch_marketplace(&self) -> Result<skills::Marketplace, String> {
-        skills::fetch_marketplace(&self.config.jucode_api_url, self.auth.jucode_access_token())
+        skills::fetch_marketplace(&self.config.lynshen_api_url, self.auth.lynshen_access_token())
     }
 
     fn fetch_extra_skill_source(&self) -> Result<Option<skills::SkillSource>, String> {
@@ -1126,8 +1126,8 @@ impl AgentCore {
         )
     }
 
-    /// Returns the bearer token for the active provider: the JuCode OAuth
-    /// access token for the jucode provider, a stored omp OAuth access token
+    /// Returns the bearer token for the active provider: the LynShen OAuth
+    /// access token for the lynshen provider, a stored omp OAuth access token
     /// when logged in via the catalog, otherwise the raw provider key.
     fn provider_api_key(&self) -> Option<String> {
         provider_api_key(&self.config, &self.auth)
@@ -1135,13 +1135,13 @@ impl AgentCore {
 
     fn model_headers(&self) -> HashMap<String, Vec<(String, String)>> {
         let mut headers = model_headers(&self.config);
-        if let (true, Some(tag)) = (self.config.provider == "jucode", &self.turn_tag) {
+        if let (true, Some(tag)) = (self.config.provider == "lynshen", &self.turn_tag) {
             // Headers go per model; a turn may call any of these.
             let config = &self.config;
             let names = config
                 .models
                 .iter()
-                .chain(&config.jucode_models)
+                .chain(&config.lynshen_models)
                 .map(|m| m.name.clone())
                 .chain(config.subagent_models.iter().map(|m| m.name.clone()))
                 .chain([
@@ -1151,8 +1151,8 @@ impl AgentCore {
                 ]);
             for name in names {
                 let entry = headers.entry(name).or_default();
-                if !entry.iter().any(|(header, _)| header == "X-JuCode-Turn") {
-                    entry.push(("X-JuCode-Turn".to_string(), tag.clone()));
+                if !entry.iter().any(|(header, _)| header == "X-LynShen-Turn") {
+                    entry.push(("X-LynShen-Turn".to_string(), tag.clone()));
                 }
             }
         }
@@ -1182,14 +1182,14 @@ impl AgentCore {
     }
 
     /// Refreshes the active provider's bearer when it's near expiry so the
-    /// inference call carries a valid token. Handles the JuCode session and
+    /// inference call carries a valid token. Handles the LynShen session and
     /// omp OAuth credentials; BYOK providers return early.
     fn ensure_provider_credentials(&mut self) -> Result<(), String> {
-        if self.config.provider != "jucode" {
+        if self.config.provider != "lynshen" {
             return self.ensure_omp_credentials();
         }
         self.auth =
-            oauth::ensure_session(&self.config.jucode_api_url, self.config.encrypt_secrets)?;
+            oauth::ensure_session(&self.config.lynshen_api_url, self.config.encrypt_secrets)?;
         Ok(())
     }
 
@@ -1205,7 +1205,7 @@ impl AgentCore {
             .unwrap_or(provider)
             .to_string();
         // Pick up tokens written by another process first (same rationale as
-        // the jucode reload above).
+        // the lynshen reload above).
         self.auth = AuthStore::load_or_create(self.config.encrypt_secrets)
             .map_err(|error| format!("failed to reload auth.json: {error}"))?;
         let Some(credential) = self.auth.oauth_credential(&store_id) else {
@@ -1247,23 +1247,23 @@ impl AgentCore {
         }
     }
 
-    /// `/usage` — query the JuCode account via the OAuth read endpoints and
+    /// `/usage` — query the LynShen account via the OAuth read endpoints and
     /// print 套餐 / 余额 / 用量 / 最近调用详情.
     fn usage_events(&mut self) -> Vec<AgentEvent> {
-        if self.config.provider != "jucode" {
+        if self.config.provider != "lynshen" {
             return vec![AgentEvent::Error(
-                "/usage requires the jucode provider. Run /login.".to_string(),
+                "/usage requires the lynshen provider. Run /login.".to_string(),
             )];
         }
         if let Err(error) = self.ensure_provider_credentials() {
             return vec![AgentEvent::Error(error)];
         }
-        let Some(token) = self.auth.jucode_access_token().map(str::to_string) else {
+        let Some(token) = self.auth.lynshen_access_token().map(str::to_string) else {
             return vec![AgentEvent::Error(
-                "not logged in to JuCode. Run /login.".to_string(),
+                "not logged in to LynShen. Run /login.".to_string(),
             )];
         };
-        let api = self.config.jucode_api_url.clone();
+        let api = self.config.lynshen_api_url.clone();
         let mut lines: Vec<String> = Vec::new();
 
         match oauth::get_json(&api, "/v1/oauth/userinfo", &token) {
@@ -1422,8 +1422,8 @@ impl AgentCore {
         Some(events)
     }
 
-    /// Dispatch a user-defined command from `~/.jucode/commands` or a trusted
-    /// project's `.jucode/commands`: the Markdown body becomes the user prompt.
+    /// Dispatch a user-defined command from `~/.lynshen/commands` or a trusted
+    /// project's `.lynshen/commands`: the Markdown body becomes the user prompt.
     fn custom_command_events(&mut self, command: &str, request: &str) -> Option<Vec<AgentEvent>> {
         let commands = crate::custom_commands::discover_custom_commands(
             self.config.profile_dir(),
@@ -1667,7 +1667,7 @@ impl AgentCore {
             match rx.try_recv() {
                 Ok(Ok(result)) => events.extend(self.apply_login_result(result)),
                 Ok(Err(error)) => {
-                    events.push(AgentEvent::Error(format!("JuCode login failed: {error}")))
+                    events.push(AgentEvent::Error(format!("LynShen login failed: {error}")))
                 }
                 Err(mpsc::TryRecvError::Empty) => self.login_receiver = Some(rx),
                 Err(mpsc::TryRecvError::Disconnected) => {}
@@ -1876,9 +1876,9 @@ impl AgentCore {
         // Read the session from disk: Desktop or another engine may have
         // logged in or out since this engine last loaded auth.json.
         let signed_in = AuthStore::load_or_create(self.config.encrypt_secrets)
-            .is_ok_and(|auth| auth.jucode_tokens().is_some());
+            .is_ok_and(|auth| auth.lynshen_tokens().is_some());
         self.tool_state.set_web(Some(crate::web::WebTools {
-            api_url: self.config.jucode_api_url.clone(),
+            api_url: self.config.lynshen_api_url.clone(),
             encrypt_secrets: self.config.encrypt_secrets,
             search_engine: self.config.web_search_engine.clone(),
             fetch_engine: self.config.web_fetch_engine.clone(),
@@ -1923,8 +1923,8 @@ impl AgentCore {
             self.config.context_window_overrides = overrides;
         }
         // And the group picked per model, which the window follows.
-        if let Ok(groups) = crate::config::read_jucode_groups_at(self.config.path()) {
-            self.config.jucode_groups = groups;
+        if let Ok(groups) = crate::config::read_lynshen_groups_at(self.config.path()) {
+            self.config.lynshen_groups = groups;
         }
         let (goal_tool_tx, goal_tool_rx) = mpsc::channel();
         self.goal_tool_receiver = Some(goal_tool_rx);
@@ -2624,7 +2624,7 @@ impl AgentCore {
         vec![AgentEvent::Info(format!(
             "sandbox: {}\n\
              read-only       - commands cannot write anything\n\
-             workspace-write - the working directory, temp and package caches are writable; .git, .jucode and .agents stay read-only\n\
+             workspace-write - the working directory, temp and package caches are writable; .git, .lynshen and .agents stay read-only\n\
              full-access     - no sandbox\n\
              network: {} · read-write dirs: {} · read-only dirs: {}\n\
              command rules: {}\n\
@@ -3058,7 +3058,7 @@ impl AgentCore {
             return self.omp_login_list_events();
         }
         if !first.is_empty()
-            && first != "jucode"
+            && first != "lynshen"
             && llm_provider_kit::omp::catalog()
                 .auth_provider(first)
                 .is_some()
@@ -3068,14 +3068,14 @@ impl AgentCore {
                 None => self.omp_login_events(first),
             };
         }
-        let web_url = if first == "jucode" {
-            self.config.jucode_web_url.clone()
+        let web_url = if first == "lynshen" {
+            self.config.lynshen_web_url.clone()
         } else {
             first.to_string()
         };
         let api_url = parts.next().map(str::to_string).unwrap_or_else(|| {
-            if first.is_empty() || first == "jucode" {
-                self.config.jucode_api_url.clone()
+            if first.is_empty() || first == "lynshen" {
+                self.config.lynshen_api_url.clone()
             } else {
                 web_url.clone()
             }
@@ -3093,7 +3093,7 @@ impl AgentCore {
         });
         self.login_receiver = Some(rx);
         vec![AgentEvent::Info(
-            "Opening your browser to sign in to JuCode. Complete the authorization there — waiting for it to finish (up to 5 min)…".to_string(),
+            "Opening your browser to sign in to LynShen. Complete the authorization there — waiting for it to finish (up to 5 min)…".to_string(),
         )]
     }
 
@@ -3181,19 +3181,19 @@ impl AgentCore {
     }
 
     /// Rows for the interactive provider picker emitted by bare `/login`.
-    /// JuCode's own gateway stays first; the rest follow catalog order with
+    /// LynShen's own gateway stays first; the rest follow catalog order with
     /// their flow kind and sign-in state.
     fn login_picker_event(&self) -> AgentEvent {
         let catalog = llm_provider_kit::omp::catalog();
         let mut rows = vec![LoginProviderView {
-            id: "jucode".to_string(),
-            label: "JuCode".to_string(),
-            detail: if self.auth.jucode_tokens().is_some() {
+            id: "lynshen".to_string(),
+            label: "LynShen".to_string(),
+            detail: if self.auth.lynshen_tokens().is_some() {
                 "oauth · signed in".to_string()
             } else {
                 "oauth".to_string()
             },
-            active: self.config.provider == "jucode",
+            active: self.config.provider == "lynshen",
             wants_key: false,
         }];
         for provider in catalog.auth_providers() {
@@ -3281,7 +3281,7 @@ impl AgentCore {
                 lines.push(prompt);
             }
             lines.push(format!(
-                "then store it as \"{provider_id}\" under \"providers\" in ~/.jucode/auth.json"
+                "then store it as \"{provider_id}\" under \"providers\" in ~/.lynshen/auth.json"
             ));
             return vec![AgentEvent::Info(lines.join("\n"))];
         };
@@ -3376,15 +3376,15 @@ impl AgentCore {
         // The gateway lists every model the account can reach (across all its
         // groups); the user picks which to show. Keep an earlier pick, else
         // start from the recommended set.
-        let available: Vec<ModelConfig> = result.models.iter().map(jucode_model_config).collect();
+        let available: Vec<ModelConfig> = result.models.iter().map(lynshen_model_config).collect();
         let kept: Vec<ModelConfig> = self
             .config
-            .jucode_models
+            .lynshen_models
             .iter()
             .filter_map(|m| available.iter().find(|a| a.name == m.name).cloned())
             .collect();
         let visible = if kept.is_empty() {
-            default_jucode_models(&available)
+            default_lynshen_models(&available)
         } else {
             kept
         };
@@ -3392,20 +3392,20 @@ impl AgentCore {
         // is revoked rather than left behind in 授权设备管理.
         let replaced = AuthStore::load_or_create(self.config.encrypt_secrets)
             .ok()
-            .and_then(|auth| auth.jucode_tokens().map(|t| t.refresh_token.clone()));
+            .and_then(|auth| auth.lynshen_tokens().map(|t| t.refresh_token.clone()));
         if let Some(refresh_token) = replaced {
-            let api_url = self.config.jucode_api_url.clone();
+            let api_url = self.config.lynshen_api_url.clone();
             thread::spawn(move || {
                 if let Err(error) = oauth::revoke(&api_url, &refresh_token) {
                     crate::log_error!("oauth", "revoking the replaced login failed", error = error);
                 }
             });
         }
-        self.config.provider = "jucode".to_string();
-        self.config.jucode_web_url = result.web_url.clone();
-        self.config.jucode_api_url = result.api_url.clone();
+        self.config.provider = "lynshen".to_string();
+        self.config.lynshen_web_url = result.web_url.clone();
+        self.config.lynshen_api_url = result.api_url.clone();
         self.config.base_url = format!("{}/v1", result.api_url);
-        self.config.jucode_models = visible.clone();
+        self.config.lynshen_models = visible.clone();
         self.config.models = visible;
         if !self
             .config
@@ -3424,7 +3424,7 @@ impl AgentCore {
                 }
             }
         }
-        self.auth.set_jucode_tokens(JucodeTokens {
+        self.auth.set_lynshen_tokens(LynShenTokens {
             access_token: result.tokens.access_token,
             refresh_token: result.tokens.refresh_token,
             access_expires_at: result.tokens.access_expires_at,
@@ -3435,7 +3435,7 @@ impl AgentCore {
             Ok(()) => {
                 let mut events = vec![
                     AgentEvent::Info(
-                        "JuCode account connected; provider switched to jucode".to_string(),
+                        "LynShen account connected; provider switched to lynshen".to_string(),
                     ),
                     self.model_status_event(),
                 ];
@@ -3894,15 +3894,15 @@ impl AgentCore {
         }
     }
 
-    /// Desktop edits the visible JuCode models in config.json; pick them up
+    /// Desktop edits the visible LynShen models in config.json; pick them up
     /// when the model list opens instead of waiting for a restart.
     fn reload_model_list(&mut self) {
         if let Ok(disk) = Config::load_or_create() {
             self.config.context_window_overrides = disk.context_window_overrides.clone();
             if disk.provider == self.config.provider {
                 self.config.models = disk.models;
-                self.config.jucode_models = disk.jucode_models;
-                self.config.jucode_groups = disk.jucode_groups;
+                self.config.lynshen_models = disk.lynshen_models;
+                self.config.lynshen_groups = disk.lynshen_groups;
             }
         }
     }
@@ -4001,7 +4001,7 @@ fn mask_key(value: Option<&str>) -> String {
 }
 
 fn not_offered_reason(skill: &skills::SourceSkill) -> String {
-    format!("{}; not redistributed by JuCode", skill.license)
+    format!("{}; not redistributed by LynShen", skill.license)
 }
 
 /// Splits a command line into its command token and argument text, tolerating
@@ -4026,7 +4026,7 @@ fn current_utc_date() -> String {
 /// families, the newest Opus and Sonnet, and the fast DeepSeek and GLM models,
 /// in this order. An account that can reach none of them sees its first few
 /// models instead.
-const DEFAULT_JUCODE_MODELS: &[&str] = &[
+const DEFAULT_LYNSHEN_MODELS: &[&str] = &[
     "gpt-6.1-sol",
     "codex-auto-review",
     "gpt-6-astra",
@@ -4046,8 +4046,8 @@ const DEFAULT_JUCODE_MODELS: &[&str] = &[
     "kimi-k3",
 ];
 
-fn default_jucode_models(available: &[ModelConfig]) -> Vec<ModelConfig> {
-    let picked: Vec<ModelConfig> = DEFAULT_JUCODE_MODELS
+fn default_lynshen_models(available: &[ModelConfig]) -> Vec<ModelConfig> {
+    let picked: Vec<ModelConfig> = DEFAULT_LYNSHEN_MODELS
         .iter()
         .filter_map(|name| available.iter().find(|m| m.name == *name).cloned())
         .collect();
@@ -4064,7 +4064,7 @@ fn default_jucode_models(available: &[ModelConfig]) -> Vec<ModelConfig> {
 /// (`context_window_overrides`). Claude keeps its thinking tiers and a 32K
 /// output floor — the tiers follow from the model family and Anthropic's
 /// Messages API requires `max_tokens`.
-fn jucode_model_config(model: &OAuthModel) -> ModelConfig {
+fn lynshen_model_config(model: &OAuthModel) -> ModelConfig {
     let is_claude = model.id.starts_with("claude-");
     let mut reasoning_efforts = model
         .reasoning_efforts
@@ -4393,7 +4393,7 @@ fn resolve_approval_decision(
     Ok(())
 }
 
-/// Label and key-prompt flag for a catalog login flow, or None when JuCode
+/// Label and key-prompt flag for a catalog login flow, or None when LynShen
 /// cannot run it. Whole-flow hooks (github-copilot, cursor, …) have no Rust
 /// port, so callers skip those providers instead of listing a login that would
 /// only mint a credential no request can use.
@@ -4407,11 +4407,11 @@ fn login_kind(login: &llm_provider_kit::omp::LoginRule) -> Option<(&'static str,
     }
 }
 
-/// The active provider's bearer: the JuCode session, an omp OAuth credential
+/// The active provider's bearer: the LynShen session, an omp OAuth credential
 /// or a stored API key.
 fn provider_api_key(config: &Config, auth: &AuthStore) -> Option<String> {
-    if config.provider == "jucode" {
-        return auth.jucode_access_token().map(str::to_string);
+    if config.provider == "lynshen" {
+        return auth.lynshen_access_token().map(str::to_string);
     }
     let catalog = llm_provider_kit::omp::catalog();
     let store_id = catalog
@@ -4424,18 +4424,18 @@ fn provider_api_key(config: &Config, auth: &AuthStore) -> Option<String> {
     auth.key_for(&config.provider).map(str::to_string)
 }
 
-/// The JuCode group chosen per model, as the gateway's routing header.
+/// The LynShen group chosen per model, as the gateway's routing header.
 /// Read from disk so a group picked in Desktop applies from the next turn.
 fn model_headers(config: &Config) -> HashMap<String, Vec<(String, String)>> {
-    if config.provider != "jucode" {
+    if config.provider != "lynshen" {
         return HashMap::new();
     }
     let groups = Config::load_or_create()
-        .map(|disk| disk.jucode_groups)
-        .unwrap_or_else(|_| config.jucode_groups.clone());
+        .map(|disk| disk.lynshen_groups)
+        .unwrap_or_else(|_| config.lynshen_groups.clone());
     groups
         .into_iter()
-        .map(|(model, group)| (model, vec![("X-JuCode-Group".to_string(), group)]))
+        .map(|(model, group)| (model, vec![("X-LynShen-Group".to_string(), group)]))
         .collect()
 }
 
@@ -4443,8 +4443,8 @@ fn model_headers(config: &Config) -> HashMap<String, Vec<(String, String)>> {
 /// user's configured provider: no tools, returns the reply text.
 pub fn title_completion(system: &str, user: &str) -> Result<String, String> {
     let config = Config::load_or_create().map_err(|error| error.to_string())?;
-    let auth = if config.provider == "jucode" {
-        oauth::ensure_session(&config.jucode_api_url, config.encrypt_secrets)?
+    let auth = if config.provider == "lynshen" {
+        oauth::ensure_session(&config.lynshen_api_url, config.encrypt_secrets)?
     } else {
         AuthStore::load_or_create(config.encrypt_secrets).map_err(|error| error.to_string())?
     };
@@ -4692,7 +4692,7 @@ mod model_config_tests {
 
     #[test]
     fn unconfigured_gateway_values_stay_unknown() {
-        let config = jucode_model_config(&oauth_model("gpt-6-sol"));
+        let config = lynshen_model_config(&oauth_model("gpt-6-sol"));
         assert_eq!(config.context_window, 0);
         assert_eq!(config.max_context_window, 0);
         assert_eq!(config.max_output_tokens, 0);
@@ -4708,13 +4708,13 @@ mod model_config_tests {
             max_context_window: Some(1_050_000),
             ..oauth_model("gpt-6-sol")
         };
-        let config = jucode_model_config(&model);
+        let config = lynshen_model_config(&model);
         assert_eq!(
             (config.context_window, config.max_context_window),
             (272_000, 1_050_000)
         );
         // A gateway that only sends the smallest window means "one size".
-        let single = jucode_model_config(&OAuthModel {
+        let single = lynshen_model_config(&OAuthModel {
             context_window: Some(200_000),
             ..oauth_model("x")
         });
@@ -4748,7 +4748,7 @@ mod model_config_tests {
     fn claude_models_offer_thinking_strength_tiers() {
         // Regression: Claude models synced from /login used to default to
         // ["none"] only, so no thinking strength could be selected.
-        let config = jucode_model_config(&oauth_model("claude-opus-4-8"));
+        let config = lynshen_model_config(&oauth_model("claude-opus-4-8"));
         assert_eq!(
             config.reasoning_efforts,
             vec!["none", "low", "medium", "high", "xhigh", "max"]
@@ -4768,7 +4768,7 @@ mod model_config_tests {
             display_name: None,
             group_windows: Default::default(),
         };
-        let config = jucode_model_config(&model);
+        let config = lynshen_model_config(&model);
         assert_eq!(config.reasoning_efforts, vec!["low", "high"]);
         assert_eq!(config.max_output_tokens, 64_000);
         assert_eq!(config.context_window, 1_000_000);

@@ -79,7 +79,7 @@ pub fn serve(
             Some(root) => static_file(root, path),
             None => Response::text(
                 404,
-                "no web page is installed; start jucode daemon with --web <dir>",
+                "no web page is installed; start lynshen daemon with --web <dir>",
             ),
         },
         _ => Response::text(405, "method not allowed"),

@@ -1,4 +1,4 @@
-//! The host side of the JuCode relay (`docs/relay-protocol.md`): one
+//! The host side of the LynShen relay (`docs/relay-protocol.md`): one
 //! outbound WebSocket to the relay, authenticated with the daemon's Ed25519
 //! identity, carrying client streams. Each stream runs a Noise session
 //! (`noise.rs`) and then serves a paired device exactly like a local
@@ -30,7 +30,7 @@ use tungstenite::{stream::MaybeTlsStream, Message, WebSocket};
 
 const IDENTITY_FILE: &str = "relay-identity.json";
 /// Signed together with the relay's nonce.
-const AUTH_CONTEXT: &[u8] = b"jucode-relay-v1:";
+const AUTH_CONTEXT: &[u8] = b"lynshen-relay-v1:";
 /// The daemon setting that turns the relay on.
 const SETTING: &str = "relay";
 /// How long the relay's challenge and a client's first Noise message may take.
@@ -254,7 +254,7 @@ impl Relay {
             .timeout(Duration::from_secs(20))
             .set("Content-Type", "application/json")
             .set(
-                "X-JuCode-Signature",
+                "X-LynShen-Signature",
                 &URL_SAFE_NO_PAD.encode(signature.to_bytes()),
             )
             .send_string(&body);
@@ -267,7 +267,7 @@ impl Relay {
 }
 
 /// What a push request's signature covers, before its body.
-const PUSH_CONTEXT: &[u8] = b"jucode-relay-push-v1:";
+const PUSH_CONTEXT: &[u8] = b"lynshen-relay-push-v1:";
 
 /// `wss://host[:port]/relay/v1` → `https://host[:port]`.
 fn app_origin(url: &str) -> String {
@@ -293,7 +293,7 @@ pub fn run(hub: &Arc<Hub>) {
             .and_then(|identity| host_connection(hub, &identity, &mut backoff));
         hub.relay.connected.store(false, Ordering::SeqCst);
         if let Err(error) = result {
-            jucode_agent_core::log_warn!("daemon", "relay connection ended", error = error);
+            lynshen_agent_core::log_warn!("daemon", "relay connection ended", error = error);
         }
         if !hub.relay.enabled() {
             continue;
@@ -351,7 +351,7 @@ fn host_connection(
         backoff,
         since: Instant::now(),
     };
-    jucode_agent_core::log_info!("daemon", "relay connected", host = identity.host_id());
+    lynshen_agent_core::log_info!("daemon", "relay connected", host = identity.host_id());
 
     // Stream threads send finished frames here; this thread writes them.
     let (out, outgoing) = mpsc::channel::<Vec<u8>>();
@@ -383,7 +383,7 @@ fn host_connection(
                     let out = out.clone();
                     thread::spawn(move || {
                         if let Err(error) = stream(&hub, &identity, id, receiver, out) {
-                            jucode_agent_core::log_warn!(
+                            lynshen_agent_core::log_warn!(
                                 "daemon",
                                 "relay stream ended",
                                 error = error
@@ -642,7 +642,7 @@ mod tests {
 
     fn hub(label: &str) -> Arc<Hub> {
         let dir = std::env::temp_dir().join(format!(
-            "jucode-relay-{label}-{}-{}",
+            "lynshen-relay-{label}-{}-{}",
             std::process::id(),
             now()
         ));

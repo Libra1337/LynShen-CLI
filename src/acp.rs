@@ -1,4 +1,4 @@
-//! `jucode acp` — Agent Client Protocol adapter over AgentCore.
+//! `lynshen acp` — Agent Client Protocol adapter over AgentCore.
 //!
 //! A thin, hand-rolled JSON-RPC 2.0 layer speaking newline-delimited JSON on
 //! stdio (same dependency-light approach as the MCP client: serde_json plus
@@ -17,7 +17,7 @@
 //! steer/queue status, hunk-subset approvals (whole-call allow/deny only),
 //! conversation tree/resume/model pickers, and usage/context telemetry.
 
-use jucode_agent_core::{AgentCore, AgentEvent, ApprovalMode};
+use lynshen_agent_core::{AgentCore, AgentEvent, ApprovalMode};
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
@@ -128,7 +128,7 @@ fn handle_message(
             let Some(id) = id else { return Ok(()) };
             // The core starts with a fresh session; later calls roll to a new
             // one. Client-provided mcpServers are dropped (the agent manages
-            // its own MCP config via ~/.jucode).
+            // its own MCP config via ~/.lynshen).
             if state.active_session.is_some() {
                 let _ = core.handle_command("/new");
             }
@@ -205,7 +205,7 @@ fn handle_message(
                     &id,
                     METHOD_NOT_FOUND,
                     &format!(
-                        "{} is not supported by jucode acp",
+                        "{} is not supported by lynshen acp",
                         method.unwrap_or_default()
                     ),
                 )?;
@@ -475,7 +475,7 @@ fn plan_status(status: &str) -> &'static str {
     }
 }
 
-/// ACP `ToolKind` for a jucode tool name.
+/// ACP `ToolKind` for a lynshen tool name.
 pub(crate) fn tool_kind(name: &str) -> &'static str {
     match name {
         "read" | "grep" | "glob" | "ls" => "read",
@@ -598,7 +598,7 @@ mod tests {
     #[test]
     fn prompt_blocks_extract_text_mentions_and_file_images() {
         let dir = std::env::temp_dir().join(format!(
-            "jucode-acp-img-{}",
+            "lynshen-acp-img-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -647,7 +647,7 @@ mod tests {
     fn plan_maps_to_acp_plan_entries() {
         let update = session_update_for_event(
             "sess-1",
-            &AgentEvent::Plan(vec![jucode_agent_core::PlanItem {
+            &AgentEvent::Plan(vec![lynshen_agent_core::PlanItem {
                 step: "write tests".to_string(),
                 status: "in_progress".to_string(),
             }]),

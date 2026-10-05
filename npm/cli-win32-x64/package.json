@@ -1,7 +1,7 @@
 {
-  "name": "@jucode/cli-win32-x64",
+  "name": "@lynshen/cli-win32-x64",
   "version": "0.4.8",
-  "description": "JuCode native CLI for Windows x64",
+  "description": "LynShen native CLI for Windows x64",
   "license": "Apache-2.0",
   "publishConfig": {
     "access": "public"
@@ -13,7 +13,7 @@
     "x64"
   ],
   "files": [
-    "bin/jucode.exe",
+    "bin/lynshen.exe",
     "NOTICE",
     "THIRD-PARTY-NOTICES.txt"
   ]

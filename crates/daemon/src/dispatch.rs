@@ -30,7 +30,7 @@ const FILE: &str = "dispatches.json";
 const KEEP: usize = 50;
 /// How much of a task's last reply the dispatcher and the client get.
 const REPLY_LIMIT: usize = 1500;
-/// Permission modes a dispatch may run its tasks in (the jucode names; the
+/// Permission modes a dispatch may run its tasks in (the lynshen names; the
 /// Claude Code and Codex adapters map them).
 const MODES: [&str; 4] = ["manual", "auto-edit", "auto", "full-access"];
 
@@ -231,7 +231,7 @@ pub fn prompt(hub: &Hub, session: &str) -> String {
     )
 }
 
-const GUIDE: &str = "You are the dispatcher of JuCode. The user is away from this computer and hands you a batch of requests in one message. You do not write code yourself: you have no file or shell tools. You route the work to the user's coding sessions, then report back.
+const GUIDE: &str = "You are the dispatcher of LynShen. The user is away from this computer and hands you a batch of requests in one message. You do not write code yourself: you have no file or shell tools. You route the work to the user's coding sessions, then report back.
 
 How to work:
 1. Call `workspace_overview` to see the projects and their recent sessions.
@@ -269,7 +269,7 @@ pub fn definitions() -> Vec<Value> {
                                 "title": { "type": "string", "description": "A short name for the task, in the user's language." },
                                 "project": { "type": "string", "description": "The project path it runs in (from workspace_overview). Leave out when continuing a session." },
                                 "session": { "type": "string", "description": "An existing session to continue. Leave out (or empty) to start a new one." },
-                                "engine": { "type": "string", "enum": ["jucode", "claude", "codex"], "description": "For a new session: the coding agent to run. Default jucode." }
+                                "engine": { "type": "string", "enum": ["lynshen", "claude", "codex"], "description": "For a new session: the coding agent to run. Default lynshen." }
                             },
                             "required": ["title"]
                         }
@@ -434,7 +434,7 @@ fn plan(hub: &Hub, session: &str, args: &Value) -> Result<Value, String> {
                     record
                         .engine
                         .clone()
-                        .unwrap_or_else(|| "jucode".to_string()),
+                        .unwrap_or_else(|| "lynshen".to_string()),
                 )
             }
             None => {
@@ -445,8 +445,8 @@ fn plan(hub: &Hub, session: &str, args: &Value) -> Result<Value, String> {
                         index + 1
                     )
                 })?;
-                let engine = task["engine"].as_str().unwrap_or("jucode");
-                if !matches!(engine, "jucode" | "claude" | "codex") {
+                let engine = task["engine"].as_str().unwrap_or("lynshen");
+                if !matches!(engine, "lynshen" | "claude" | "codex") {
                     return Err(format!("task {}: unknown engine {engine}", index + 1));
                 }
                 (project.clone(), None, engine.to_string())
@@ -544,7 +544,7 @@ fn start_task(hub: &Arc<Hub>, session: &str, args: &Value) -> Result<Value, Stri
             options(),
         )?,
     };
-    // The user's mode, whatever the session ran in before (the jucode
+    // The user's mode, whatever the session ran in before (the lynshen
     // engine takes no start options; a Claude session switching in or out
     // of full access restarts before it takes the prompt).
     hub.forward(&target, json!({ "op": "set_approval_mode", "mode": mode }))?;
@@ -565,7 +565,7 @@ fn start_task(hub: &Arc<Hub>, session: &str, args: &Value) -> Result<Value, Stri
     mark("sent", "")?;
     if let Some(requirement) = d["requirement"].as_str() {
         if let Err(error) = crate::requirements::link(hub, requirement, &target) {
-            jucode_agent_core::log_warn!("daemon", "dispatch task not linked", error = error);
+            lynshen_agent_core::log_warn!("daemon", "dispatch task not linked", error = error);
         }
     }
     if let Err(error) = hub.send_to_session(&target, &prompt) {
@@ -742,7 +742,7 @@ mod tests {
 
     fn hub(label: &str) -> (Arc<Hub>, PathBuf) {
         let dir = std::env::temp_dir().join(format!(
-            "jucode-dispatch-{label}-{}-{}",
+            "lynshen-dispatch-{label}-{}-{}",
             std::process::id(),
             now()
         ));

@@ -1,5 +1,5 @@
 //! Hand-rolled structured logging: line-JSON records appended to
-//! ~/.jucode/logs/jucode.log. The global logger is set once at process start;
+//! ~/.lynshen/logs/lynshen.log. The global logger is set once at process start;
 //! before init (or after a failed init) every log call is a no-op.
 
 use serde_json::Value;
@@ -93,22 +93,22 @@ pub fn init_global() {
 }
 
 fn build_global() -> Option<Logger> {
-    let level = std::env::var("JUCODE_LOG")
+    let level = std::env::var("LYNSHEN_LOG")
         .ok()
         .and_then(|raw| LogLevel::parse(&raw))
         .unwrap_or(LogLevel::Warn);
     let dir = match crate::config::profile_dir() {
         Ok(dir) => dir,
         Err(error) => {
-            eprintln!("jucode: logging disabled: {error}");
+            eprintln!("lynshen: logging disabled: {error}");
             return None;
         }
     };
-    let path = dir.join("logs").join("jucode.log");
+    let path = dir.join("logs").join("lynshen.log");
     match Logger::create(&path, level) {
         Ok(logger) => Some(logger),
         Err(error) => {
-            eprintln!("jucode: logging disabled: {error}");
+            eprintln!("lynshen: logging disabled: {error}");
             None
         }
     }
@@ -311,13 +311,13 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("jucode-logging-test-{name}-{nanos}"))
+        std::env::temp_dir().join(format!("lynshen-logging-test-{name}-{nanos}"))
     }
 
     #[test]
     fn level_filtering_skips_lower_priority_records() {
         let dir = test_dir("filter");
-        let path = dir.join("jucode.log");
+        let path = dir.join("lynshen.log");
         let logger = Logger::create(&path, LogLevel::Warn).unwrap();
         logger.log(LogLevel::Debug, "t", "dropped debug", Value::Null);
         logger.log(LogLevel::Info, "t", "dropped info", Value::Null);
@@ -358,12 +358,12 @@ mod tests {
     #[test]
     fn rotation_renames_oversized_log_on_create() {
         let dir = test_dir("rotate");
-        let path = dir.join("jucode.log");
+        let path = dir.join("lynshen.log");
         fs::create_dir_all(&dir).unwrap();
         fs::write(&path, "old".repeat(64)).unwrap();
         rotate_if_large(&path, 100).unwrap();
         assert!(!path.exists());
-        let rotated = dir.join("jucode.log.1");
+        let rotated = dir.join("lynshen.log.1");
         assert!(rotated.exists());
         // A second rotation replaces the previous .1 file.
         fs::write(&path, "new".repeat(64)).unwrap();
@@ -375,12 +375,12 @@ mod tests {
     #[test]
     fn small_log_is_not_rotated() {
         let dir = test_dir("no-rotate");
-        let path = dir.join("jucode.log");
+        let path = dir.join("lynshen.log");
         fs::create_dir_all(&dir).unwrap();
         fs::write(&path, "small").unwrap();
         rotate_if_large(&path, 100).unwrap();
         assert!(path.exists());
-        assert!(!dir.join("jucode.log.1").exists());
+        assert!(!dir.join("lynshen.log.1").exists());
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -405,7 +405,7 @@ mod tests {
     #[test]
     fn recent_error_count_ignores_old_and_non_error_records() {
         let dir = test_dir("count");
-        let path = dir.join("jucode.log");
+        let path = dir.join("lynshen.log");
         fs::create_dir_all(&dir).unwrap();
         let now = 1_752_364_800;
         let lines = [

@@ -1,5 +1,5 @@
 [package]
-name = "jucode-agent-core"
+name = "lynshen-agent-core"
 version.workspace = true
 license.workspace = true
 authors.workspace = true

@@ -1,7 +1,7 @@
 use super::*;
 use crate::markdown::{render_markdown, MD_CODE, MD_DIM};
 use crate::tool_preview::{format_tool_header, tool_output_preview};
-use jucode_agent_core::{ModelOptionView, SessionListItemView, TreeNodeView};
+use lynshen_agent_core::{ModelOptionView, SessionListItemView, TreeNodeView};
 use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::style::Modifier;
 use unicode_width::UnicodeWidthStr;
@@ -460,7 +460,7 @@ fn colored_status_line_does_not_wrap_at_visible_width() {
         .input(&input_lines(""), &[], 0)
         .bottom_status(
             BottomStatus {
-                provider: "jucode",
+                provider: "lynshen",
                 model: "claude-opus-4.7",
                 reasoning_effort: "high",
                 approval_mode: "manual",
@@ -485,9 +485,9 @@ fn startup_renders_inside_box() {
     let document = UiBuilder::new()
         .chat(&[ChatLine::Startup {
             version: "0.1.2".to_string(),
-            profile_dir: "C:\\Users\\me\\.jucode".to_string(),
-            config_path: "E:\\Code\\Projects\\JuCode\\JuCode-CLI".to_string(),
-            cwd: "C:\\Users\\me\\projects\\jucode".to_string(),
+            profile_dir: "C:\\Users\\me\\.lynshen".to_string(),
+            config_path: "E:\\Code\\Projects\\LynShen\\LynShen-CLI".to_string(),
+            cwd: "C:\\Users\\me\\projects\\lynshen".to_string(),
             model: "claude-opus-4-7".to_string(),
             context_window: 1_000_000,
         }])
@@ -501,7 +501,7 @@ fn startup_renders_inside_box() {
         .iter()
         .any(|span| span.style.fg == Some(Color::Rgb(108, 96, 140))));
     assert!(document.history[1].plain().contains(" \\/"));
-    assert!(document.history[1].plain().contains("Welcome to JuCode"));
+    assert!(document.history[1].plain().contains("Welcome to LynShen"));
     assert!(document.history[2].plain().contains("<'l"));
     assert!(document.history[2]
         .plain()
@@ -512,7 +512,7 @@ fn startup_renders_inside_box() {
     // The brand word and key info are bold.
     let title = &document.history[1].line;
     assert!(title.spans.iter().any(|span| {
-        span.content.as_ref() == "JuCode" && span.style.add_modifier.contains(Modifier::BOLD)
+        span.content.as_ref() == "LynShen" && span.style.add_modifier.contains(Modifier::BOLD)
     }));
     assert!(!document
         .history
@@ -532,9 +532,9 @@ fn projected_startup_box_lines_stay_aligned() {
     let document = UiBuilder::new()
         .chat(&[ChatLine::Startup {
             version: "0.1.2".to_string(),
-            profile_dir: "~/.jucode".to_string(),
-            config_path: "~/.jucode/config.toml".to_string(),
-            cwd: "~/dev/projects/jucode/JuCode-CLI".to_string(),
+            profile_dir: "~/.lynshen".to_string(),
+            config_path: "~/.lynshen/config.toml".to_string(),
+            cwd: "~/dev/projects/lynshen/LynShen-CLI".to_string(),
             model: "gpt-5.4".to_string(),
             context_window: 1_100_000,
         }])
@@ -1148,7 +1148,7 @@ fn projection_only_indents_text_not_ui_elements() {
         .input(&input_lines("hello"), &[], 0)
         .bottom_status(
             BottomStatus {
-                provider: "jucode",
+                provider: "lynshen",
                 model: "gpt-5",
                 reasoning_effort: "medium",
                 approval_mode: "manual",
@@ -1820,7 +1820,7 @@ fn exact_mention_path_submits_on_enter() {
 #[test]
 fn pasted_image_path_is_attached_not_inserted() {
     let dir = std::env::temp_dir().join(format!(
-        "jucode-tui-image-{}",
+        "lynshen-tui-image-{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()

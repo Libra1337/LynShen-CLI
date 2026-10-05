@@ -1,14 +1,14 @@
-//! The skills marketplace for the desktop: the JuCode marketplace and
+//! The skills marketplace for the desktop: the LynShen marketplace and
 //! github.com/anthropics/skills in one catalog, installed into the personal
 //! skills directory of the session's engine.
 
 use crate::engines;
-use jucode_agent_core::skills;
+use lynshen_agent_core::skills;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 
 pub fn handle(name: &str, op: &Value) -> Result<Value, String> {
-    let dir = install_dir(op["backend"].as_str().unwrap_or("jucode"))?;
+    let dir = install_dir(op["backend"].as_str().unwrap_or("lynshen"))?;
     match name {
         "skills_catalog" => catalog(dir),
         "skill_install" => {
@@ -25,7 +25,7 @@ pub fn handle(name: &str, op: &Value) -> Result<Value, String> {
 }
 
 /// Claude Code reads `~/.claude/skills`; every other engine runs with the
-/// JuCode profile's skills.
+/// LynShen profile's skills.
 fn install_dir(backend: &str) -> Result<PathBuf, String> {
     if backend != "claude" {
         return skills::profile_skills_dir().map_err(|error| error.to_string());
@@ -37,19 +37,19 @@ fn install_dir(backend: &str) -> Result<PathBuf, String> {
     Ok(home.join(".claude").join("skills"))
 }
 
-/// A JuCode marketplace failure is only a warning: the Anthropic catalog is
+/// A LynShen marketplace failure is only a warning: the Anthropic catalog is
 /// bundled and stays installable.
 fn catalog(dir: PathBuf) -> Result<Value, String> {
     let mut entries = Vec::new();
     let mut warnings = Vec::new();
-    match skills::fetch_jucode_marketplace() {
+    match skills::fetch_lynshen_marketplace() {
         Ok(market) => entries.extend(market.skills.iter().map(|skill| {
             json!({
                 "id": skill.id,
                 "name": skill.name,
                 "description": skill.description,
                 "tags": skill.tags,
-                "source": "jucode",
+                "source": "lynshen",
                 "isDefault": market.default_skill_ids.contains(&skill.id),
                 "installed": skills::skill_installed(&dir, &skill.id),
                 "license": "",
@@ -57,7 +57,7 @@ fn catalog(dir: PathBuf) -> Result<Value, String> {
                 "homepage": "",
             })
         })),
-        Err(error) => warnings.push(format!("JuCode marketplace: {error}")),
+        Err(error) => warnings.push(format!("LynShen marketplace: {error}")),
     }
     let anthropic = skills::anthropic_source()?;
     entries.extend(anthropic.skills.iter().map(|skill| {
@@ -103,19 +103,19 @@ fn install(dir: PathBuf, source: &str, id: &str) -> Result<PathBuf, String> {
                 .ok_or_else(|| format!("Anthropic skill not found: {id}"))?;
             if !skill.redistributable {
                 return Err(format!(
-                    "skill {id} is not offered: {}; not redistributed by JuCode",
+                    "skill {id} is not offered: {}; not redistributed by LynShen",
                     skill.license
                 ));
             }
             skills::install_source_skill(&dir, &anthropic, skill)
         }
-        "jucode" => {
-            let market = skills::fetch_jucode_marketplace()?;
+        "lynshen" => {
+            let market = skills::fetch_lynshen_marketplace()?;
             let skill = market
                 .skills
                 .iter()
                 .find(|skill| skill.id == id)
-                .ok_or_else(|| format!("JuCode skill not found: {id}"))?;
+                .ok_or_else(|| format!("LynShen skill not found: {id}"))?;
             skills::install_marketplace_skill(&dir, skill)
         }
         other => return Err(format!("unknown skill source: {other}")),

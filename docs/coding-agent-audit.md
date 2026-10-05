@@ -1,4 +1,4 @@
-# JuCode CLI 编码代理审计报告
+# LynShen CLI 编码代理审计报告
 
 ## Owner decisions (2026-08-28)
 
@@ -10,7 +10,7 @@
 - **明确非目标:** 任何 sandbox（包括 OS sandbox、Landlock、Seatbelt、`bwrap`、`sandbox_command`）、持久化命令 pattern 权限规则，以及 LSP/DAP。multi-root 推迟。
 
 > 审计基线:`main@0758fef`(Release v0.1.11)。对照对象:Codex CLI、PI、Oh My PI(omp)、OpenCode。
-> 结论先行:**JuCode CLI 是一个高质量、可用的编码代理 harness,但不是 Codex-complete。差距在安全(sandbox)、协议覆盖、可靠性工程,不在 agent 核心。**
+> 结论先行:**LynShen CLI 是一个高质量、可用的编码代理 harness,但不是 Codex-complete。差距在安全(sandbox)、协议覆盖、可靠性工程,不在 agent 核心。**
 
 ## 范围声明
 
@@ -20,7 +20,7 @@
 - computer-use(桌面自动化)
 - browser-use(浏览器自动化)
 
-⚠️ 与上述排除项冲突的现状:`crates/agent-core/src/tools.rs` 中存在 `browser_open` 工具(`browser_open_definition()`,约 268 行起),仅在 `JUCODE_DESKTOP` 环境变量存在时可用,CLI 环境下返回错误 `"browser_open is only available when running inside JuCode Desktop"`。既然 CLI 产品线排除 browser-use,**建议将 `browser_open` 从 core 工具表移出,改为 Desktop 侧通过 extension 机制注入**(`crates/agent-core/src/extensions.rs` 已有 `ExtensionRegistry`/`ExtensionTool` 基础设施)。详见 gap checklist G23。
+⚠️ 与上述排除项冲突的现状:`crates/agent-core/src/tools.rs` 中存在 `browser_open` 工具(`browser_open_definition()`,约 268 行起),仅在 `LYNSHEN_DESKTOP` 环境变量存在时可用,CLI 环境下返回错误 `"browser_open is only available when running inside LynShen Desktop"`。既然 CLI 产品线排除 browser-use,**建议将 `browser_open` 从 core 工具表移出,改为 Desktop 侧通过 extension 机制注入**(`crates/agent-core/src/extensions.rs` 已有 `ExtensionRegistry`/`ExtensionTool` 基础设施)。详见 gap checklist G23。
 
 ## 一、已验证的当前能力(源码核对)
 
@@ -28,12 +28,12 @@
 
 - 流式 LLM 调用 + 工具调用循环,事件驱动(`crates/agent-core/src/event.rs` 的 `AgentEvent`)。
 - 上下文压缩(compaction,配置项 `compaction_threshold_percent`)、token 用量统计(`tokens.rs`)、goal/进度跟踪(`session.rs` 的 `ThreadGoal`)。
-- 生命周期 hooks:`crates/agent-core/src/hooks.rs` 支持 `session_start`、`user_prompt_submit`、`pre_tool_use`、`post_tool_use`、`stop` 五个挂点,从 `~/.jucode/hooks.json` 和 `<cwd>/.jucode/hooks.json` 加载。
+- 生命周期 hooks:`crates/agent-core/src/hooks.rs` 支持 `session_start`、`user_prompt_submit`、`pre_tool_use`、`post_tool_use`、`stop` 五个挂点,从 `~/.lynshen/hooks.json` 和 `<cwd>/.lynshen/hooks.json` 加载。
 - README 引用的自测数据:5/5 任务完成,输入+输出 token 比 Codex 基线少 32.1%(注意:这是自采样快照,非公开 benchmark)。
 
 ### 2. 工具集(crates/agent-core/src/tools.rs)
 
-内置工具(`definitions()` 中定义):`read`、`str_replace`、`hashline_edit`、`write`、`apply_patch`、`bash`、`exec_command`、`write_stdin`、`ls`、`ripgrep`、`outline`、`checkpoint`,外加 `web_fetch`(`crates/agent-core/src/web_fetch.rs`)和桌面限定的 `browser_open`。支持图像附件(`image_attachment_part`)。`checkpoint` 提供 `.jucode/checkpoints` 本地快照的创建/列出/恢复。
+内置工具(`definitions()` 中定义):`read`、`str_replace`、`hashline_edit`、`write`、`apply_patch`、`bash`、`exec_command`、`write_stdin`、`ls`、`ripgrep`、`outline`、`checkpoint`,外加 `web_fetch`(`crates/agent-core/src/web_fetch.rs`)和桌面限定的 `browser_open`。支持图像附件(`image_attachment_part`)。`checkpoint` 提供 `.lynshen/checkpoints` 本地快照的创建/列出/恢复。
 
 ### 3. 会话(crates/agent-core/src/session.rs)
 
@@ -48,8 +48,8 @@
 ### 5. Provider(crates/agent-core/src/config.rs、llm.rs)
 
 - 两种线协议:OpenAI **Responses API**(`/responses`)和 **Anthropic Messages API**(经 `protocol` 配置切换),均为流式 SSE,基于阻塞 `ureq`(无 tokio,符合项目宪法)。
-- 内置 provider 模板(`default_providers()`,config.rs:916)只有两个:`jucode`(Responses)和 `deepseek`(Anthropic 端点)。
-- **README bug**:README.md 第 49 行声称 "`openai` and `deepseek` are built in",但源码模板中**没有 `openai` 条目**,只有 `jucode` + `deepseek`(`openai` 只是 fallback 默认字符串,config.rs:299)。需要修正文档或补齐模板。
+- 内置 provider 模板(`default_providers()`,config.rs:916)只有两个:`lynshen`(Responses)和 `deepseek`(Anthropic 端点)。
+- **README bug**:README.md 第 49 行声称 "`openai` and `deepseek` are built in",但源码模板中**没有 `openai` 条目**,只有 `lynshen` + `deepseek`(`openai` 只是 fallback 默认字符串,config.rs:299)。需要修正文档或补齐模板。
 - **不支持 Chat Completions 协议**,而这是行业事实标准(Ollama/vLLM/多数网关的最大公约数)。
 
 ### 6. MCP / Skills(crates/agent-core/src/mcp/、skills.rs)
@@ -69,7 +69,7 @@ markdown 渲染(`markdown.rs`)、工具输出预览(`tool_preview.rs`)、picker(
 ### 9. Headless / serve(src/main.rs)
 
 - `--headless "prompt"`:单任务 JSONL 事件输出,支持 stdin 管道。
-- `jucode serve`:长驻 NDJSON stdin/stdout 协议,支持 `approve`(含 hunk 粒度)、`mcp_list`、`mcp_set`、shutdown 等 op。
+- `lynshen serve`:长驻 NDJSON stdin/stdout 协议,支持 `approve`(含 hunk 粒度)、`mcp_list`、`mcp_set`、shutdown 等 op。
 - **缺失**:协议参考文档与版本字段(embedder 无法做兼容性协商)。
 
 ### 10. 可靠性 / 工程
@@ -100,7 +100,7 @@ markdown 渲染(`markdown.rs`)、工具输出预览(`tool_preview.rs`)、picker(
 以下同行事实用于定位,**标注了核实程度**,引用时注意口径:
 
 - **Codex CLI**:`codex app-server` 作为编辑器/IDE 集成的长驻协议入口——**已核实**。其 sandbox(macOS Seatbelt / Linux Landlock)+ approval policy 组合是权限维度的对标上限。
-- **PI**:核心仅 4 个工具、core 不内置 MCP(靠扩展)——**已核实**。说明"小工具集"路线成立,但 JuCode 已选择更全的工具矩阵,不必回退。
+- **PI**:核心仅 4 个工具、core 不内置 MCP(靠扩展)——**已核实**。说明"小工具集"路线成立,但 LynShen 已选择更全的工具矩阵,不必回退。
 - **Oh My PI(omp)**:ACP 支持的调用方式为 `omp acp` 子命令(**不是** `--acp` 标志)——引用时注意。
 - **OpenCode**:内置 build/plan 两个主 agent 模式 + general/explore 子代理(v1 另有 scout)——大体核实,版本间有出入,引用需带版本号。
 - **ACP(Agent Client Protocol)**:由 Zed 发起,JetBrains 跟进——**已核实**。是 D3 决策(embed 协议)的行业背景。
@@ -108,7 +108,7 @@ markdown 渲染(`markdown.rs`)、工具输出预览(`tool_preview.rs`)、picker(
 
 ## 四、结论
 
-JuCode CLI 的 agent 核心(循环、工具、会话、TUI)已达到"日常可用的高质量 harness"水平,在 token 效率上有差异化优势。**它不是 Codex-complete**,缺口集中且明确:
+LynShen CLI 的 agent 核心(循环、工具、会话、TUI)已达到"日常可用的高质量 harness"水平,在 token 效率上有差异化优势。**它不是 Codex-complete**,缺口集中且明确:
 
 1. **安全**:无 sandbox、无路径策略、headless 隐式 full-auto(权限维度 2/5,唯一的红色项之一)。
 2. **协议覆盖**:无 Chat Completions、MCP 缺 prompts/resources/OAuth、serve 协议无文档无版本。
