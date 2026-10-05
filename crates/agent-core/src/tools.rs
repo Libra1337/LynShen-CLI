@@ -1608,7 +1608,6 @@ fn kill_child(child: &mut Child) {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
-        return;
     }
     #[cfg(not(windows))]
     {
@@ -5328,7 +5327,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn file_tools_reject_symlinks_that_point_outside_the_workspace() {
-        let outside = env::temp_dir().join(format!("lynshen-policy-outside-{}", std::process::id()));
+        let outside =
+            env::temp_dir().join(format!("lynshen-policy-outside-{}", std::process::id()));
         fs::create_dir_all(&outside).unwrap();
         fs::write(outside.join("secret.txt"), "secret").unwrap();
         let dir = env::temp_dir().join(format!("lynshen-policy-symlink-{}", std::process::id()));

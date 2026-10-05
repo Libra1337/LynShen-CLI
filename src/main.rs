@@ -104,6 +104,25 @@ fn main() -> io::Result<()> {
         print!("{}", help_text());
         return Ok(());
     }
+    if args.first().map(String::as_str) == Some("auth-login") {
+        // Closing Desktop drops this pipe. Do not leave a callback listener
+        // or a credential-writing worker running after the parent exits.
+        thread::spawn(|| {
+            let mut byte = [0u8; 1];
+            while io::stdin().read(&mut byte).is_ok_and(|n| n != 0) {}
+            std::process::exit(0);
+        });
+        let provider = args.get(1).map(String::as_str).unwrap_or("");
+        let emit = |event: Value| {
+            println!("{event}");
+            let _ = io::stdout().flush();
+        };
+        if let Err(error) = lynshen_agent_core::provider_login::login(provider, &emit) {
+            emit(json!({"status":"error", "message":error}));
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     let approval_mode = match take_approval_mode_flag(&mut args) {
         Ok(mode) => mode,
         Err(error) => {
@@ -232,6 +251,7 @@ USAGE:
     lynshen acp                           Agent Client Protocol (ACP v1)
                                          JSON-RPC adapter over stdio, for
                                          ACP-capable editors like Zed
+    lynshen auth-login <provider>         browser OAuth without starting a session
     lynshen providers                     print built-in providers as JSON
     lynshen token                         print a LynShen access token as JSON (refreshed when needed)
     lynshen update                        update lynshen to the latest release

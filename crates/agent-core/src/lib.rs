@@ -15,6 +15,7 @@ mod mcp;
 mod oauth;
 mod prompt;
 pub mod protocol;
+pub mod provider_login;
 mod providers;
 pub mod sandbox;
 mod secrets;

@@ -2,8 +2,8 @@ use crate::providers::CLIENT_NAME;
 use crate::{
     actions::{action_digest, decision_message, DeferredAction},
     config::{
-        models_for_provider, profile_dir, ApprovalMode, AuthStore, Config, LynShenTokens,
-        LiveApprovalMode, ModelConfig,
+        models_for_provider, profile_dir, ApprovalMode, AuthStore, Config, LiveApprovalMode,
+        LynShenTokens, ModelConfig,
     },
     event::{
         AgentEvent, CommandView, GoalView, LoginProviderView, ModelOptionView, PlanItem,
@@ -1114,7 +1114,10 @@ impl AgentCore {
     }
 
     fn fetch_marketplace(&self) -> Result<skills::Marketplace, String> {
-        skills::fetch_marketplace(&self.config.lynshen_api_url, self.auth.lynshen_access_token())
+        skills::fetch_marketplace(
+            &self.config.lynshen_api_url,
+            self.auth.lynshen_access_token(),
+        )
     }
 
     fn fetch_extra_skill_source(&self) -> Result<Option<skills::SkillSource>, String> {
