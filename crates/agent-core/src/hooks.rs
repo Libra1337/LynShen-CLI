@@ -265,8 +265,13 @@ mod tests {
 
     #[test]
     fn pre_tool_blocks_on_nonzero_exit() {
+        let command = if cfg!(windows) {
+            "echo denied >&2 & exit /b 1"
+        } else {
+            "echo denied >&2; exit 1"
+        };
         let hooks = hooks_from(json!({
-            "pre_tool_use": [{ "command": "echo denied >&2; exit 1", "tools": ["bash"] }]
+            "pre_tool_use": [{ "command": command, "tools": ["bash"] }]
         }));
         let reason = hooks.pre_tool("bash", "{}", Path::new("."));
         assert_eq!(reason.as_deref(), Some("denied"));

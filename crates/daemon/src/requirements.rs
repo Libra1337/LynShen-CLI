@@ -891,7 +891,7 @@ mod tests {
         let upload = dir.join("u-1-shot.JPG");
         fs::write(&upload, b"jpg").unwrap();
         let kept = keep_images(&dir.join("R-1"), std::slice::from_ref(&upload)).unwrap();
-        assert!(kept[0].ends_with("R-1/1.jpg"));
+        assert!(Path::new(&kept[0]).ends_with(Path::new("R-1").join("1.jpg")));
         assert_eq!(fs::read(&kept[0]).unwrap(), b"jpg");
         assert!(!upload.exists());
         let _ = fs::remove_dir_all(dir);

@@ -3664,10 +3664,13 @@ fn patch_escapes_workdir(patch: &str) -> Option<String> {
         if path == "/dev/null" {
             continue;
         }
-        if Path::new(path).is_absolute()
-            || Path::new(path)
-                .components()
-                .any(|component| component == std::path::Component::ParentDir)
+        if Path::new(path).has_root()
+            || Path::new(path).components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir | std::path::Component::Prefix(_)
+                )
+            })
         {
             return Some(path.to_string());
         }
@@ -5353,7 +5356,7 @@ mod tests {
 
     #[test]
     fn resolve_path_expands_tilde_to_home() {
-        let home = env::var("HOME").unwrap();
+        let home = env::var(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).unwrap();
         assert_eq!(
             resolve_path(Path::new("/cwd"), "~/x"),
             Path::new(&home).join("x")
