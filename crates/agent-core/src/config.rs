@@ -1952,7 +1952,10 @@ mod tests {
         // Saved before computers were recorded: claimed for this one.
         auth.lynshen = read_lynshen_tokens(&json!({ "access_token": "a", "refresh_token": "r" }));
         assert!(auth.claim_lynshen_login());
-        assert_eq!(auth.lynshen_tokens().unwrap().machine.as_deref(), Some(here));
+        assert_eq!(
+            auth.lynshen_tokens().unwrap().machine.as_deref(),
+            Some(here)
+        );
         assert!(!auth.lynshen_login_copied());
     }
 
@@ -1997,7 +2000,10 @@ mod tests {
             group_windows: BTreeMap::from([("g-big".to_string(), (1_050_000, 1_050_000))]),
         };
         // Saved and read back with its label and group windows.
-        let read = read_model_configs(&json!({ "models": [model_config_value(&model)] }), "lynshen");
+        let read = read_model_configs(
+            &json!({ "models": [model_config_value(&model)] }),
+            "lynshen",
+        );
         assert_eq!(read[0].display_name.as_deref(), Some("GPT-6 Sol"));
         assert_eq!(read[0].group_windows, model.group_windows);
         // Pinned to the big group: its window. Unpinned or another group:
