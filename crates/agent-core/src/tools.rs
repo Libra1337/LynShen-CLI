@@ -341,6 +341,33 @@ pub fn run_tool_with_events(
     cwd: &Path,
     extra_read_roots: &[PathBuf],
     state: &ToolState,
+    emit: impl FnMut(ToolExecutionEvent) -> Result<(), String>,
+) -> ToolExecutionResult {
+    // A bug inside one tool must come back to the model as a failed call:
+    // a panic here would otherwise leave the turn waiting for a result forever.
+    let run = std::panic::AssertUnwindSafe(|| {
+        run_tool_inner(name, arguments, cwd, extra_read_roots, state, emit)
+    });
+    std::panic::catch_unwind(run).unwrap_or_else(|panic| {
+        let reason = panic
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
+            .unwrap_or_else(|| "unknown error".to_string());
+        tool_result(
+            name,
+            json!({ "error": format!("internal error in {name}: {reason}. The file may be unchanged; read it again before retrying.") }),
+            cwd,
+        )
+    })
+}
+
+fn run_tool_inner(
+    name: &str,
+    arguments: &str,
+    cwd: &Path,
+    extra_read_roots: &[PathBuf],
+    state: &ToolState,
     mut emit: impl FnMut(ToolExecutionEvent) -> Result<(), String>,
 ) -> ToolExecutionResult {
     let parsed = serde_json::from_str::<Value>(arguments);
@@ -1251,8 +1278,14 @@ fn changed_line_range(original: &str, updated: &str) -> Option<(usize, usize)> {
 }
 
 fn byte_index_to_line(text: &str, byte_index: usize) -> usize {
+    // Counting newlines over bytes needs no char boundary: the byte-wise
+    // prefix/suffix scan above can stop inside a multi-byte character.
     let end = byte_index.min(text.len());
-    text[..end].bytes().filter(|byte| *byte == b'\n').count() + 1
+    text.as_bytes()[..end]
+        .iter()
+        .filter(|byte| **byte == b'\n')
+        .count()
+        + 1
 }
 
 fn post_edit_anchor_block(content: &str, first: usize, last: usize) -> Option<String> {
@@ -5050,6 +5083,18 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn changed_line_range_handles_edits_inside_multibyte_text() {
+        // The common prefix ends inside "着" / "解": the old slice panicked and
+        // the edit never returned, leaving the turn waiting forever.
+        let original = "第一行\n跳跃数学模型现在自洽着\n第三行\n";
+        let updated = "第一行\n跳跃数学模型现在自洽解\n第三行\n";
+        assert_eq!(changed_line_range(original, updated), Some((2, 2)));
+        let original = "保证任何速度下都有解\n";
+        let updated = "保证任何速度下都够跳\n";
+        assert_eq!(changed_line_range(original, updated), Some((1, 1)));
+    }
+
     #[test]
     fn interrupted_bash_kills_process_group_descendants() {
         let dir = test_dir("bash-interrupt-group");
