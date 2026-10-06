@@ -330,6 +330,17 @@ impl AgentCore {
         self.tool_state.set_sandbox(sandbox);
     }
 
+    /// Counts `dirs` as workspace: file tools may write them, and sandboxed
+    /// commands too.
+    pub fn add_writable_dirs(&mut self, dirs: &[PathBuf]) {
+        let mut sandbox = self
+            .tool_state
+            .sandbox()
+            .unwrap_or_else(|| self.config.sandbox.clone());
+        sandbox.writable_dirs.extend_from_slice(dirs);
+        self.tool_state.set_sandbox(Some(sandbox));
+    }
+
     /// Adds host tools and prompt text; they apply from the next turn.
     pub fn set_host_extensions(&mut self, host: crate::host::HostExtensions) {
         self.host = Some(host);
@@ -4694,6 +4705,47 @@ mod model_config_tests {
             display_name: None,
             group_windows: Default::default(),
         }
+    }
+
+    #[test]
+    fn default_lynshen_models_preserve_original_catalog_order() {
+        let requested = [
+            "gpt-6.1-sol",
+            "codex-auto-review",
+            "gpt-6-astra",
+            "gpt-6-sol",
+            "gpt-6-luna",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+            "claude-sonnet-5-5",
+            "claude-opus-5-5",
+            "claude-fable-5-1",
+            "claude-opus-5",
+            "claude-opus-4-8",
+            "claude-sonnet-5",
+            "deepseek-v4.1-flash",
+            "glm-5.3-flash",
+            "kimi-k3",
+        ];
+        let available: Vec<_> = requested
+            .iter()
+            .rev()
+            .chain(["gpt-5.5", "private-model"].iter())
+            .map(|id| lynshen_model_config(&oauth_model(id)))
+            .collect();
+        let selected = default_lynshen_models(&available);
+        assert_eq!(
+            selected
+                .iter()
+                .map(|model| model.name.as_str())
+                .collect::<Vec<_>>(),
+            requested
+        );
+        let subset = vec![lynshen_model_config(&oauth_model("claude-fable-5"))];
+        assert_eq!(default_lynshen_models(&subset)[0].name, "claude-fable-5");
+        let other = vec![lynshen_model_config(&oauth_model("private-model"))];
+        assert_eq!(default_lynshen_models(&other)[0].name, "private-model");
     }
 
     #[test]

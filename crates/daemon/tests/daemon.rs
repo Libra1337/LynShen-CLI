@@ -1963,6 +1963,94 @@ fn a_claude_conversation_moves_to_its_tui_and_back() {
 }
 
 #[test]
+fn a_new_claude_conversation_starts_in_its_tui() {
+    let _guard = setup();
+    let log = fake_claude();
+    let daemon = start_daemon();
+    let dir = temp_dir("daemon-claude-tui-new");
+    fs::create_dir_all(&dir).unwrap();
+    let mut desktop = Client::connect(&daemon);
+    let created = request(
+        &mut desktop,
+        json!({ "op": "session_create", "cwd": dir, "engine": "claude", "options": { "approval_mode": "auto-edit" } }),
+    );
+    let session = created["session"].as_str().unwrap().to_string();
+    desktop.send(json!({ "op": "watch", "session": session }));
+    desktop.until(is_ready(&session));
+    // Nothing saved yet: the TUI starts the conversation under its id.
+    let opened = request(
+        &mut desktop,
+        json!({ "op": "session_tui", "session": session, "cols": 100, "rows": 30 }),
+    );
+    let term = opened["term"].as_str().unwrap().to_string();
+    desktop
+        .until(|f| term_text(std::slice::from_ref(f), &term).contains(&format!("TUI {session}")));
+    let args = &starts(&log)[1];
+    assert!(
+        args.windows(2)
+            .any(|w| w == ["--session-id", session.as_str()]),
+        "{args:?}"
+    );
+    // Quit without a word: the engine starts the conversation again.
+    type_in(&mut desktop, &term, "exit\n");
+    desktop.until(|f| {
+        f["session"] == session.as_str() && f["type"] == "surface" && f["surface"] == "gui"
+    });
+    desktop.send(json!({ "op": "user_message", "session": session, "content": "hi" }));
+    let frames = desktop.until(turn_done(&session));
+    assert_eq!(claude_reply(&frames, &session), "ok: hi");
+    let args = &starts(&log)[2];
+    assert!(
+        args.windows(2)
+            .any(|w| w == ["--session-id", session.as_str()]),
+        "{args:?}"
+    );
+}
+
+#[test]
+fn a_running_turn_moves_to_the_tui_only_when_forced() {
+    let _guard = setup();
+    let _log = fake_claude();
+    let daemon = start_daemon();
+    let dir = temp_dir("daemon-claude-tui-force");
+    fs::create_dir_all(&dir).unwrap();
+    let mut desktop = Client::connect(&daemon);
+    let created = request(
+        &mut desktop,
+        json!({ "op": "session_create", "cwd": dir, "engine": "claude", "options": { "approval_mode": "manual" } }),
+    );
+    let session = created["session"].as_str().unwrap().to_string();
+    desktop.send(json!({ "op": "watch", "session": session }));
+    desktop.until(is_ready(&session));
+    // The turn waits on an approval: it is still running.
+    desktop.send(json!({ "op": "user_message", "session": session, "content": "use a tool" }));
+    desktop.until(|f| f["session"] == session.as_str() && f["type"] == "approval_request");
+
+    let refused = request(
+        &mut desktop,
+        json!({ "op": "session_tui", "session": session, "cols": 100, "rows": 30 }),
+    );
+    assert_eq!(refused["type"], "error", "{refused}");
+
+    desktop.send(
+        json!({ "op": "session_tui", "session": session, "cols": 100, "rows": 30, "force": true }),
+    );
+    // Every client sees the turn end, and the switch.
+    let frames = desktop.until(|f| f["session"] == session.as_str() && f["type"] == "surface");
+    assert!(frames.iter().any(|f| f["type"] == "term_opened"));
+    assert!(frames
+        .iter()
+        .any(|f| f["type"] == "status" && f["message"] == "interrupted"));
+    let surface = frames.last().unwrap();
+    assert_eq!(surface["surface"], "tui");
+    // Closing the TUI hands the conversation back, its engine resumed.
+    desktop.send(json!({ "op": "term_close", "term": surface["term"] }));
+    desktop.until(|f| {
+        f["session"] == session.as_str() && f["type"] == "surface" && f["surface"] == "gui"
+    });
+}
+
+#[test]
 fn a_lynshen_conversation_moves_to_its_tui_and_back() {
     let _guard = setup();
     let daemon = start_daemon();
@@ -1970,7 +2058,7 @@ fn a_lynshen_conversation_moves_to_its_tui_and_back() {
     fs::create_dir_all(&dir).unwrap();
     // The lynshen TUI stands in as a script echoing what it is typed.
     let script = dir.join("tui.sh");
-    fs::write(&script, "#!/bin/sh\necho TUI\nwhile read line; do echo \"got: $line\"; [ \"$line\" = exit ] && exit 0; done\n").unwrap();
+    fs::write(&script, "#!/bin/sh\necho \"TUI $*\"\nwhile read line; do echo \"got: $line\"; [ \"$line\" = exit ] && exit 0; done\n").unwrap();
     std::process::Command::new("chmod")
         .arg("+x")
         .arg(&script)
@@ -1989,7 +2077,7 @@ fn a_lynshen_conversation_moves_to_its_tui_and_back() {
         .as_str()
         .unwrap_or_else(|| panic!("{opened}"))
         .to_string();
-    let resume = format!("got: /resume {session}");
+    let resume = format!("TUI --resume {session}");
     desktop.until(|f| term_text(std::slice::from_ref(f), &term).contains(&resume));
     type_in(&mut desktop, &term, "exit\n");
     let frames = desktop.until(|f| f["session"] == session.as_str() && f["type"] == "transcript");
@@ -2602,40 +2690,66 @@ fn a_requirement_follows_its_sessions_and_continues_in_them() {
     );
     assert_eq!(outside["type"], "error");
 
+    fs::create_dir_all(&dir).unwrap();
+    let added = request(&mut client, json!({ "op": "project_add", "path": dir }));
+    let project = added["workspaces"][0]["projects"][0]["id"].clone();
     let created = request(
         &mut client,
-        json!({ "op": "requirement_create", "text": "export sessions as markdown", "projects": [dir], "images": [shot] }),
+        json!({ "op": "requirement_create", "text": "export sessions as markdown", "project": project, "images": [shot] }),
     );
     let r = &created["requirement"];
     let id = r["id"].as_str().unwrap().to_string();
     assert!(id.starts_with("R-"));
     assert_eq!(r["state"], "idea");
     assert_eq!(r["title"], "export sessions as markdown");
+    assert_eq!(r["project"], project);
     let image = request(
         &mut client,
         json!({ "op": "requirement_image", "requirement": id, "index": 0 }),
     );
     assert_eq!(image["data"], png);
-    let prompt = request(
-        &mut client,
-        json!({ "op": "requirement_prompt", "requirement": id, "lang": "en" }),
-    );
-    assert!(prompt["text"].as_str().unwrap().starts_with(&format!(
-        "{id}: export sessions as markdown\n\nIn my words:"
-    )));
 
-    // Started from the phone: a new session in its project, linked to it.
+    // Started from the phone: a new session in its project, linked to it,
+    // that first only explains what it understood and waits.
     let started = request(
         &mut client,
         json!({ "op": "requirement_reply", "requirement": id, "lang": "en" }),
     );
     let first = started["session"].as_str().unwrap().to_string();
-    let frames = client.until(|f| requirement(f, &id).is_some_and(|r| r["status"] == "review"));
+    let frames = client.until(|f| requirement(f, &id).is_some_and(|r| r["status"] == "confirm"));
     let shown = requirement(frames.last().unwrap(), &id).unwrap();
     assert_eq!(shown["state"], "open");
     assert_eq!(shown["sessions"], json!([first]));
     assert_eq!(shown["session_states"][&first], "idle");
-    assert!(shown["last_reply"].as_str().unwrap().contains("user said:"));
+    assert_eq!(shown["gate"]["session"], first);
+    assert_eq!(shown["gate"]["stage"], "understand");
+    let reply = shown["last_reply"].as_str().unwrap();
+    assert!(
+        reply.ends_with("Then stop and wait for my confirmation."),
+        "{reply}"
+    );
+
+    // Until confirmed it stays read-only, whatever a client asks for.
+    client.send(json!({ "op": "watch", "session": first }));
+    client.send(json!({ "op": "set_approval_mode", "session": first, "mode": "full-access" }));
+    let frames = client.until(|f| {
+        f["type"] == "approval_mode" && f["session"] == first.as_str() && f["mode"] != "auto"
+    });
+    assert_eq!(frames.last().unwrap()["mode"], "manual");
+
+    // Confirmed, it goes to work in the chosen mode.
+    let confirmed = request(
+        &mut client,
+        json!({ "op": "requirement_confirm", "requirement": id, "lang": "en" }),
+    );
+    assert_eq!(confirmed["stage"], "go", "{confirmed}");
+    let frames = client.until(|f| requirement(f, &id).is_some_and(|r| r["status"] == "review"));
+    let shown = requirement(frames.last().unwrap(), &id).unwrap();
+    assert!(shown.get("gate").is_none());
+    assert!(shown["last_reply"]
+        .as_str()
+        .unwrap()
+        .contains("Now implement it."));
 
     // Feedback goes to the latest session; asked for, a new one starts.
     let again = request(
@@ -2660,7 +2774,7 @@ fn a_requirement_follows_its_sessions_and_continues_in_them() {
     assert_ne!(second, first);
     let frames = client.until(|f| {
         requirement(f, &id)
-            .is_some_and(|r| r["status"] == "review" && r["sessions"] == json!([first, second]))
+            .is_some_and(|r| r["status"] == "confirm" && r["sessions"] == json!([first, second]))
     });
     assert!(
         requirement(frames.last().unwrap(), &id).unwrap()["last_reply"]

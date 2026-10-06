@@ -127,17 +127,13 @@ pub fn command(id: &str, options: &Options) -> Command {
         "--verbose",
         "--replay-user-messages",
     ]);
+    // Without a prompt tool the CLI drops AskUserQuestion, even in full access.
+    command.args(["--permission-prompt-tool", "stdio"]);
     let mode = to_claude_mode(options.approval_mode.as_deref().unwrap_or_default());
     if mode == "bypassPermissions" {
-        // Conflicts with --permission-prompt-tool; nothing prompts anyway.
         command.arg("--dangerously-skip-permissions");
     } else {
-        command.args([
-            "--permission-prompt-tool",
-            "stdio",
-            "--permission-mode",
-            mode,
-        ]);
+        command.args(["--permission-mode", mode]);
     }
     match &options.resume {
         Some(resume) => {
@@ -160,12 +156,20 @@ pub fn command(id: &str, options: &Options) -> Command {
     {
         command.args(["--effort", effort]);
     }
+    add_dirs(&mut command, options);
     command
+}
+
+/// The project's extra directories, which Claude Code may work in too.
+fn add_dirs(command: &mut Command, options: &Options) {
+    for dir in &options.dirs {
+        command.arg("--add-dir").arg(dir);
+    }
 }
 
 /// Claude Code's own TUI resuming conversation `id`, in the session's
 /// permission mode and model (for the GUI ⇄ TUI handoff).
-pub fn tui(id: &str, options: &Options) -> Command {
+pub fn tui(id: &str, options: &Options, saved: bool) -> Command {
     let program = match &options.bin {
         Some(bin) => PathBuf::from(bin),
         None => resolve(
@@ -175,7 +179,8 @@ pub fn tui(id: &str, options: &Options) -> Command {
         ),
     };
     let mut command = Command::new(program);
-    command.args(["--resume", id]);
+    // A conversation not saved yet starts in the TUI, under its id.
+    command.args([if saved { "--resume" } else { "--session-id" }, id]);
     match to_claude_mode(options.approval_mode.as_deref().unwrap_or_default()) {
         "bypassPermissions" => {
             command.arg("--dangerously-skip-permissions");
@@ -187,6 +192,7 @@ pub fn tui(id: &str, options: &Options) -> Command {
     if let Some(model) = &options.model {
         command.args(["--model", model]);
     }
+    add_dirs(&mut command, options);
     // A daemon started from inside Claude Code inherits that session's
     // markers; with them the TUI counts as a nested child and does not save
     // its transcript, so turns typed there would be lost on the way back.
@@ -2827,7 +2833,9 @@ mod tests {
             .map(|a| a.to_string_lossy().to_string())
             .collect();
         assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
-        assert!(!args.contains(&"--permission-prompt-tool".to_string()));
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["--permission-prompt-tool", "stdio"]));
         assert!(args.windows(2).any(|w| w == ["--resume", "abc"]));
     }
 
@@ -3430,5 +3438,22 @@ mod tests {
         std::os::unix::fs::symlink(&real, &link).unwrap();
         #[cfg(unix)]
         assert_eq!(project_dir(&home, &link), project_dir(&home, &real));
+    }
+
+    #[test]
+    fn the_projects_extra_dirs_are_added_to_both_commands() {
+        let options = Options {
+            dirs: vec![PathBuf::from("/work/api"), PathBuf::from("/work/docs")],
+            ..Options::default()
+        };
+        for command in [command("s-1", &options), tui("s-1", &options, true)] {
+            let args: Vec<String> = command
+                .get_args()
+                .map(|a| a.to_string_lossy().to_string())
+                .collect();
+            let joined = args.join(" ");
+            assert!(joined.contains("--add-dir /work/api"), "{joined}");
+            assert!(joined.contains("--add-dir /work/docs"), "{joined}");
+        }
     }
 }

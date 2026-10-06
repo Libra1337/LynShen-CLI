@@ -118,6 +118,7 @@ impl Hub {
         let requirements = crate::requirements::Requirements::load(
             store.dir(),
             uploads.dir().join("requirements"),
+            &store.workspaces(),
         );
         Arc::new_cyclic(|me| Self {
             me: me.clone(),
@@ -537,7 +538,10 @@ impl Hub {
         }
     }
 
-    pub fn forward(&self, session: &str, op: Value) -> Result<(), String> {
+    pub fn forward(&self, session: &str, mut op: Value) -> Result<(), String> {
+        if op["op"] == "set_approval_mode" && crate::requirements::gated(self, session) {
+            op["mode"] = json!(crate::requirements::read_only(self, session));
+        }
         let sessions = lock(&self.sessions);
         let hosted = sessions
             .get(session)

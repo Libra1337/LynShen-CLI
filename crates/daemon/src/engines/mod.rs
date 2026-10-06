@@ -85,6 +85,9 @@ pub struct Options {
     pub fast: bool,
     /// Claude: show thinking summaries (Some(false) hides them).
     pub thinking: Option<bool>,
+    /// Claude / Codex: directories besides `cwd` the engine may work in (the
+    /// project's extra directories; set by `spawn`, never by a client).
+    pub dirs: Vec<PathBuf>,
 }
 
 impl Options {
@@ -120,6 +123,7 @@ impl Options {
             effort: text("effort"),
             fast: value["fast"] == true,
             thinking: value["thinking"].as_bool(),
+            dirs: Vec::new(),
         }
     }
 
@@ -220,10 +224,11 @@ fn tui_command(
     kind: Kind,
     id: &str,
     options: &Options,
+    saved: bool,
 ) -> Result<(Command, Option<String>), String> {
     let command = match kind {
-        Kind::Claude => claude::tui(id, options),
-        Kind::Codex => codex::tui(id, options),
+        Kind::Claude => claude::tui(id, options, saved),
+        Kind::Codex => codex::tui(saved.then_some(id), options),
         Kind::Acp => return Err("an ACP agent has no TUI here".to_string()),
     };
     with_gateway(kind, id, options, command)
@@ -365,6 +370,12 @@ impl Process {
             let _ = self.child.kill();
             let _ = self.child.wait();
         });
+    }
+
+    /// Ends the engine now, without the grace `stop` gives it.
+    fn kill(mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 
     fn exit_reason(&mut self) -> String {
@@ -520,6 +531,19 @@ pub fn spawn(
     options: Options,
     transcript: Vec<Value>,
 ) -> Result<(String, Sender<Value>, u64), String> {
+    let gated = id
+        .as_deref()
+        .or(options.resume.as_deref())
+        .is_some_and(|session| crate::requirements::gated(&hub, session));
+    let options = Options {
+        dirs: crate::projects::extra_dirs(&hub, &cwd),
+        approval_mode: if gated {
+            Some("read-only".to_string())
+        } else {
+            options.approval_mode
+        },
+        ..options
+    };
     let (command, gateway_key) = command(kind, id.as_deref().unwrap_or_default(), &options)?;
     let process = match Process::spawn(command, &cwd) {
         Ok(process) => process,
@@ -717,6 +741,7 @@ impl Session<'_> {
                     next.env = options.env.clone();
                     next.gateway = next.gateway.or(options.gateway);
                     next.approval_mode = next.approval_mode.or(options.approval_mode.clone());
+                    next.dirs = crate::projects::extra_dirs(self.hub, &self.cwd);
                     current = next.clone();
                     process.stop();
                     let id = self.id.clone().unwrap_or_default();
@@ -740,12 +765,21 @@ impl Session<'_> {
                 }
             }
             if let Some(request) = self.tui_request.take() {
-                if busy {
+                // `force`: the user agreed to cut the running turn short.
+                if busy && request["force"] != true {
                     self.refuse(&request, "the running turn must end first".to_string());
                 } else {
                     let keep = adapter.keep(current.clone());
                     if let Some(tui) = self.tui_for(adapter.as_ref(), &keep, &request) {
-                        process.stop();
+                        // The TUI resumes the conversation file at once: no
+                        // grace period in which a cut-off turn still writes it.
+                        process.kill();
+                        // Its background tasks went with the process.
+                        let mut ended = vec![json!({ "type": "background_tasks", "tasks": [] })];
+                        if busy {
+                            ended.push(json!({ "type": "status", "message": "interrupted" }));
+                        }
+                        self.publish(ended);
                         match self.terminal(tui, keep, &request, &ops) {
                             Some((started, next, options)) => {
                                 process = started;
@@ -757,6 +791,18 @@ impl Session<'_> {
                     }
                 }
             }
+        }
+    }
+
+    /// Whether the engine has saved conversation `id` (only then can its
+    /// TUI resume it).
+    fn saved(&self, id: &str) -> bool {
+        match self.kind {
+            Kind::Claude => !claude::transcript(&self.cwd, id).is_empty(),
+            Kind::Codex => codex::saved(&self.cwd)
+                .iter()
+                .any(|(saved, ..)| saved == id),
+            Kind::Acp => true,
         }
     }
 
@@ -783,7 +829,7 @@ impl Session<'_> {
             self.refuse(request, "the conversation has not started yet".to_string());
             return None;
         };
-        match tui_command(self.kind, &id, options) {
+        match tui_command(self.kind, &id, options, self.saved(&id)) {
             Ok((tui, key)) => Some((id, tui, key)),
             Err(error) => {
                 self.refuse(request, error);
@@ -810,6 +856,15 @@ impl Session<'_> {
             release_key(self.kind, &key);
         }
         let session = self.id.clone().unwrap_or_default();
+        // A new Codex conversation gets its id from the TUI: the one saved
+        // for this directory while it ran.
+        let earlier: Vec<String> = match self.kind {
+            Kind::Codex => codex::saved(&self.cwd)
+                .into_iter()
+                .map(|(id, ..)| id)
+                .collect(),
+            _ => Vec::new(),
+        };
         let (exit_hub, exit_session) = (Arc::clone(&hub), session.clone());
         let on_exit: Box<dyn FnOnce() + Send> = Box::new(move || {
             let _ = exit_hub.forward(&exit_session, json!({ "op": "tui_exit" }));
@@ -860,9 +915,18 @@ impl Session<'_> {
         if let Some(key) = tui_key {
             release_key(self.kind, &key);
         }
-        // Back to the engine, on the conversation as the TUI left it.
+        // Back to the engine, on the conversation as the TUI left it (none
+        // when the TUI saved nothing: the engine starts it afresh).
+        let id = match self.kind {
+            Kind::Codex if !self.saved(&id) => codex::saved(&self.cwd)
+                .into_iter()
+                .map(|(id, ..)| id)
+                .find(|saved| !earlier.contains(saved))
+                .unwrap_or(id),
+            _ => id,
+        };
         let next = Options {
-            resume: Some(id.clone()),
+            resume: self.saved(&id).then(|| id.clone()),
             resume_at: None,
             ..options
         };
