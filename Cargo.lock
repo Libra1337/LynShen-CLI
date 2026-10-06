@@ -1009,7 +1009,7 @@ dependencies = [
 
 [[package]]
 name = "lynshen-agent-core"
-version = "0.4.9"
+version = "0.4.10"
 dependencies = [
  "base64",
  "chacha20poly1305 0.11.0",
@@ -1029,7 +1029,7 @@ dependencies = [
 
 [[package]]
 name = "lynshen-cli"
-version = "0.4.9"
+version = "0.4.10"
 dependencies = [
  "libc",
  "lynshen-agent-core",
@@ -1041,7 +1041,7 @@ dependencies = [
 
 [[package]]
 name = "lynshen-daemon"
-version = "0.4.9"
+version = "0.4.10"
 dependencies = [
  "base64",
  "chrono",
@@ -1059,7 +1059,7 @@ dependencies = [
 
 [[package]]
 name = "lynshen-software-release"
-version = "0.4.9"
+version = "0.4.10"
 dependencies = [
  "base64",
  "ed25519-dalek",
@@ -1071,7 +1071,7 @@ dependencies = [
 
 [[package]]
 name = "lynshen-tui"
-version = "0.4.9"
+version = "0.4.10"
 dependencies = [
  "base64",
  "lynshen-agent-core",
