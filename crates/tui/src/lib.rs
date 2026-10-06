@@ -15,8 +15,8 @@ mod ui_builder;
 
 use git_bar::GitStatusTracker;
 use input::{paste_burst_render_delay, InputBuffer, PasteBurst, PasteCharDecision, PasteFlush};
-use lynshen_agent_core::{AgentEvent, CommandView, TranscriptItem};
 use local_shell::{local_shell_command, LocalShellRunner};
+use lynshen_agent_core::{AgentEvent, CommandView, TranscriptItem};
 use picker::{PickerMode, PickerState, TreePromptAction};
 use ratatui::crossterm::{
     cursor::{Hide, Show},

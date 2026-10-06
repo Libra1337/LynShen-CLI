@@ -205,7 +205,11 @@ impl Usage {
             })
             .collect();
         if let Err(error) = self.append(&lines) {
-            lynshen_agent_core::log_warn!("usage", "cannot record usage", error = error.to_string());
+            lynshen_agent_core::log_warn!(
+                "usage",
+                "cannot record usage",
+                error = error.to_string()
+            );
             return;
         }
         if upload {
