@@ -961,6 +961,24 @@ mod tests {
         Store::open(dir).unwrap()
     }
 
+    /// Opens a store this test just dropped. A child that another test thread
+    /// forks shares the lock file until it execs, so the lock can outlive the
+    /// drop for a moment.
+    fn reopen(dir: PathBuf) -> io::Result<Store> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match Store::open(dir.clone()) {
+                Err(error)
+                    if error.kind() == io::ErrorKind::AlreadyExists
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                result => return result,
+            }
+        }
+    }
+
     #[test]
     fn token_is_created_once_and_private() {
         let store = store("token");
@@ -994,7 +1012,7 @@ mod tests {
         let ids: Vec<String> = store.sessions().into_iter().map(|s| s.id).collect();
         assert_eq!(ids, ["a", "b"]);
         drop(store);
-        let reopened = Store::open(
+        let reopened = reopen(
             std::env::temp_dir().join(format!("lynshen-daemon-store-torn-{}", std::process::id())),
         )
         .unwrap();
@@ -1031,7 +1049,7 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
         let dir = store.dir.clone();
         drop(store);
-        assert!(Store::open(dir).is_ok());
+        assert!(reopen(dir).is_ok());
     }
 
     #[test]
@@ -1089,7 +1107,7 @@ mod tests {
         let session_lines = lines(SESSIONS);
         drop(store);
 
-        let store = Store::open(dir.clone()).unwrap();
+        let store = reopen(dir.clone()).unwrap();
         assert_eq!(store.sessions(), before.0);
         assert_eq!(store.open_actions(), before.1);
         assert_eq!(
@@ -1105,7 +1123,7 @@ mod tests {
         assert_eq!(lines(TIMERS), 1);
         // A fresh read from disk agrees with the cached copy.
         drop(store);
-        let store = Store::open(dir).unwrap();
+        let store = reopen(dir).unwrap();
         assert_eq!(store.sessions(), before.0);
     }
 
@@ -1161,7 +1179,7 @@ mod tests {
             .unwrap());
         drop(store);
         // Opening compacts the log.
-        let reopened = Store::open(dir).unwrap();
+        let reopened = reopen(dir).unwrap();
         let record = &reopened.sessions()[0];
         assert_eq!(record.group.as_deref(), Some("g-1"));
         assert!(record.gateway);
