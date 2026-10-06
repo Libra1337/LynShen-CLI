@@ -1,6 +1,6 @@
 # Relay protocol (v1)
 
-Lets a paired phone (the PWA at `https://app.lynshen.net`) reach a desktop's
+Lets a paired phone (the PWA at `https://app.lynshen.org`) reach a desktop's
 `lynshen daemon` from outside the LAN. Three parties:
 
 - **host**: the daemon. Keeps one outbound WebSocket to the relay.
@@ -42,7 +42,7 @@ https://<relay host>/remote#pair=<host_id>.<host_static_pub>.<code>
 ```
 
 The link is on the relay's own origin (`--relay wss://host/relay/v1` →
-`https://host/remote`; `app.lynshen.net` by default).
+`https://host/remote`; `app.lynshen.org` by default).
 
 - `host_static_pub`: the daemon's X25519 public key (32 bytes, base64url).
 - `code`: a one-time pairing code from the existing `pair_start` op (8 chars,
@@ -54,7 +54,7 @@ The link is on the relay's own origin (`--relay wss://host/relay/v1` →
 
 ## 3. Relay endpoints
 
-Base: `wss://app.lynshen.net/relay/v1` (Caddy terminates TLS and proxies to the
+Base: `wss://app.lynshen.org/relay/v1` (Caddy terminates TLS and proxies to the
 relay on `127.0.0.1:18095`; the relay itself speaks plain WS/HTTP).
 
 ### 3.1 Host connection: `GET /relay/v1/host`
@@ -180,13 +180,13 @@ on device clients. Revoking a device closes its relay streams.
 
 `lynshen daemon` flags / config:
 
-- `--relay <wss url>` (default `wss://app.lynshen.net/relay/v1`),
+- `--relay <wss url>` (default `wss://app.lynshen.org/relay/v1`),
   `--no-relay` to disable. Desktop turns it on with a setting
   ("允许通过中继远程访问").
 - New local-client ops (not allowed for device clients):
   - `relay_status` → `{type:"relay_status", enabled, connected, host, url}`
   - `pair_link` → like `pair_start` but also returns
-    `{link:"https://app.lynshen.net/remote#pair=..."}`; an error while the
+    `{link:"https://app.lynshen.org/remote#pair=..."}`; an error while the
     relay is off.
   - `relay_set {enabled}` → turns the relay on or off (persisted in
     `settings.json`) and replies `relay_status`. Off by default.

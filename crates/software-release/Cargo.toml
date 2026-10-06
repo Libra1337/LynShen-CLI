@@ -1,0 +1,19 @@
+[package]
+name = "lynshen-software-release"
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "software-release"
+path = "src/main.rs"
+
+[dependencies]
+base64 = "0.22"
+ed25519-dalek = "2"
+getrandom = "0.2"
+semver = "1"
+serde_json = "1"
+sha2 = "0.10"

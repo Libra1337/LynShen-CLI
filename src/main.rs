@@ -107,10 +107,13 @@ fn main() -> io::Result<()> {
     if args.first().map(String::as_str) == Some("auth-login") {
         // Closing Desktop drops this pipe. Do not leave a callback listener
         // or a credential-writing worker running after the parent exits.
+        // The parent closing the pipe cancels the login; report it as such.
         thread::spawn(|| {
             let mut byte = [0u8; 1];
             while io::stdin().read(&mut byte).is_ok_and(|n| n != 0) {}
-            std::process::exit(0);
+            println!("{}", json!({"status":"error", "message":"login canceled"}));
+            let _ = io::stdout().flush();
+            std::process::exit(130);
         });
         let provider = args.get(1).map(String::as_str).unwrap_or("");
         let emit = |event: Value| {
@@ -435,7 +438,7 @@ fn run_update() -> i32 {
 
 /// `lynshen daemon [--listen <addr>]`: host sessions for Desktop and remote
 /// clients until killed. Listens on loopback unless told otherwise. The
-/// relay connection (`--relay`, default `wss://app.lynshen.net/relay/v1`) is
+/// relay connection (`--relay`, default `wss://app.lynshen.org/relay/v1`) is
 /// made only once a local client turns it on; `--no-relay` rules it out.
 fn run_daemon(args: &[String]) -> io::Result<i32> {
     let (action, args) = match args.first().map(String::as_str) {

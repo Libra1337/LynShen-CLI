@@ -401,7 +401,10 @@ impl AgentCore {
 
     pub fn start_update_check(&mut self) {
         if self.update_receiver.is_none() {
-            self.update_receiver = Some(update::spawn_update_check(self.version));
+            self.update_receiver = Some(update::spawn_update_check(
+                self.version,
+                self.config.auto_update,
+            ));
         }
     }
 

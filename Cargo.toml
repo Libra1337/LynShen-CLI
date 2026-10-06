@@ -10,7 +10,7 @@ name = "lynshen"
 path = "src/main.rs"
 
 [workspace]
-members = [".", "crates/agent-core", "crates/daemon", "crates/llm-provider-kit", "crates/tui"]
+members = [".", "crates/agent-core", "crates/daemon", "crates/llm-provider-kit", "crates/software-release", "crates/tui"]
 resolver = "2"
 
 [workspace.package]

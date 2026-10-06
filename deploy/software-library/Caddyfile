@@ -1,0 +1,17 @@
+# software.lynshen.org: the LynShen software library (docs/software-library.md).
+# Static files only. Manifests are never cached; versioned files never change.
+software.lynshen.org {
+	root * /srv/software
+	encode zstd gzip
+
+	@manifest path */latest.json
+	header @manifest Cache-Control "no-cache"
+	@versioned path_regexp versioned ^/[a-z0-9-]+/\d+\.\d+\.\d+/
+	header @versioned Cache-Control "public, max-age=31536000, immutable"
+
+	header {
+		X-Content-Type-Options nosniff
+		-Server
+	}
+	file_server
+}

@@ -48,7 +48,7 @@ use tungstenite::{
 };
 
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:7788";
-pub const DEFAULT_RELAY: &str = "wss://app.lynshen.net/relay/v1";
+pub const DEFAULT_RELAY: &str = "wss://app.lynshen.org/relay/v1";
 
 /// Serves clients on `listener` until the process exits. The token guards
 /// every WebSocket connection: local clients read it from

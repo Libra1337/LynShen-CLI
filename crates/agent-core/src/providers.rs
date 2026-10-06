@@ -14,7 +14,7 @@ pub const CLIENT_NAME: &str = "lynshen";
 /// claude-* models, which users configure by name).
 pub const LYNSHEN_TEMPLATE: ProviderTemplate = ProviderTemplate {
     id: "lynshen",
-    base_url: "https://api.lynshen.net/v1",
+    base_url: "https://api.lynshen.org/v1",
     protocol: Protocol::OpenAiResponses,
     models: GPT_MODELS,
 };

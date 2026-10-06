@@ -200,7 +200,7 @@ static SESSION_REFRESH: Mutex<()> = Mutex::new(());
 /// token as soon as it is used, so two processes refreshing at once leave one
 /// of them saving a dead token. Held from the reload to the save; the lock is
 /// released when the file closes.
-fn lock_auth_refresh() -> Result<std::fs::File, String> {
+pub(crate) fn lock_auth_refresh() -> Result<std::fs::File, String> {
     let dir = crate::config::profile_dir().map_err(|error| error.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
     let path = dir.join("auth.lock");

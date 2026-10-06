@@ -20,21 +20,21 @@ The project is intentionally small: the agent harness is designed to give the mo
 ## Installation
 
 Prebuilt binaries for macOS (Apple Silicon and Intel), Linux x64 and Windows x64
-are published on [GitHub Releases](https://github.com/LynShen-Team/LynShen-CLI/releases/latest)
-and on npm:
+are published in the [LynShen software library](docs/software-library.md)
+(`https://software.lynshen.org/cli/`) and on npm:
 
 ```bash
 npm install -g @lynshen/cli
 lynshen
 ```
 
-[LynShen Desktop](https://github.com/LynShen-Team/LynShen-Desktop) ships its own copy
+[LynShen Desktop](https://www.lynshen.org/download) ships its own copy
 of the CLI in `~/.lynshen/bin` and updates it with the app.
 
 ### From source
 
 ```bash
-git clone https://github.com/LynShen-Team/LynShen-CLI.git
+git clone --recurse-submodules https://github.com/Libra1337/LynShen-CLI.git
 cd LynShen-CLI
 cargo build --release
 ./target/release/lynshen
@@ -43,7 +43,7 @@ cargo build --release
 ### With Cargo from Git
 
 ```bash
-cargo install --git https://github.com/LynShen-Team/LynShen-CLI.git lynshen-cli
+cargo install --git https://github.com/Libra1337/LynShen-CLI.git lynshen-cli
 lynshen
 ```
 
@@ -51,8 +51,9 @@ LynShen is written in Rust and uses the workspace binary name `lynshen`.
 
 ### Updating
 
-LynShen checks for new versions at startup and prints a notice when one is
-available. Update with:
+LynShen checks the software library at startup. A release binary installs a
+newer version in the background (it runs from the next start); set
+`"auto_update": false` in `config.json` to get only a notice. Update by hand with:
 
 ```bash
 lynshen update
@@ -60,9 +61,9 @@ lynshen update
 
 - npm installs run `npm i -g @lynshen/cli@latest` (on Windows right after the
   process exits, since the running executable is locked).
-- Release binaries download the new binary from GitHub Releases, or from the
-  LynShen server when GitHub is unreachable or slow, verify it and replace
-  themselves; the new version runs from the next start.
+- Release binaries download the new binary from `software.lynshen.org`. The
+  release manifest is signed (Ed25519, key built into the CLI) and every file
+  is checked against its sha256 before it replaces the running binary.
 - The copy LynShen Desktop keeps in `~/.lynshen/bin` updates with the app.
 
 ## Configuration
@@ -71,7 +72,7 @@ On first run, LynShen creates its configuration under the user profile directory
 
 - default provider: `lynshen`
 - default model: `gpt-5.5`
-- default API base URL: `https://api.lynshen.net/v1`
+- default API base URL: `https://api.lynshen.org/v1`
 - default API key environment variable: `OPENAI_API_KEY`
 
 Sign in with `/login` to use the LynShen gateway, or set an API key and point the config at any compatible endpoint. Built-in provider templates: `lynshen` and `openai` (Responses), `deepseek` (Anthropic Messages), and `ollama` and `openrouter` (Chat Completions). List them with `lynshen providers`, or override the `protocol` setting for custom endpoints:

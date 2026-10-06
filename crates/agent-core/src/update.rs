@@ -1,3 +1,5 @@
+use base64::{engine::general_purpose::STANDARD, Engine};
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use semver::Version;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -8,58 +10,75 @@ use std::{
     process::Command,
     sync::mpsc::{self, Receiver},
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 const UPDATE_COMMAND: &str = "lynshen update";
-/// Redirects to the newest release's tag page. Read instead of GitHub's API,
-/// whose unauthenticated rate limit is shared by everyone behind one address.
-const RELEASES_URL: &str = "https://github.com/LynShen-Team/LynShen-CLI/releases/latest";
-const DOWNLOAD_URL: &str = "https://github.com/LynShen-Team/LynShen-CLI/releases/download";
+/// The LynShen software library: one signed manifest per product, files by
+/// version (docs/software-library.md).
+const SOFTWARE_URL: &str = "https://software.lynshen.org/cli/latest.json";
+/// Where people download the CLI by hand.
+const DOWNLOAD_PAGE: &str = "https://www.lynshen.org/download";
+/// Ed25519 key that signs `latest.json`. Its private half signs releases
+/// offline; a manifest under any other key is refused.
+const MANIFEST_PUBLIC_KEY: &str = "rNaDD3lDFhpKdEGDOZdTHGBW9uEoQJ5jaQeTYrhz0tQ=";
 const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(3);
-/// A download from GitHub slower than this after `RATE_WINDOW` moves to the
-/// LynShen server (GitHub is often slow or unreachable from mainland China).
-const MIN_DOWNLOAD_RATE: u64 = 200 * 1024;
-const RATE_WINDOW: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 pub struct UpdateNotice {
     pub current_version: String,
     pub latest_version: String,
+    /// Already installed in the background; active from the next start.
+    pub installed: bool,
 }
 
 impl UpdateNotice {
     pub fn message(&self) -> String {
-        format!(
-            "update available: LynShen {} -> {}, run {}",
-            self.current_version, self.latest_version, UPDATE_COMMAND
-        )
+        if self.installed {
+            format!(
+                "LynShen {} installed; restart lynshen to use it (now {})",
+                self.latest_version, self.current_version
+            )
+        } else {
+            format!(
+                "update available: LynShen {} -> {}, run {}",
+                self.current_version, self.latest_version, UPDATE_COMMAND
+            )
+        }
     }
 }
 
-pub fn spawn_update_check(current_version: &'static str) -> Receiver<UpdateNotice> {
+/// Checks the software library in the background. A release binary with
+/// `auto_update` on installs a newer version itself (it runs from the next
+/// start); otherwise the notice tells the user to run `lynshen update`.
+pub fn spawn_update_check(
+    current_version: &'static str,
+    auto_update: bool,
+) -> Receiver<UpdateNotice> {
     let (tx, rx) = mpsc::channel();
     // LynShen Desktop updates the copy it manages; no notice for it.
-    if install_channel() == InstallChannel::Desktop {
+    let channel = install_channel();
+    if channel == InstallChannel::Desktop {
         return rx;
     }
     thread::spawn(move || {
-        if let Ok(Some(notice)) = check_for_update(current_version) {
-            let _ = tx.send(notice);
+        let Ok(release) = latest_release(UPDATE_CHECK_TIMEOUT) else {
+            return;
+        };
+        if !is_newer_version(current_version, &release.version) {
+            return;
         }
+        let installed = auto_update
+            && channel == InstallChannel::Other
+            && cfg!(not(debug_assertions))
+            && self_update(&release).is_ok();
+        let _ = tx.send(UpdateNotice {
+            current_version: current_version.to_string(),
+            latest_version: release.version,
+            installed,
+        });
     });
     rx
-}
-
-fn check_for_update(current_version: &str) -> Result<Option<UpdateNotice>, String> {
-    let latest_version = latest_cli_version()?;
-    if !is_newer_version(current_version, &latest_version) {
-        return Ok(None);
-    }
-    Ok(Some(UpdateNotice {
-        current_version: current_version.to_string(),
-        latest_version,
-    }))
 }
 
 /// One release of the CLI: its version and downloadable files.
@@ -73,8 +92,8 @@ pub struct Release {
 pub struct Asset {
     pub name: String,
     pub url: String,
-    /// Hex sha256 when the source publishes one.
-    pub sha256: Option<String>,
+    /// Hex sha256 from the signed manifest; a download must match it.
+    pub sha256: String,
 }
 
 impl Release {
@@ -108,88 +127,92 @@ fn agent(timeout: Duration) -> ureq::Agent {
         .build()
 }
 
-/// The newest CLI version: GitHub first, then the LynShen server.
+/// The newest CLI version in the software library.
 pub fn latest_cli_version() -> Result<String, String> {
     latest_release(UPDATE_CHECK_TIMEOUT).map(|release| release.version)
 }
 
-/// The newest release: from GitHub, else from the LynShen server.
+/// The newest release in the software library, its manifest signature checked.
 pub fn latest_release(timeout: Duration) -> Result<Release, String> {
-    github_release(timeout).or_else(|github| {
-        server_release(timeout).map_err(|server| format!("GitHub: {github}; LynShen: {server}"))
-    })
+    release_at(SOFTWARE_URL, timeout)
 }
 
-fn github_release(timeout: Duration) -> Result<Release, String> {
-    let response = ureq::AgentBuilder::new()
-        .timeout_connect(timeout)
-        .timeout_read(timeout)
-        .redirects(0)
-        .build()
-        .get(RELEASES_URL)
+fn release_at(manifest_url: &str, timeout: Duration) -> Result<Release, String> {
+    let manifest = agent(timeout)
+        .get(manifest_url)
+        .set("Accept", "application/json")
         .set("User-Agent", "lynshen-cli")
         .call()
-        .map_err(|error| error.to_string())?;
-    let location = response.header("location").unwrap_or_default();
-    github_release_at(location)
-}
-
-/// The release a `releases/latest` redirect points at (`…/releases/tag/v1.2.3`).
-/// Its binaries are named by target (`lynshen-<target>`).
-fn github_release_at(location: &str) -> Result<Release, String> {
-    let tag = location
-        .rsplit_once("/releases/tag/")
-        .map(|(_, tag)| tag)
-        .filter(|tag| !tag.is_empty())
-        .ok_or_else(|| format!("unexpected redirect: {location:?}"))?;
-    let version = tag.trim_start_matches('v').to_string();
-    let assets = binary_name()
-        .map(|name| Asset {
-            url: format!("{DOWNLOAD_URL}/{tag}/{name}"),
-            name,
-            sha256: None,
-        })
-        .into_iter()
-        .collect();
-    Ok(Release { version, assets })
-}
-
-fn server_release(timeout: Duration) -> Result<Release, String> {
-    let url = format!(
-        "{}/v1/public/releases/cli/latest",
-        crate::config::saved_lynshen_api_url().trim_end_matches('/')
-    );
-    let value = agent(timeout)
-        .get(&url)
-        .set("Accept", "application/json")
-        .call()
         .map_err(|error| error.to_string())?
-        .into_json::<Value>()
+        .into_string()
         .map_err(|error| error.to_string())?;
-    parse_server_release(&value)
+    parse_signed_release(&manifest, manifest_url, MANIFEST_PUBLIC_KEY)
+}
+
+/// `latest.json`: `{"release": {...}, "signature": "<base64>"}`, where the
+/// signature covers the exact bytes of the `release` value as served. The
+/// release names files relative to the manifest's directory.
+fn parse_signed_release(
+    manifest: &str,
+    manifest_url: &str,
+    public_key: &str,
+) -> Result<Release, String> {
+    let envelope: Value = serde_json::from_str(manifest).map_err(|error| error.to_string())?;
+    let signed = envelope["release"]
+        .as_str()
+        .ok_or("manifest has no signed release")?;
+    let signature = STANDARD
+        .decode(text(&envelope["signature"]))
+        .ok()
+        .and_then(|bytes| Signature::from_slice(&bytes).ok())
+        .ok_or("manifest signature is malformed")?;
+    let key = STANDARD
+        .decode(public_key)
+        .ok()
+        .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+        .and_then(|bytes| VerifyingKey::from_bytes(&bytes).ok())
+        .ok_or("no valid update key in this build")?;
+    key.verify(signed.as_bytes(), &signature)
+        .map_err(|_| "manifest signature does not verify".to_string())?;
+    let release: Value = serde_json::from_str(signed).map_err(|error| error.to_string())?;
+    if release["product"] != "cli" {
+        return Err("manifest is not for the CLI".to_string());
+    }
+    let base = manifest_url
+        .rsplit_once('/')
+        .map_or(manifest_url, |(dir, _)| dir);
+    parse_release(&release, base)
 }
 
 fn text(value: &Value) -> &str {
     value.as_str().unwrap_or_default()
 }
 
-/// The LynShen server's `/v1/public/releases/cli/latest`.
-fn parse_server_release(value: &Value) -> Result<Release, String> {
-    let version = text(&value["version"]).trim_start_matches('v').to_string();
-    if version.is_empty() {
-        return Err("response has no version".to_string());
+/// The signed release: a version and one entry per platform binary, each
+/// with its sha256. Files live in `<base>/<version>/`; names cannot leave it.
+fn parse_release(value: &Value, base: &str) -> Result<Release, String> {
+    let version = text(&value["version"]).to_string();
+    if Version::parse(&version).is_err() {
+        return Err("manifest has no valid version".to_string());
     }
-    let assets = value["assets"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .map(|asset| Asset {
-            name: text(&asset["name"]).to_string(),
-            url: text(&asset["url"]).to_string(),
-            sha256: Some(text(&asset["sha256"]).to_string()).filter(|sha| !sha.is_empty()),
-        })
-        .filter(|asset| !asset.name.is_empty() && !asset.url.is_empty())
-        .collect();
+    let mut assets = Vec::new();
+    for file in value["files"].as_array().into_iter().flatten() {
+        let name = text(&file["name"]);
+        let sha256 = text(&file["sha256"]).to_ascii_lowercase();
+        let safe_name = !name.is_empty()
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+            && !name.starts_with('.');
+        if !safe_name || sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(format!("manifest lists an invalid file {name:?}"));
+        }
+        assets.push(Asset {
+            url: format!("{base}/{version}/{name}"),
+            name: name.to_string(),
+            sha256,
+        });
+    }
     Ok(Release { version, assets })
 }
 
@@ -210,7 +233,7 @@ pub enum InstallChannel {
     Npm,
     /// The copy LynShen Desktop keeps in `~/.lynshen/bin` — it updates with the app.
     Desktop,
-    /// Anything else: GitHub release binary, cargo install, dev build.
+    /// Anything else: a release binary, cargo install, dev build.
     Other,
 }
 
@@ -241,15 +264,18 @@ fn channel_for_path(path: &str, desktop_bin: &str) -> InstallChannel {
 }
 
 /// `lynshen update` for a binary installed from a release: downloads this
-/// platform's binary of `release` (GitHub first, the LynShen server when
-/// GitHub fails or is too slow), checks it, and puts it in place of the
-/// running one. The new version runs from the next start.
+/// platform's binary of `release` from the software library, checks its
+/// sha256 and version, and puts it in place of the running one. The new
+/// version runs from the next start.
 pub fn self_update(release: &Release) -> Result<String, String> {
     let exe = std::env::current_exe().map_err(|error| error.to_string())?;
     let exe = fs::canonicalize(&exe).unwrap_or(exe);
     let name = binary_name().ok_or("no release binary for this platform")?;
+    let asset = release
+        .binary()
+        .ok_or_else(|| format!("release {} has no {name}", release.version))?;
     let partial = exe.with_file_name(format!(".{name}.download"));
-    let result = download_release_binary(release, &name, &partial)
+    let result = download(asset, &partial)
         .and_then(|()| check_binary(&partial, &release.version))
         .and_then(|()| replace_binary(&partial, &exe));
     if result.is_err() {
@@ -258,41 +284,8 @@ pub fn self_update(release: &Release) -> Result<String, String> {
     result.map(|()| format!("updated to {}: restart lynshen to use it", release.version))
 }
 
-fn download_release_binary(release: &Release, name: &str, dest: &Path) -> Result<(), String> {
-    let from_github = release
-        .assets
-        .iter()
-        .find(|asset| asset.name == name && asset.url.starts_with("https://github.com/"));
-    let mut errors = Vec::new();
-    if let Some(asset) = from_github {
-        match download(asset, dest, true) {
-            Ok(()) => return Ok(()),
-            Err(error) => errors.push(format!("GitHub: {error}")),
-        }
-    }
-    let server = match from_github {
-        // Already from the server (GitHub was unreachable for the version check).
-        None => release.binary().cloned(),
-        Some(_) => server_release(Duration::from_secs(10))
-            .ok()
-            .filter(|server| server.version == release.version)
-            .and_then(|server| server.binary().cloned()),
-    };
-    match server {
-        Some(asset) => download(&asset, dest, false).map_err(|error| {
-            errors.push(format!("LynShen: {error}"));
-            errors.join("; ")
-        }),
-        None => {
-            errors.push(format!("no {name} for {}", release.version));
-            Err(errors.join("; "))
-        }
-    }
-}
-
-/// Streams `asset` to `dest`, checking its sha256 when known. With
-/// `need_rate`, gives up when it runs slower than `MIN_DOWNLOAD_RATE`.
-fn download(asset: &Asset, dest: &Path, need_rate: bool) -> Result<(), String> {
+/// Streams `asset` to `dest` and checks its sha256.
+fn download(asset: &Asset, dest: &Path) -> Result<(), String> {
     let response = agent(Duration::from_secs(15))
         .get(&asset.url)
         .set("User-Agent", "lynshen-cli")
@@ -303,8 +296,6 @@ fn download(asset: &Asset, dest: &Path, need_rate: bool) -> Result<(), String> {
         fs::File::create(dest).map_err(|error| format!("{}: {error}", dest.display()))?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; 64 * 1024];
-    let started = Instant::now();
-    let mut total = 0u64;
     loop {
         let read = reader
             .read(&mut buffer)
@@ -315,15 +306,6 @@ fn download(asset: &Asset, dest: &Path, need_rate: bool) -> Result<(), String> {
         file.write_all(&buffer[..read])
             .map_err(|error| error.to_string())?;
         hasher.update(&buffer[..read]);
-        total += read as u64;
-        let elapsed = started.elapsed();
-        if need_rate && elapsed >= RATE_WINDOW && total < MIN_DOWNLOAD_RATE * elapsed.as_secs() {
-            return Err(format!(
-                "too slow ({} KB in {}s)",
-                total / 1024,
-                elapsed.as_secs()
-            ));
-        }
     }
     file.sync_all().map_err(|error| error.to_string())?;
     let digest = hasher
@@ -331,11 +313,10 @@ fn download(asset: &Asset, dest: &Path, need_rate: bool) -> Result<(), String> {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
-    match &asset.sha256 {
-        Some(expected) if !expected.eq_ignore_ascii_case(&digest) => {
-            Err(format!("checksum mismatch for {}", asset.name))
-        }
-        _ => Ok(()),
+    if asset.sha256.eq_ignore_ascii_case(&digest) {
+        Ok(())
+    } else {
+        Err(format!("checksum mismatch for {}", asset.name))
     }
 }
 
@@ -364,7 +345,7 @@ fn check_binary(path: &Path, version: &str) -> Result<(), String> {
 fn replace_binary(new: &Path, exe: &Path) -> Result<(), String> {
     let denied = |error: std::io::Error| {
         format!(
-            "cannot replace {} ({error}); download it from {RELEASES_URL}",
+            "cannot replace {} ({error}); download it from {DOWNLOAD_PAGE}",
             exe.display()
         )
     };
@@ -436,11 +417,14 @@ mod tests {
 
     #[test]
     fn notice_points_at_lynshen_update() {
-        let notice = UpdateNotice {
+        let mut notice = UpdateNotice {
             current_version: "0.1.3".to_string(),
             latest_version: "0.1.4".to_string(),
+            installed: false,
         };
         assert!(notice.message().contains("lynshen update"));
+        notice.installed = true;
+        assert!(notice.message().contains("restart lynshen"));
     }
 
     #[test]
@@ -485,25 +469,71 @@ mod tests {
         );
     }
 
+    /// A manifest signed with a throwaway key, as software-release writes it.
+    fn signed(release: &Value) -> (String, String) {
+        use ed25519_dalek::{Signer, SigningKey};
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        let release = release.to_string();
+        let manifest = serde_json::json!({
+            "release": release,
+            "signature": STANDARD.encode(key.sign(release.as_bytes()).to_bytes()),
+        })
+        .to_string();
+        (manifest, STANDARD.encode(key.verifying_key().as_bytes()))
+    }
+
     #[test]
-    fn reads_releases_from_github_and_the_lynshen_server() {
-        let github =
-            github_release_at("https://github.com/LynShen-Team/LynShen-CLI/releases/tag/v0.4.0")
-                .unwrap();
-        assert_eq!(github.version, "0.4.0");
-        let binary = github.binary().unwrap();
-        assert!(binary.url.starts_with(
-            "https://github.com/LynShen-Team/LynShen-CLI/releases/download/v0.4.0/lynshen-"
-        ));
-        assert_eq!(binary.sha256, None);
-        assert!(github_release_at("https://github.com/LynShen-Team/LynShen-CLI/releases").is_err());
-        let server = parse_server_release(&serde_json::json!({
-            "version": "0.4.0",
-            "assets": [{ "name": "lynshen-aarch64-apple-darwin", "url": "https://api.lynshen.net/v1/public/releases/cli/0.4.0/files/lynshen-aarch64-apple-darwin", "sha256": "cd34" }],
-        }))
-        .unwrap();
-        assert_eq!(server.assets[0].sha256.as_deref(), Some("cd34"));
-        assert!(parse_server_release(&serde_json::json!({ "assets": [] })).is_err());
+    fn reads_a_signed_release_from_the_software_library() {
+        let sha = "9a3a45d01531a20e89ac6ae10b0b0beb0492acd7216a368aa062d1a5fecaf9cd";
+        let release = serde_json::json!({
+            "product": "cli",
+            "version": "0.4.9",
+            "files": [{ "name": "lynshen-aarch64-apple-darwin", "sha256": sha }],
+        });
+        let (manifest, key) = signed(&release);
+        let parsed = parse_signed_release(&manifest, SOFTWARE_URL, &key).unwrap();
+        assert_eq!(parsed.version, "0.4.9");
+        assert_eq!(
+            parsed.assets[0].url,
+            "https://software.lynshen.org/cli/0.4.9/lynshen-aarch64-apple-darwin"
+        );
+        assert_eq!(parsed.assets[0].sha256, sha);
+    }
+
+    #[test]
+    fn refuses_unsigned_tampered_or_unsafe_manifests() {
+        let sha = "9a3a45d01531a20e89ac6ae10b0b0beb0492acd7216a368aa062d1a5fecaf9cd";
+        let release = serde_json::json!({
+            "product": "cli", "version": "0.4.9",
+            "files": [{ "name": "lynshen-x86_64-unknown-linux-gnu", "sha256": sha }],
+        });
+        let (manifest, key) = signed(&release);
+        let tampered = manifest.replace("0.4.9", "9.9.9");
+        assert!(parse_signed_release(&tampered, SOFTWARE_URL, &key).is_err());
+        assert!(parse_signed_release(&manifest, SOFTWARE_URL, MANIFEST_PUBLIC_KEY).is_err());
+        let unsigned = serde_json::json!({ "release": release.to_string() }).to_string();
+        assert!(parse_signed_release(&unsigned, SOFTWARE_URL, &key).is_err());
+        for name in ["../lynshen", ".hidden", "a/b"] {
+            let bad = serde_json::json!({
+                "product": "cli", "version": "0.4.9",
+                "files": [{ "name": name, "sha256": sha }],
+            });
+            let (manifest, key) = signed(&bad);
+            assert!(
+                parse_signed_release(&manifest, SOFTWARE_URL, &key).is_err(),
+                "{name}"
+            );
+        }
+        let desktop = serde_json::json!({ "product": "desktop", "version": "0.4.9", "files": [] });
+        let (manifest, key) = signed(&desktop);
+        assert!(parse_signed_release(&manifest, SOFTWARE_URL, &key).is_err());
+    }
+
+    #[test]
+    fn the_built_in_update_key_is_valid() {
+        let bytes = STANDARD.decode(MANIFEST_PUBLIC_KEY).unwrap();
+        let bytes = <[u8; 32]>::try_from(bytes).unwrap();
+        assert!(VerifyingKey::from_bytes(&bytes).is_ok());
     }
 
     /// Serves `body` once over HTTP on a loopback port; returns its URL.
@@ -528,6 +558,79 @@ mod tests {
         url
     }
 
+    /// Serves files from `root` over loopback HTTP until the test ends.
+    fn serve_dir(root: PathBuf) -> String {
+        use std::io::{BufRead, BufReader};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut request = String::new();
+                reader.read_line(&mut request).unwrap();
+                let mut line = String::new();
+                while reader.read_line(&mut line).unwrap() > 2 {
+                    line.clear();
+                }
+                let path = request
+                    .split(' ')
+                    .nth(1)
+                    .unwrap_or("/")
+                    .trim_start_matches('/');
+                let (status, body) = match fs::read(root.join(path)) {
+                    Ok(body) => ("200 OK", body),
+                    Err(_) => ("404 Not Found", Vec::new()),
+                };
+                let head = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(head.as_bytes()).unwrap();
+                stream.write_all(&body).unwrap();
+            }
+        });
+        url
+    }
+
+    #[test]
+    fn fetches_verifies_and_downloads_a_release_from_a_library() {
+        use ed25519_dalek::{Signer, SigningKey};
+        let root = std::env::temp_dir().join(format!("lynshen-library-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("cli/0.4.9")).unwrap();
+        fs::write(root.join("cli/0.4.9/lynshen-test"), b"binary").unwrap();
+        let key = SigningKey::from_bytes(&[9u8; 32]);
+        let release = serde_json::json!({
+            "product": "cli", "version": "0.4.9",
+            "files": [{ "name": "lynshen-test",
+                        "sha256": "9a3a45d01531a20e89ac6ae10b0b0beb0492acd7216a368aa062d1a5fecaf9cd" }],
+        })
+        .to_string();
+        let manifest = serde_json::json!({
+            "release": release,
+            "signature": STANDARD.encode(key.sign(release.as_bytes()).to_bytes()),
+        });
+        fs::write(root.join("cli/latest.json"), manifest.to_string()).unwrap();
+        let url = format!("{}/cli/latest.json", serve_dir(root.clone()));
+        let public = STANDARD.encode(key.verifying_key().as_bytes());
+
+        let text = agent(Duration::from_secs(5))
+            .get(&url)
+            .call()
+            .unwrap()
+            .into_string()
+            .unwrap();
+        let parsed = parse_signed_release(&text, &url, &public).unwrap();
+        assert_eq!(parsed.version, "0.4.9");
+        let dest = root.join("downloaded");
+        download(&parsed.assets[0], &dest).unwrap();
+        assert_eq!(fs::read(&dest).unwrap(), b"binary");
+        // The built-in key refuses a manifest signed by anyone else.
+        assert!(release_at(&url, Duration::from_secs(5)).is_err());
+        let _ = fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn a_download_is_checked_against_its_checksum() {
         let dir = std::env::temp_dir().join(format!("lynshen-update-{}", std::process::id()));
@@ -538,11 +641,11 @@ mod tests {
         let asset = |url: String, sha: &str| Asset {
             name: "lynshen".into(),
             url,
-            sha256: Some(sha.into()),
+            sha256: sha.into(),
         };
-        download(&asset(serve_once(b"binary"), good), &dest, false).unwrap();
+        download(&asset(serve_once(b"binary"), good), &dest).unwrap();
         assert_eq!(fs::read(&dest).unwrap(), b"binary");
-        let error = download(&asset(serve_once(b"tampered"), good), &dest, false).unwrap_err();
+        let error = download(&asset(serve_once(b"tampered"), good), &dest).unwrap_err();
         assert!(error.contains("checksum mismatch"), "{error}");
         let _ = fs::remove_dir_all(&dir);
     }

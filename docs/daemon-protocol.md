@@ -85,14 +85,14 @@ TLS of its own. Or use the relay (below).
 ## Relay
 
 With the relay on, the daemon keeps one outbound WebSocket to the LynShen
-relay (`--relay`, default `wss://app.lynshen.net/relay/v1`) and phones reach
+relay (`--relay`, default `wss://app.lynshen.org/relay/v1`) and phones reach
 it from anywhere through end-to-end encrypted streams
 (`docs/relay-protocol.md`). It is off until a local client sends
 `relay_set` with `enabled: true`; the setting survives restarts.
 `--no-relay` keeps it off whatever the setting says.
 
 1. A local client sends `pair_link` and shows the returned `link`
-   (`https://app.lynshen.net/remote#pair=<host>.<key>.<code>`, the origin
+   (`https://app.lynshen.org/remote#pair=<host>.<key>.<code>`, the origin
    taken from the relay URL) as a QR code. The code is a `pair_start` code.
 2. The phone's page connects through the relay with the code in its first
    Noise message and is paired as a device keyed by its Noise static key.

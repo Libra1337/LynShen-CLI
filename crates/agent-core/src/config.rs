@@ -280,6 +280,8 @@ pub struct Config {
     /// Engine behind `web_fetch`: `local` fetches from this machine, the
     /// others go through the LynShen gateway (`crate::web::FETCH_ENGINES`).
     pub web_fetch_engine: String,
+    /// Install new CLI releases in the background (release binaries only).
+    pub auto_update: bool,
     path: PathBuf,
 }
 
@@ -423,9 +425,9 @@ impl Config {
                 lynshen_models: Vec::new(),
                 lynshen_groups: BTreeMap::new(),
                 context_window_overrides: BTreeMap::new(),
-                base_url: "https://api.lynshen.net/v1".to_string(),
-                lynshen_web_url: "https://api.lynshen.net".to_string(),
-                lynshen_api_url: "https://api.lynshen.net".to_string(),
+                base_url: "https://api.lynshen.org/v1".to_string(),
+                lynshen_web_url: "https://www.lynshen.org".to_string(),
+                lynshen_api_url: "https://api.lynshen.org".to_string(),
                 api_key_env: "OPENAI_API_KEY".to_string(),
                 retry_attempts: DEFAULT_RETRY_ATTEMPTS,
                 connect_timeout_seconds: DEFAULT_CONNECT_TIMEOUT_SECONDS,
@@ -440,6 +442,7 @@ impl Config {
                 sandbox: crate::sandbox::SandboxPolicy::default_for_platform(),
                 web_search_engine: crate::web::DEFAULT_SEARCH_ENGINE.to_string(),
                 web_fetch_engine: crate::web::DEFAULT_FETCH_ENGINE.to_string(),
+                auto_update: true,
                 path,
             };
             config.save()?;
@@ -506,12 +509,12 @@ impl Config {
         let legacy_lynshen_url = read_string(&value, "lynshen_base_url", "");
         let default_lynshen_web_url =
             if legacy_lynshen_url.is_empty() || legacy_lynshen_url == "http://localhost:8090" {
-                "https://api.lynshen.net"
+                "https://www.lynshen.org"
             } else {
                 &legacy_lynshen_url
             };
         let default_lynshen_api_url = if legacy_lynshen_url.is_empty() {
-            "https://api.lynshen.net"
+            "https://api.lynshen.org"
         } else {
             &legacy_lynshen_url
         };
@@ -583,6 +586,7 @@ impl Config {
                 crate::web::DEFAULT_FETCH_ENGINE,
                 crate::web::FETCH_ENGINES,
             )?,
+            auto_update: read_bool(&value, "auto_update", true),
             path,
         };
         Ok(config)
@@ -634,6 +638,7 @@ impl Config {
             "command_rules": crate::sandbox::rules_to_json(&self.sandbox.rules),
             "web_search_engine": self.web_search_engine,
             "web_fetch_engine": self.web_fetch_engine,
+            "auto_update": self.auto_update,
         });
         // Keys this version does not know stay as they are: LynShen Desktop's
         // own settings, and a newer CLI's when an older one saves.
@@ -649,6 +654,7 @@ impl Config {
         write_atomically(
             &self.path,
             &format!("{}\n", serde_json::to_string_pretty(&value)?),
+            None,
         )
     }
 
@@ -741,7 +747,21 @@ impl AuthStore {
         }
 
         let content = fs::read_to_string(&path)?;
-        let mut value = serde_json::from_str::<Value>(&content).unwrap_or_else(|_| json!({}));
+        // A file that does not parse still holds credentials: refuse to load
+        // it rather than treat it as empty and overwrite it on the next save.
+        let mut value = if content.trim().is_empty() {
+            json!({})
+        } else {
+            serde_json::from_str::<Value>(&content).map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "{} is not valid JSON ({error}); fix or remove it",
+                        path.display()
+                    ),
+                )
+            })?
+        };
         let envelope_key = crate::secrets::reveal_auth(&mut value)?;
         let encryption_key = match envelope_key {
             Some(key) => Some(key),
@@ -887,6 +907,7 @@ impl AuthStore {
         write_atomically(
             &self.path,
             &format!("{}\n", serde_json::to_string_pretty(&value)?),
+            Some(0o600),
         )
     }
 }
@@ -894,8 +915,9 @@ impl AuthStore {
 /// Write `contents` to `path` atomically via a temp file in the same
 /// directory plus rename, so a crash or interrupt mid-write never leaves a
 /// truncated file behind. The temp name carries the pid so concurrent saves
-/// do not collide.
-fn write_atomically(path: &Path, contents: &str) -> io::Result<()> {
+/// do not collide. `mode` (Unix) is set on the temp file before any content
+/// is written, so a credentials file is never readable by others.
+fn write_atomically(path: &Path, contents: &str, mode: Option<u32>) -> io::Result<()> {
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -906,7 +928,22 @@ fn write_atomically(path: &Path, contents: &str) -> io::Result<()> {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let temp = path.with_file_name(format!(".{file_name}.{}.{n}.tmp", std::process::id()));
-    fs::write(&temp, contents)?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    if let Some(mode) = mode {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(mode);
+    }
+    #[cfg(not(unix))]
+    let _ = mode;
+    let written = options
+        .open(&temp)
+        .and_then(|mut file| io::Write::write_all(&mut file, contents.as_bytes()));
+    if let Err(error) = written {
+        let _ = fs::remove_file(&temp);
+        return Err(error);
+    }
     if let Err(error) = fs::rename(&temp, path) {
         let _ = fs::remove_file(&temp);
         return Err(error);
@@ -941,15 +978,19 @@ pub fn normalize_base_url(value: &str) -> String {
     migrate_lynshen_host(value.trim().trim_end_matches('/'))
 }
 
-/// The LynShen gateway moved from api.lynshen.cn to api.lynshen.net; configs
-/// saved with the old host follow it.
+/// Hosts the LynShen gateway no longer answers on. Neither domain is
+/// registered, so configs saved with them move to the live gateway.
+const RETIRED_LYNSHEN_HOSTS: [&str; 2] = ["https://api.lynshen.cn", "https://api.lynshen.net"];
+
 fn migrate_lynshen_host(url: &str) -> String {
-    match url.strip_prefix("https://api.lynshen.cn") {
-        Some(rest) if rest.is_empty() || rest.starts_with('/') => {
-            format!("https://api.lynshen.net{rest}")
+    for host in RETIRED_LYNSHEN_HOSTS {
+        if let Some(rest) = url.strip_prefix(host) {
+            if rest.is_empty() || rest.starts_with('/') {
+                return format!("https://api.lynshen.org{rest}");
+            }
         }
-        _ => url.to_string(),
     }
+    url.to_string()
 }
 
 fn read_string(value: &Value, key: &str, default: &str) -> String {
@@ -1881,14 +1922,6 @@ fn ensure_system_prompt_file() -> io::Result<()> {
     fs::write(path, format!("{DEFAULT_SYSTEM_PROMPT}\n"))
 }
 
-/// The LynShen gateway's API base from the saved config, read without
-/// rewriting the file (the default when there is none).
-pub(crate) fn saved_lynshen_api_url() -> String {
-    Config::load_existing()
-        .map(|config| config.lynshen_api_url)
-        .unwrap_or_else(|_| "https://api.lynshen.net".to_string())
-}
-
 pub(crate) fn lynshen_dir() -> io::Result<PathBuf> {
     let home = env::var_os("USERPROFILE")
         .or_else(|| env::var_os("HOME"))
@@ -2064,11 +2097,15 @@ mod tests {
     fn configs_on_the_old_lynshen_host_move_to_the_new_one() {
         assert_eq!(
             normalize_base_url("https://api.lynshen.cn/v1/"),
-            "https://api.lynshen.net/v1"
+            "https://api.lynshen.org/v1"
         );
         assert_eq!(
             normalize_base_url("https://api.lynshen.cn"),
-            "https://api.lynshen.net"
+            "https://api.lynshen.org"
+        );
+        assert_eq!(
+            normalize_base_url("https://api.lynshen.net/v1"),
+            "https://api.lynshen.org/v1"
         );
         assert_eq!(
             normalize_base_url("https://api.lynshen.cnx"),
@@ -2217,8 +2254,8 @@ mod tests {
                 },
             ],
             base_url: "https://api.openai.com/v1".to_string(),
-            lynshen_web_url: "https://api.lynshen.net".to_string(),
-            lynshen_api_url: "https://api.lynshen.net".to_string(),
+            lynshen_web_url: "https://api.lynshen.org".to_string(),
+            lynshen_api_url: "https://api.lynshen.org".to_string(),
             api_key_env: "OPENAI_API_KEY".to_string(),
             retry_attempts: DEFAULT_RETRY_ATTEMPTS,
             connect_timeout_seconds: DEFAULT_CONNECT_TIMEOUT_SECONDS,
@@ -2233,6 +2270,7 @@ mod tests {
             sandbox: crate::sandbox::SandboxPolicy::default_for_platform(),
             web_search_engine: crate::web::DEFAULT_SEARCH_ENGINE.to_string(),
             web_fetch_engine: crate::web::DEFAULT_FETCH_ENGINE.to_string(),
+            auto_update: true,
             lynshen_models: Vec::new(),
             lynshen_groups: BTreeMap::new(),
             context_window_overrides: BTreeMap::new(),
@@ -2643,8 +2681,8 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.json");
 
-        write_atomically(&path, "{\"a\":1}\n").unwrap();
-        write_atomically(&path, "{\"a\":2}\n").unwrap();
+        write_atomically(&path, "{\"a\":1}\n", None).unwrap();
+        write_atomically(&path, "{\"a\":2}\n", None).unwrap();
 
         assert_eq!(fs::read_to_string(&path).unwrap(), "{\"a\":2}\n");
         let entries = fs::read_dir(&dir)
@@ -2652,6 +2690,29 @@ mod tests {
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())
             .collect::<Vec<_>>();
         assert_eq!(entries, ["config.json".to_string()]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_atomically_creates_credentials_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "lynshen-atomic-mode-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("auth.json");
+        fs::write(&path, "{}\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        write_atomically(&path, "{\"a\":1}\n", Some(0o600)).unwrap();
+
+        let mode = fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
         let _ = fs::remove_dir_all(&dir);
     }
 
