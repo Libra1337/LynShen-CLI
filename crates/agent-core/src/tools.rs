@@ -5082,7 +5082,6 @@ mod tests {
         unsafe { libc::kill(pid, 0) != 0 }
     }
 
-    #[cfg(unix)]
     #[test]
     fn changed_line_range_handles_edits_inside_multibyte_text() {
         // The common prefix ends inside "着" / "解": the old slice panicked and
@@ -5095,6 +5094,7 @@ mod tests {
         assert_eq!(changed_line_range(original, updated), Some((1, 1)));
     }
 
+    #[cfg(unix)]
     #[test]
     fn interrupted_bash_kills_process_group_descendants() {
         let dir = test_dir("bash-interrupt-group");
