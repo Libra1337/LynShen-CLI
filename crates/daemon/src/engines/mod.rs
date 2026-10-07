@@ -1188,30 +1188,75 @@ pub fn resolve(name: &str, env_override: &str, extra: &[PathBuf]) -> PathBuf {
 }
 
 /// `name` on PATH, then in the usual install directories and `extra`, else
-/// the bare name.
+/// the bare name. On Windows a bare name resolves through PATHEXT, as the
+/// shell does: npm installs Codex and Claude Code as `codex.cmd` /
+/// `claude.cmd` beside an extensionless shell script that cannot be started.
 pub fn find_program(name: &str, extra: &[PathBuf]) -> PathBuf {
-    let exe = if cfg!(windows) {
-        format!("{name}.exe")
-    } else {
-        name.to_string()
-    };
+    let names = program_names(name);
     let path_dirs = std::env::var_os("PATH")
         .map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
         .unwrap_or_default();
     let home = home();
-    let known = [
+    let mut known = vec![
         PathBuf::from("/opt/homebrew/bin"),
         PathBuf::from("/usr/local/bin"),
-        home.join(".cargo/bin"),
-        home.join(".local/bin"),
+        home.join(".cargo").join("bin"),
+        home.join(".local").join("bin"),
     ];
+    // npm's global bin on Windows, often missing from an app's PATH.
+    if let Some(appdata) = std::env::var_os("APPDATA").filter(|_| cfg!(windows)) {
+        known.push(PathBuf::from(appdata).join("npm"));
+    }
+    let extra = extra.iter().flat_map(|path| {
+        let base = path.clone();
+        names_for(&base)
+    });
     path_dirs
         .iter()
         .chain(known.iter())
-        .map(|dir| dir.join(&exe))
-        .chain(extra.iter().cloned())
+        .flat_map(|dir| names.iter().map(move |name| dir.join(name)))
+        .chain(extra)
         .find(|candidate| candidate.is_file())
-        .unwrap_or_else(|| PathBuf::from(exe))
+        .unwrap_or_else(|| PathBuf::from(&names[0]))
+}
+
+/// The file names `name` may have here: itself on Unix; on Windows itself
+/// when it has an extension, else `name` + each PATHEXT extension.
+fn program_names(name: &str) -> Vec<String> {
+    if !cfg!(windows) || Path::new(name).extension().is_some() {
+        return vec![name.to_string()];
+    }
+    windows_extensions()
+        .iter()
+        .map(|ext| format!("{name}{ext}"))
+        .collect()
+}
+
+/// `program_names` for a full path (an install location to look in).
+fn names_for(path: &Path) -> Vec<PathBuf> {
+    let Some(file) = path.file_name().and_then(|f| f.to_str()) else {
+        return vec![path.to_path_buf()];
+    };
+    program_names(file)
+        .into_iter()
+        .map(|name| path.with_file_name(name))
+        .collect()
+}
+
+/// PATHEXT's executable extensions, lower-cased, `.exe` first.
+fn windows_extensions() -> Vec<String> {
+    let raw = std::env::var("PATHEXT").unwrap_or_default();
+    let mut exts: Vec<String> = raw
+        .split(';')
+        .map(|ext| ext.trim().to_ascii_lowercase())
+        .filter(|ext| matches!(ext.as_str(), ".exe" | ".cmd" | ".bat" | ".com"))
+        .collect();
+    if exts.is_empty() {
+        exts = vec![".exe".into(), ".cmd".into(), ".bat".into()];
+    }
+    exts.sort_by_key(|ext| ext != ".exe");
+    exts.dedup();
+    exts
 }
 
 /// The user's home where Claude Code and Codex keep their sessions. On
@@ -1297,6 +1342,18 @@ mod tests {
             .events(false)
             .iter()
             .any(|e| e["type"] == "approval_request"));
+    }
+
+    #[test]
+    fn program_names_follow_pathext_on_windows_only() {
+        let names = program_names("codex");
+        if cfg!(windows) {
+            assert_eq!(names[0], "codex.exe");
+            assert!(names.iter().any(|name| name == "codex.cmd"));
+            assert_eq!(program_names("tool.cmd"), ["tool.cmd"]);
+        } else {
+            assert_eq!(names, ["codex"]);
+        }
     }
 
     #[test]
