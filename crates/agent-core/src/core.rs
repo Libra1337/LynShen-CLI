@@ -6,8 +6,8 @@ use crate::{
         LynShenTokens, ModelConfig,
     },
     event::{
-        AgentEvent, CommandView, GoalView, LoginProviderView, ModelOptionView, PlanItem,
-        SessionListItemView,
+        AgentEvent, CommandView, ContextBreakdown, GoalView, LoginProviderView, ModelOptionView,
+        PlanItem, SessionListItemView,
     },
     hooks::Hooks,
     llm::{
@@ -196,6 +196,10 @@ pub struct AgentCore {
     hooks: Hooks,
     /// Files read and shells started by this engine (see `tools::ToolState`).
     tool_state: crate::tools::ToolState,
+    /// What the last assembled request carried besides the conversation
+    /// (`messages` left 0): counted into auto-compaction and reported with
+    /// the context gauge.
+    context_overhead: Option<ContextBreakdown>,
     /// Tools and prompt text added by a host process (the daemon).
     host: Option<crate::host::HostExtensions>,
     /// Chat session (cwd under `~/.lynshen/chats/`): chat prompt, no project
@@ -271,6 +275,7 @@ impl AgentCore {
             omp_login_code_tx: None,
             tag_turns: false,
             turn_tag: None,
+            context_overhead: None,
             total_input_tokens: 0,
             total_cached_input_tokens: 0,
             total_output_tokens: 0,
@@ -1901,6 +1906,9 @@ impl AgentCore {
             fetch_engine: self.config.web_fetch_engine.clone(),
             signed_in,
         }));
+        let skills_tokens =
+            crate::tokens::count_text(&self.config.model, &crate::prompt::skills_block(&skills))
+                .tokens as u64;
         let prompt_tools =
             crate::tools::prompt_tool_names(&self.config.edit_tools, true, signed_in);
         let mut system_prompt = build_system_prompt(
@@ -1943,6 +1951,8 @@ impl AgentCore {
         if let Ok(groups) = crate::config::read_lynshen_groups_at(self.config.path()) {
             self.config.lynshen_groups = groups;
         }
+        let prompt_tokens =
+            crate::tokens::count_text(&self.config.model, &system_prompt).tokens as u64;
         let (goal_tool_tx, goal_tool_rx) = mpsc::channel();
         self.goal_tool_receiver = Some(goal_tool_rx);
         let (approval_tx, approval_rx) = mpsc::channel();
@@ -1985,6 +1995,15 @@ impl AgentCore {
             return events;
         };
 
+        let (system_tools, mcp_tools) = client.tool_definition_tokens();
+        let overhead = ContextBreakdown {
+            system_prompt: prompt_tokens.saturating_sub(skills_tokens),
+            skills: skills_tokens,
+            system_tools,
+            mcp_tools,
+            messages: 0,
+        };
+        self.context_overhead = Some(overhead);
         let request_items = self.session.request_context_items();
         let (context_tokens, context_tokenizer) =
             self.session.context_token_usage(&self.config.model);
@@ -1993,7 +2012,9 @@ impl AgentCore {
             self.config.compaction_threshold_percent,
         );
         let forced = std::mem::take(&mut self.force_compaction);
-        let compaction = if forced || should_auto_compact(context_tokens, model_context_budget) {
+        // The request is the conversation plus the prompt and tool definitions.
+        let request_tokens = context_tokens + overhead_tokens(&overhead) as usize;
+        let compaction = if forced || should_auto_compact(request_tokens, model_context_budget) {
             self.session
                 .plan_compaction(COMPACTION_KEEP_RECENT_TOKENS, &self.config.model)
         } else {
@@ -2004,6 +2025,10 @@ impl AgentCore {
             tokens: context_tokens as u64,
             tokenizer: context_tokenizer,
             cost: self.total_cost,
+            breakdown: Some(ContextBreakdown {
+                messages: context_tokens as u64,
+                ..overhead
+            }),
         });
         let compaction_client = if compaction.is_some() {
             match self.compaction_client() {
@@ -3025,6 +3050,10 @@ impl AgentCore {
             tokens: tokens as u64,
             tokenizer,
             cost: self.total_cost,
+            breakdown: self.context_overhead.map(|overhead| ContextBreakdown {
+                messages: tokens as u64,
+                ..overhead
+            }),
         }
     }
 
@@ -4150,6 +4179,11 @@ fn target_context_budget(model_config: &ModelConfig, threshold_percent: u64) -> 
     (model_config.context_window as usize).saturating_mul(percent) / 100
 }
 
+/// Tokens a request carries besides the conversation.
+fn overhead_tokens(overhead: &ContextBreakdown) -> u64 {
+    overhead.system_prompt + overhead.skills + overhead.system_tools + overhead.mcp_tools
+}
+
 /// A budget of 0 means the window is unknown: never compact on a guess. An
 /// over-long request is then caught by the upstream's rejection instead
 /// (`is_context_overflow`).
@@ -4814,6 +4848,25 @@ mod model_config_tests {
     fn unknown_window_never_triggers_compaction() {
         assert!(!should_auto_compact(1_000_000, 0));
         assert!(should_auto_compact(150_001, 150_000));
+    }
+
+    #[test]
+    fn the_prompt_and_tools_count_toward_compaction() {
+        let overhead = ContextBreakdown {
+            system_prompt: 4_000,
+            skills: 1_000,
+            system_tools: 9_000,
+            mcp_tools: 6_000,
+            messages: 0,
+        };
+        assert_eq!(overhead_tokens(&overhead), 20_000);
+        // 140k of conversation alone stays under a 150k budget; with the
+        // prompt and tools the request is over it.
+        assert!(!should_auto_compact(140_000, 150_000));
+        assert!(should_auto_compact(
+            140_000 + overhead_tokens(&overhead) as usize,
+            150_000
+        ));
     }
 
     #[test]

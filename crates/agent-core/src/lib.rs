@@ -35,8 +35,8 @@ pub use config::{
 };
 pub use core::{title_completion, AgentCore};
 pub use event::{
-    AgentEvent, CommandView, GoalView, LoginProviderView, McpServerView, McpToolView,
-    ModelOptionView, PlanItem, SessionListItemView, TranscriptItem, TreeNodeView,
+    AgentEvent, CommandView, ContextBreakdown, GoalView, LoginProviderView, McpServerView,
+    McpToolView, ModelOptionView, PlanItem, SessionListItemView, TranscriptItem, TreeNodeView,
 };
 pub use hunks::HunkView;
 pub use session::SessionSummary;

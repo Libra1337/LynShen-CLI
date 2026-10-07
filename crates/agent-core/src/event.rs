@@ -1,5 +1,20 @@
 use crate::hunks::HunkView;
 
+/// Token counts of a request's parts (estimated with the local tokenizer).
+/// `tokens` of `ContextUsage` is `messages`; the rest is fixed per turn.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ContextBreakdown {
+    /// The base prompt with its runtime context and project instructions.
+    pub system_prompt: u64,
+    /// The `<available_skills>` list.
+    pub skills: u64,
+    /// Built-in tool definitions (and host / subagent / goal tools).
+    pub system_tools: u64,
+    /// MCP servers' tool definitions.
+    pub mcp_tools: u64,
+    pub messages: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct TreeNodeView {
     pub id: String,
@@ -135,6 +150,9 @@ pub enum AgentEvent {
         tokenizer: String,
         /// Cumulative USD cost so far this session. 0 when prices are unconfigured.
         cost: f64,
+        /// What the next request carries besides the conversation, by kind.
+        /// None until the first turn has assembled the prompt and tools.
+        breakdown: Option<ContextBreakdown>,
     },
     ThinkingStart,
     ReasoningDelta(String),

@@ -347,7 +347,16 @@ impl TuiState {
                     self.mark_history_dirty();
                     true
                 }
-                AgentEvent::ContextUsage { tokens, cost, .. } => {
+                AgentEvent::ContextUsage {
+                    tokens,
+                    cost,
+                    breakdown,
+                    ..
+                } => {
+                    // The whole request: the prompt and tools count too.
+                    let tokens = breakdown.map_or(tokens, |b| {
+                        b.system_prompt + b.skills + b.system_tools + b.mcp_tools + b.messages
+                    });
                     let changed =
                         self.current_context_tokens != tokens || self.current_cost != cost;
                     self.current_context_tokens = tokens;

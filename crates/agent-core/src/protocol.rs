@@ -221,8 +221,19 @@ pub fn event_json(event: AgentEvent) -> Value {
             tokens,
             tokenizer,
             cost,
+            breakdown,
         } => {
-            json!({ "type": "context_usage", "tokens": tokens, "tokenizer": tokenizer, "cost": cost })
+            let mut event = json!({ "type": "context_usage", "tokens": tokens, "tokenizer": tokenizer, "cost": cost });
+            if let Some(b) = breakdown {
+                event["breakdown"] = json!({
+                    "system_prompt": b.system_prompt,
+                    "skills": b.skills,
+                    "system_tools": b.system_tools,
+                    "mcp_tools": b.mcp_tools,
+                    "messages": b.messages,
+                });
+            }
+            event
         }
         AgentEvent::ThinkingStart => json!({ "type": "thinking_start" }),
         AgentEvent::ReasoningDelta(delta) => {
@@ -445,6 +456,33 @@ pub fn event_json(event: AgentEvent) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_usage_carries_the_breakdown_when_known() {
+        let plain = event_json(AgentEvent::ContextUsage {
+            tokens: 10,
+            tokenizer: "gpt-5".to_string(),
+            cost: 0.0,
+            breakdown: None,
+        });
+        assert!(plain.get("breakdown").is_none());
+        let full = event_json(AgentEvent::ContextUsage {
+            tokens: 10,
+            tokenizer: "gpt-5".to_string(),
+            cost: 0.0,
+            breakdown: Some(crate::event::ContextBreakdown {
+                system_prompt: 1,
+                skills: 2,
+                system_tools: 3,
+                mcp_tools: 4,
+                messages: 10,
+            }),
+        });
+        assert_eq!(
+            full["breakdown"],
+            json!({ "system_prompt": 1, "skills": 2, "system_tools": 3, "mcp_tools": 4, "messages": 10 })
+        );
+    }
 
     #[test]
     fn approve_op_round_trips_decision_always_and_hunks() {

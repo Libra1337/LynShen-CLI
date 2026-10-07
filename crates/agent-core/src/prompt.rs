@@ -97,30 +97,39 @@ pub fn build_system_prompt(base: &str, context: &PromptContext) -> String {
         prompt.push_str("</project_context>");
     }
 
-    if !context.skills.is_empty() {
-        prompt.push_str(
-            "\n\nThe following skills provide specialized instructions for specific tasks.\n",
-        );
-        prompt.push_str("Read the full skill file when the task matches its description.\n");
-        prompt.push_str("When a skill file references a relative path, resolve it against the skill directory.\n\n");
-        prompt.push_str("<available_skills>\n");
-        for skill in &context.skills {
-            prompt.push_str("  <skill>\n");
-            prompt.push_str(&format!("    <name>{}</name>\n", escape_xml(&skill.name)));
-            prompt.push_str(&format!(
-                "    <description>{}</description>\n",
-                escape_xml(&skill.description)
-            ));
-            prompt.push_str(&format!(
-                "    <location>{}</location>\n",
-                escape_xml(&skill.path.display().to_string())
-            ));
-            prompt.push_str("  </skill>\n");
-        }
-        prompt.push_str("</available_skills>");
-    }
-
+    prompt.push_str(&skills_block(&context.skills));
     prompt
+}
+
+/// The part of the system prompt that lists the skills ("" without any).
+pub fn skills_block(skills: &[SkillPromptItem]) -> String {
+    let mut block = String::new();
+    if skills.is_empty() {
+        return block;
+    }
+    block.push_str(
+        "\n\nThe following skills provide specialized instructions for specific tasks.\n",
+    );
+    block.push_str("Read the full skill file when the task matches its description.\n");
+    block.push_str(
+        "When a skill file references a relative path, resolve it against the skill directory.\n\n",
+    );
+    block.push_str("<available_skills>\n");
+    for skill in skills {
+        block.push_str("  <skill>\n");
+        block.push_str(&format!("    <name>{}</name>\n", escape_xml(&skill.name)));
+        block.push_str(&format!(
+            "    <description>{}</description>\n",
+            escape_xml(&skill.description)
+        ));
+        block.push_str(&format!(
+            "    <location>{}</location>\n",
+            escape_xml(&skill.path.display().to_string())
+        ));
+        block.push_str("  </skill>\n");
+    }
+    block.push_str("</available_skills>");
+    block
 }
 
 pub fn discover_skills(

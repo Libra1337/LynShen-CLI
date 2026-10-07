@@ -929,6 +929,25 @@ impl OpenAiClient {
         )
     }
 
+    /// Estimated tokens of the tool definitions a request carries: the
+    /// built-in (and host / subagent / goal) tools and the MCP servers' tools.
+    pub fn tool_definition_tokens(&self) -> (u64, u64) {
+        let (mut system, mut mcp) = (0u64, 0u64);
+        for definition in self.tool_definitions() {
+            let tokens = crate::tokens::count_value(&self.model, &definition).tokens as u64;
+            let name = definition
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if name.starts_with(crate::mcp::MCP_TOOL_PREFIX) {
+                mcp += tokens;
+            } else {
+                system += tokens;
+            }
+        }
+        (system, mcp)
+    }
+
     fn tool_definitions(&self) -> Vec<Value> {
         if let Some(host) = self.host.as_ref().filter(|host| host.exclusive) {
             return host.tools.clone();

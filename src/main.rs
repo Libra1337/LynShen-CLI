@@ -718,6 +718,7 @@ fn record_headless_event(event: &AgentEvent, stats: &mut HeadlessStats) {
             tokens,
             tokenizer,
             cost,
+            ..
         } => {
             stats.context_tokens = *tokens;
             stats.context_tokenizer = Some(tokenizer.clone());

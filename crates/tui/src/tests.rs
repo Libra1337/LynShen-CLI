@@ -855,6 +855,7 @@ fn compaction_events_set_progress_notices_and_context_meter() {
         tokens: 900_000,
         tokenizer: "gpt-5".to_string(),
         cost: 0.0,
+        breakdown: None,
     }]);
     assert_eq!(app.state.current_context_tokens, 900_000);
 
@@ -875,6 +876,7 @@ fn compaction_events_set_progress_notices_and_context_meter() {
             tokens: 25_000,
             tokenizer: "gpt-5".to_string(),
             cost: 0.0,
+            breakdown: None,
         },
     ]);
     assert!(app
