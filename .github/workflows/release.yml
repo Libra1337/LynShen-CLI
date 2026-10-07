@@ -143,6 +143,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.release_meta.outputs.tag }}
+          # Every release says what changed (Chinese 更新公告).
+          body_path: release-notes/${{ steps.release_meta.outputs.version }}.md
           files: |
             lynshen-x86_64-unknown-linux-gnu
             lynshen-x86_64-pc-windows-msvc.exe
