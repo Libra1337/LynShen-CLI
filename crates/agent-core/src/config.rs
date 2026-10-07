@@ -109,7 +109,8 @@ impl ApprovalMode {
         if is_shell_tool(tool_name) {
             return *self != Self::FullAccess;
         }
-        if is_edit_tool(tool_name) {
+        // generate_image writes files into the workspace like `write`.
+        if is_edit_tool(tool_name) || tool_name == crate::images::TOOL_NAME {
             return *self == Self::Manual;
         }
         // Network egress can exfiltrate local context, so the strictest mode
@@ -231,6 +232,9 @@ pub struct Config {
     /// Model that names conversations (`lynshen daemon`). Empty: the main
     /// `model`.
     pub title_model: String,
+    /// Model behind `generate_image`. Empty: the first of `models` whose
+    /// name contains "image" (see `images::resolve_model`).
+    pub image_model: String,
     pub models: Vec<ModelConfig>,
     /// Models the main agent may pick for `spawn_agent` (`subagent_models`),
     /// each with a note on when to use it. Empty: subagents run on the main
@@ -424,6 +428,7 @@ impl Config {
                 safety_model: "gpt-5.5".to_string(),
                 safety_reasoning_effort: DEFAULT_COMPACT_REASONING_EFFORT.to_string(),
                 title_model: String::new(),
+                image_model: String::new(),
                 models: models_for_provider("lynshen"),
                 subagent_models: Vec::new(),
                 lynshen_models: Vec::new(),
@@ -534,6 +539,7 @@ impl Config {
             safety_model,
             safety_reasoning_effort,
             title_model: read_string(&value, "title_model", ""),
+            image_model: read_string(&value, "image_model", ""),
             subagent_models: read_subagent_models(&value),
             models,
             lynshen_models: value
@@ -613,6 +619,7 @@ impl Config {
             "safety_model": self.safety_model,
             "safety_reasoning_effort": self.safety_reasoning_effort,
             "title_model": self.title_model,
+            "image_model": self.image_model,
             "models": self.models.iter().map(model_config_value).collect::<Vec<_>>(),
             "subagent_models": self.subagent_models.iter().map(|model| json!({
                 "name": model.name,
@@ -1704,6 +1711,14 @@ pub(crate) fn read_lynshen_groups_at(path: &Path) -> io::Result<BTreeMap<String,
     Ok(read_lynshen_groups(&value))
 }
 
+/// `image_model` as config.json has it now (Desktop sets it while engines run).
+pub(crate) fn read_image_model_at(path: &Path) -> io::Result<String> {
+    let content = fs::read_to_string(path)?;
+    let value = serde_json::from_str::<Value>(&content)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    Ok(read_string(&value, "image_model", ""))
+}
+
 pub(crate) fn read_context_window_overrides_at(path: &Path) -> io::Result<BTreeMap<String, u64>> {
     let content = fs::read_to_string(path)?;
     let value = serde_json::from_str::<Value>(&content)
@@ -2238,6 +2253,7 @@ mod tests {
             safety_model: "compact-model".to_string(),
             safety_reasoning_effort: "low".to_string(),
             title_model: String::new(),
+            image_model: String::new(),
             subagent_models: Vec::new(),
             models: vec![
                 ModelConfig {
@@ -2330,6 +2346,7 @@ mod tests {
             "str_replace",
             "hashline_edit",
             "apply_patch",
+            "generate_image",
         ];
         let network_tools = ["web_fetch", "web_search"];
         let free_tools = ["read", "ls", "ripgrep", "outline", "spawn_agent"];
@@ -2456,6 +2473,29 @@ mod tests {
             config.lynshen_groups,
             BTreeMap::from([("claude-opus-5-5".to_string(), "g1".to_string())])
         );
+    }
+
+    #[test]
+    fn image_model_defaults_empty_and_survives_a_save() {
+        let dir = std::env::temp_dir().join(format!("lynshen-image-model-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        let config = Config::from_value("{}", path.clone()).unwrap();
+        assert_eq!(config.image_model, "");
+        config.save().unwrap();
+        let saved: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["image_model"], "");
+
+        fs::write(&path, r#"{"image_model":" gpt-image-2 "}"#).unwrap();
+        assert_eq!(read_image_model_at(&path).unwrap(), " gpt-image-2 ");
+        let mut config =
+            Config::from_value(&fs::read_to_string(&path).unwrap(), path.clone()).unwrap();
+        assert_eq!(config.image_model, " gpt-image-2 ");
+        config.image_model = "gpt-image-1.5".to_string();
+        config.save().unwrap();
+        let saved: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["image_model"], "gpt-image-1.5");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
