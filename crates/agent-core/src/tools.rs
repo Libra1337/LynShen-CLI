@@ -2,7 +2,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     env, fs,
     fs::File,
     io::{self, Write},
@@ -653,6 +653,9 @@ fn str_replace_file(args: &Value, cwd: &Path, state: &ToolState) -> Value {
 #[derive(Clone)]
 struct HashlineAnchor {
     line: usize,
+    /// Empty when the reference named only a line ("329"): the line's
+    /// current hash is taken, which is safe because an edit runs only on a
+    /// file read and unchanged since (see `unread_or_stale_error`).
     hash: String,
 }
 
@@ -875,9 +878,15 @@ fn parse_hashline_anchor(ref_text: &str) -> Result<HashlineAnchor, String> {
         .trim_start_matches(|ch: char| ch.is_whitespace() || ch == '>' || ch == '+' || ch == '-')
         .trim_end();
     let Some(hash_pos) = core.find('#') else {
-        return Err(format!(
-            "[E_BAD_REF] Invalid line reference {ref_text:?}. Expected LINE#HASH."
-        ));
+        // A bare line number: models often drop the hash they copied.
+        let line = core.split(':').next().unwrap_or_default().trim();
+        return match line.parse::<usize>() {
+            Ok(0) => Err(format!("[E_BAD_REF] Line number must be >= 1 in {ref_text:?}.")),
+            Ok(line) => Ok(HashlineAnchor { line, hash: String::new() }),
+            Err(_) => Err(format!(
+                "[E_BAD_REF] Invalid line reference {ref_text:?}. Expected LINE#HASH, e.g. \"12#AB\" copied from read()."
+            )),
+        };
     };
     let line = core[..hash_pos].trim().parse::<usize>().map_err(|_| {
         format!("[E_BAD_REF] Invalid line reference {ref_text:?}. Expected numeric LINE#HASH.")
@@ -947,7 +956,7 @@ fn validate_hashline_anchors(edits: &[HashlineEdit], line_index: &LineIndex) -> 
                 ));
             }
             let actual = compute_line_hash(anchor.line, &line_index.lines[anchor.line - 1]);
-            if actual != anchor.hash {
+            if !anchor.hash.is_empty() && actual != anchor.hash {
                 mismatches.push((anchor.line, anchor.hash.clone(), actual));
             }
         }
@@ -1522,7 +1531,8 @@ fn poll_or_write_session(
                 .lock()
                 .map_err(|_| "shell session lock is poisoned".to_string())?;
             let Some(session) = sessions.get_mut(&session_id) else {
-                return Err("shell session not found".to_string());
+                drop(sessions);
+                return finished_or_unknown(session_id, !text.is_empty());
             };
             if session.started.elapsed().unwrap_or_default() >= session.timeout {
                 kill_child(&mut session.child);
@@ -1543,7 +1553,10 @@ fn poll_or_write_session(
                     &session.stdout_path,
                     &session.stderr_path,
                 );
-                return Ok(command_result_json(&session.command, Ok(result)));
+                return Ok(remember_finished(
+                    session_id,
+                    command_result_json(&session.command, Ok(result)),
+                ));
             }
             if !text.is_empty() && !wrote_stdin {
                 if let Some(stdin) = session.stdin.as_mut() {
@@ -1559,7 +1572,10 @@ fn poll_or_write_session(
                                 &session.stdout_path,
                                 &session.stderr_path,
                             );
-                            return Ok(command_result_json(&session.command, Ok(result)));
+                            return Ok(remember_finished(
+                                session_id,
+                                command_result_json(&session.command, Ok(result)),
+                            ));
                         }
                         return Err(error.to_string());
                     }
@@ -1573,7 +1589,8 @@ fn poll_or_write_session(
                 .lock()
                 .map_err(|_| "shell session lock is poisoned".to_string())?;
             let Some(session) = sessions.get(&session_id) else {
-                return Err("shell session not found".to_string());
+                drop(sessions);
+                return finished_or_unknown(session_id, !text.is_empty());
             };
             let (stdout, stdout_truncated) = read_output_file(&session.stdout_path);
             let (stderr, stderr_truncated) = read_output_file(&session.stderr_path);
@@ -1724,6 +1741,52 @@ struct ShellSession {
 
 static SHELL_SESSIONS: OnceLock<Mutex<HashMap<u64, ShellSession>>> = OnceLock::new();
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
+/// Final results of sessions that ended, so a later poll of the same id (a
+/// parallel call, or a model that polls once more) gets the result again
+/// instead of "session not found". Bounded: the oldest are dropped.
+static FINISHED_SESSIONS: OnceLock<Mutex<VecDeque<(u64, Value)>>> = OnceLock::new();
+const FINISHED_SESSIONS_KEPT: usize = 64;
+
+fn finished_sessions() -> &'static Mutex<VecDeque<(u64, Value)>> {
+    FINISHED_SESSIONS.get_or_init(|| Mutex::new(VecDeque::new()))
+}
+
+/// Records a session's final result; returns it unchanged.
+fn remember_finished(session_id: u64, result: Value) -> Value {
+    if let Ok(mut done) = finished_sessions().lock() {
+        done.retain(|(id, _)| *id != session_id);
+        done.push_back((session_id, result.clone()));
+        while done.len() > FINISHED_SESSIONS_KEPT {
+            done.pop_front();
+        }
+    }
+    result
+}
+
+/// A session that is no longer running: its final result again, marked as
+/// already reported, or a clear note when it is too old to be kept.
+fn finished_or_unknown(session_id: u64, wrote_input: bool) -> Result<Value, String> {
+    let kept = finished_sessions().lock().ok().and_then(|done| {
+        done.iter()
+            .find(|(id, _)| *id == session_id)
+            .map(|(_, v)| v.clone())
+    });
+    match kept {
+        Some(mut result) => {
+            result["session_id"] = json!(session_id);
+            result["running"] = json!(false);
+            result["note"] = json!(if wrote_input {
+                "This command had already finished; the input was not delivered. Its final result is repeated here."
+            } else {
+                "This command had already finished; its final result is repeated here."
+            });
+            Ok(result)
+        }
+        None => Err(format!(
+            "shell session {session_id} is not running (it finished earlier or never existed); start the command again with exec_command if needed"
+        )),
+    }
+}
 
 fn shell_sessions() -> &'static Mutex<HashMap<u64, ShellSession>> {
     SHELL_SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
@@ -3589,7 +3652,7 @@ pub(crate) fn ensure_in_workspace(cwd: &Path, resolved: &Path) -> Result<(), Str
         Ok(())
     } else {
         Err(format!(
-            "path escapes the workspace: {} resolves outside {}. File tools only operate on paths inside the workspace.",
+            "path escapes the workspace: {} resolves outside {}. File tools only operate on paths inside the workspace; write files you need to read back (screenshots, logs, generated output) under the workspace, or copy one in with bash first.",
             resolved.display(),
             workspace.display()
         ))
@@ -4919,6 +4982,104 @@ mod tests {
 
         let stdout = value["stdout"].as_str().unwrap();
         assert_eq!(stdout.matches("got:hello").count(), 1, "{stdout:?}");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn polling_a_finished_shell_session_repeats_its_result() {
+        let dir = test_dir("write-stdin-finished");
+        fs::create_dir_all(&dir).unwrap();
+        let result = run_tool(
+            "bash",
+            &json!({ "command": "sleep 0.3; echo done-once", "timeout": 10, "yield_time_ms": 1 })
+                .to_string(),
+            &dir,
+        );
+        let session_id = serde_json::from_str::<Value>(&result).unwrap()["session_id"]
+            .as_u64()
+            .unwrap();
+        let poll = |text: &str| {
+            let out = run_tool(
+                "write_stdin",
+                &json!({ "session_id": session_id, "text": text, "yield_time_ms": 2000 })
+                    .to_string(),
+                &dir,
+            );
+            serde_json::from_str::<Value>(&out).unwrap()
+        };
+        let first = poll("");
+        assert_eq!(first["exit_code"], 0, "{first}");
+        // The session is gone now; polling again (or writing to it) repeats the
+        // result instead of failing with "shell session not found".
+        for text in ["", "late input\n"] {
+            let again = poll(text);
+            assert!(again.get("error").is_none(), "{again}");
+            assert_eq!(again["exit_code"], 0, "{again}");
+            assert!(
+                again["stdout"].as_str().unwrap().contains("done-once"),
+                "{again}"
+            );
+            assert_eq!(again["running"], false);
+        }
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn hashline_edit_accepts_a_bare_line_number_on_a_fresh_read() {
+        let dir = test_dir("hashline-bare-line");
+        let path = dir.join("sample.txt");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(&path, "a\nb\nc\n").unwrap();
+        let state = ToolState::default();
+        let run = |args: Value| {
+            serde_json::from_str::<Value>(
+                &run_tool_with_events(
+                    "hashline_edit",
+                    &args.to_string(),
+                    &dir,
+                    &[],
+                    &state,
+                    |_| Ok(()),
+                )
+                .output,
+            )
+            .unwrap()
+        };
+        // Not read yet: still refused, so a bare number can never hit a
+        // line the model has not seen.
+        let refused = run(
+            json!({ "path": path, "edits": [{ "op": "replace", "pos": "2", "lines": ["B"] }] }),
+        );
+        assert!(
+            refused["error"]
+                .as_str()
+                .unwrap()
+                .contains("reading this file first"),
+            "{refused}"
+        );
+
+        let _ = run_tool_with_events(
+            "read",
+            &json!({ "path": path }).to_string(),
+            &dir,
+            &[],
+            &state,
+            |_| Ok(()),
+        );
+        let edited = run(
+            json!({ "path": path, "edits": [{ "op": "replace", "pos": "2", "lines": ["B"] }] }),
+        );
+        assert!(edited.get("error").is_none(), "{edited}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "a\nB\nc\n");
+
+        let bad = run(
+            json!({ "path": path, "edits": [{ "op": "replace", "pos": "two", "lines": ["x"] }] }),
+        );
+        assert!(
+            bad["error"].as_str().unwrap().contains("E_BAD_REF"),
+            "{bad}"
+        );
         let _ = fs::remove_dir_all(dir);
     }
 
