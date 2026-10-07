@@ -244,6 +244,10 @@ pub struct Config {
     /// model go only through that group (`X-LynShen-Group`). A model without
     /// an entry is routed automatically across every group the account has.
     pub lynshen_groups: BTreeMap<String, String>,
+    /// Monoize gateway Provider id per model name (`monoize_providers`):
+    /// requests for that model go to that Provider (`X-Monoize-Provider`).
+    /// A model without an entry follows the key's own bindings.
+    pub monoize_providers: BTreeMap<String, String>,
     /// Context windows the user set by hand (`context_window_overrides`),
     /// keyed by model name. Applied by `model_config`: fills in a window the
     /// gateway did not configure, or raises the advertised (smallest-account)
@@ -424,6 +428,7 @@ impl Config {
                 subagent_models: Vec::new(),
                 lynshen_models: Vec::new(),
                 lynshen_groups: BTreeMap::new(),
+                monoize_providers: BTreeMap::new(),
                 context_window_overrides: BTreeMap::new(),
                 base_url: "https://api.lynshen.org/v1".to_string(),
                 lynshen_web_url: "https://www.lynshen.org".to_string(),
@@ -475,7 +480,7 @@ impl Config {
 
     /// Parse `content` as config.json. Malformed JSON and invalid field values
     /// are hard errors; `load_or_create` offers to reset the file in that case.
-    fn from_value(content: &str, path: PathBuf) -> io::Result<Self> {
+    pub(crate) fn from_value(content: &str, path: PathBuf) -> io::Result<Self> {
         let value = serde_json::from_str::<Value>(content).map_err(|error| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -536,6 +541,7 @@ impl Config {
                 .map(|list| read_model_configs(&json!({ "models": list }), "lynshen"))
                 .unwrap_or_default(),
             lynshen_groups: read_lynshen_groups(&value),
+            monoize_providers: read_choice_map(&value, "monoize_providers"),
             context_window_overrides: read_context_window_overrides(&value),
             base_url: normalize_base_url(&read_string(&value, "base_url", &default_base_url)),
             provider,
@@ -614,6 +620,7 @@ impl Config {
             })).collect::<Vec<_>>(),
             "lynshen_models": self.lynshen_models.iter().map(model_config_value).collect::<Vec<_>>(),
             "lynshen_groups": self.lynshen_groups,
+            "monoize_providers": self.monoize_providers,
             "context_window_overrides": self.context_window_overrides,
             "base_url": normalize_base_url(&self.base_url),
             "lynshen_web_url": normalize_base_url(&self.lynshen_web_url),
@@ -1668,8 +1675,13 @@ fn read_context_window_overrides(value: &Value) -> BTreeMap<String, u64> {
 }
 
 fn read_lynshen_groups(value: &Value) -> BTreeMap<String, String> {
+    read_choice_map(value, "lynshen_groups")
+}
+
+/// A `{model: id}` object of config.json; blank or non-string ids are skipped.
+fn read_choice_map(value: &Value, key: &str) -> BTreeMap<String, String> {
     value
-        .get("lynshen_groups")
+        .get(key)
         .and_then(Value::as_object)
         .map(|groups| {
             groups
@@ -2273,6 +2285,7 @@ mod tests {
             auto_update: true,
             lynshen_models: Vec::new(),
             lynshen_groups: BTreeMap::new(),
+            monoize_providers: BTreeMap::new(),
             context_window_overrides: BTreeMap::new(),
             path: PathBuf::from("config.json"),
         };
@@ -2443,6 +2456,28 @@ mod tests {
             config.lynshen_groups,
             BTreeMap::from([("claude-opus-5-5".to_string(), "g1".to_string())])
         );
+    }
+
+    #[test]
+    fn monoize_providers_read_and_survive_a_save() {
+        let dir =
+            std::env::temp_dir().join(format!("lynshen-monoize-providers-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        fs::write(
+            &path,
+            r#"{"provider":"monoize","monoize_providers":{"deepseek-v4.1-flash":"p-2","x":" ","y":1}}"#,
+        )
+        .unwrap();
+        let config = Config::from_value(&fs::read_to_string(&path).unwrap(), path.clone()).unwrap();
+        assert_eq!(
+            config.monoize_providers,
+            BTreeMap::from([("deepseek-v4.1-flash".to_string(), "p-2".to_string())])
+        );
+        config.save().unwrap();
+        let saved: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["monoize_providers"]["deepseek-v4.1-flash"], "p-2");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

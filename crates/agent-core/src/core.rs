@@ -3920,6 +3920,7 @@ impl AgentCore {
                 self.config.models = disk.models;
                 self.config.lynshen_models = disk.lynshen_models;
                 self.config.lynshen_groups = disk.lynshen_groups;
+                self.config.monoize_providers = disk.monoize_providers;
             }
         }
     }
@@ -4441,18 +4442,25 @@ fn provider_api_key(config: &Config, auth: &AuthStore) -> Option<String> {
     auth.key_for(&config.provider).map(str::to_string)
 }
 
-/// The LynShen group chosen per model, as the gateway's routing header.
-/// Read from disk so a group picked in Desktop applies from the next turn.
+/// The gateway route chosen per model, as the gateway's routing header: the
+/// LynShen group, or the Monoize Provider. Read from disk so a choice made in
+/// Desktop applies from the next turn.
 fn model_headers(config: &Config) -> HashMap<String, Vec<(String, String)>> {
-    if config.provider != "lynshen" {
-        return HashMap::new();
+    match Config::load_or_create() {
+        Ok(disk) if disk.provider == config.provider => route_headers(&disk),
+        _ => route_headers(config),
     }
-    let groups = Config::load_or_create()
-        .map(|disk| disk.lynshen_groups)
-        .unwrap_or_else(|_| config.lynshen_groups.clone());
-    groups
-        .into_iter()
-        .map(|(model, group)| (model, vec![("X-LynShen-Group".to_string(), group)]))
+}
+
+fn route_headers(config: &Config) -> HashMap<String, Vec<(String, String)>> {
+    let (header, choices) = match config.provider.as_str() {
+        "lynshen" => ("X-LynShen-Group", &config.lynshen_groups),
+        "monoize" => ("X-Monoize-Provider", &config.monoize_providers),
+        _ => return HashMap::new(),
+    };
+    choices
+        .iter()
+        .map(|(model, choice)| (model.clone(), vec![(header.to_string(), choice.clone())]))
         .collect()
 }
 
@@ -4705,6 +4713,29 @@ mod model_config_tests {
             display_name: None,
             group_windows: Default::default(),
         }
+    }
+
+    #[test]
+    fn route_headers_name_the_choice_of_the_active_gateway() {
+        let mut config = Config::from_value("{}", std::path::PathBuf::from("config.json")).unwrap();
+        config
+            .lynshen_groups
+            .insert("m".to_string(), "g1".to_string());
+        config
+            .monoize_providers
+            .insert("m".to_string(), "p-2".to_string());
+        config.provider = "monoize".to_string();
+        assert_eq!(
+            route_headers(&config).get("m"),
+            Some(&vec![("X-Monoize-Provider".to_string(), "p-2".to_string())])
+        );
+        config.provider = "lynshen".to_string();
+        assert_eq!(
+            route_headers(&config).get("m"),
+            Some(&vec![("X-LynShen-Group".to_string(), "g1".to_string())])
+        );
+        config.provider = "openai".to_string();
+        assert!(route_headers(&config).is_empty());
     }
 
     #[test]
