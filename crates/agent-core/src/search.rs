@@ -300,7 +300,12 @@ mod tests {
     fn prints_like_rg_and_skips_hidden_ignored_and_binary_files() {
         let dir = tree("rg-like");
         let out = search("needle", &dir, &options());
-        let path = |rel: &str| dir.join(rel).display().to_string();
+        let path = |rel: &str| {
+            rel.split('/')
+                .fold(dir.clone(), |path, part| path.join(part))
+                .display()
+                .to_string()
+        };
         assert_eq!(out.exit_code, 0);
         assert_eq!(
             out.stdout,
