@@ -1,6 +1,6 @@
 {
   "name": "@lynshen/cli-darwin-x64",
-  "version": "0.4.15",
+  "version": "0.4.16",
   "description": "LynShen native CLI for macOS x64",
   "license": "Apache-2.0",
   "publishConfig": {
