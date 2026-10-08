@@ -1,5 +1,5 @@
-//! The skills marketplace for the desktop: the LynShen marketplace and
-//! github.com/anthropics/skills in one catalog, installed into the personal
+//! The skills marketplace for the desktop: github.com/anthropics/skills and
+//! community skill repositories in one catalog, installed into the personal
 //! skills directory of the session's engine.
 
 use crate::engines;
@@ -37,47 +37,80 @@ fn install_dir(backend: &str) -> Result<PathBuf, String> {
     Ok(home.join(".claude").join("skills"))
 }
 
-/// A LynShen marketplace failure is only a warning: the Anthropic catalog is
-/// bundled and stays installable.
+/// The community repositories, fetched at most once an hour: listing one
+/// reads every SKILL.md it has.
+fn community_sources() -> Vec<(String, Result<skills::SkillSource, String>)> {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    type Cached = (Instant, Result<skills::SkillSource, String>);
+    static CACHE: Mutex<Vec<(String, Cached)>> = Mutex::new(Vec::new());
+    const FRESH: Duration = Duration::from_secs(3600);
+    skills::COMMUNITY_SKILL_SOURCES
+        .iter()
+        .map(|(name, repository)| {
+            let cached = CACHE.lock().ok().and_then(|cache| {
+                cache
+                    .iter()
+                    .find(|(repo, (at, result))| {
+                        repo == repository && (result.is_ok() && at.elapsed() < FRESH)
+                    })
+                    .map(|(_, (_, result))| result.clone())
+            });
+            let result = cached.unwrap_or_else(|| {
+                let result = skills::fetch_github_source(name, repository);
+                if let Ok(mut cache) = CACHE.lock() {
+                    cache.retain(|(repo, _)| repo != repository);
+                    cache.push((repository.to_string(), (Instant::now(), result.clone())));
+                }
+                result
+            });
+            (name.to_string(), result)
+        })
+        .collect()
+}
+
+/// A catalog entry's `source`: `anthropic`, or a community repository's
+/// `owner/repo`.
+fn source_key(repository: &str) -> String {
+    repository
+        .trim_start_matches("https://github.com/")
+        .to_string()
+}
+
+/// Anthropic's catalog is bundled; a community repository that cannot be read
+/// is only a warning.
 fn catalog(dir: PathBuf) -> Result<Value, String> {
     let mut entries = Vec::new();
     let mut warnings = Vec::new();
-    match skills::fetch_lynshen_marketplace() {
-        Ok(market) => entries.extend(market.skills.iter().map(|skill| {
+    let mut add = |source: &skills::SkillSource, key: &str| {
+        entries.extend(source.skills.iter().map(|skill| {
             json!({
                 "id": skill.id,
                 "name": skill.name,
                 "description": skill.description,
                 "tags": skill.tags,
-                "source": "lynshen",
-                "isDefault": market.default_skill_ids.contains(&skill.id),
+                "source": key,
+                "sourceName": source.name,
+                "isDefault": false,
                 "installed": skills::skill_installed(&dir, &skill.id),
-                "license": "",
-                "redistributable": true,
-                "homepage": "",
+                "license": skill.license,
+                "redistributable": skill.redistributable,
+                "homepage": source.homepage(&skill.id),
             })
-        })),
-        Err(error) => warnings.push(format!("LynShen marketplace: {error}")),
+        }))
+    };
+    add(&skills::anthropic_source()?, "anthropic");
+    for (name, result) in community_sources() {
+        match result {
+            Ok(source) => add(&source, &source_key(&source.repository)),
+            Err(error) => warnings.push(format!("{name}: {error}")),
+        }
     }
-    let anthropic = skills::anthropic_source()?;
-    entries.extend(anthropic.skills.iter().map(|skill| {
-        json!({
-            "id": skill.id,
-            "name": skill.name,
-            "description": skill.description,
-            "tags": skill.tags,
-            "source": "anthropic",
-            "isDefault": false,
-            "installed": skills::skill_installed(&dir, &skill.id),
-            "license": skill.license,
-            "redistributable": skill.redistributable,
-            "homepage": anthropic.homepage(&skill.id),
-        })
-    }));
     let key = |entry: &Value| {
         (
-            entry["source"].as_str().unwrap_or_default().to_string(),
-            entry["name"].as_str().unwrap_or_default().to_string(),
+            entry["source"] != "anthropic",
+            entry["sourceName"].as_str().unwrap_or_default().to_string(),
+            entry["name"].as_str().unwrap_or_default().to_lowercase(),
         )
     };
     entries.sort_by_key(key);
@@ -93,32 +126,24 @@ fn catalog(dir: PathBuf) -> Result<Value, String> {
 /// client sent beyond its source and id. Anthropic's source-available skills
 /// are listed but not installed, as in the TUI's `/skills`.
 fn install(dir: PathBuf, source: &str, id: &str) -> Result<PathBuf, String> {
-    match source {
-        "anthropic" => {
-            let anthropic = skills::anthropic_source()?;
-            let skill = anthropic
-                .skills
-                .iter()
-                .find(|skill| skill.id == id)
-                .ok_or_else(|| format!("Anthropic skill not found: {id}"))?;
-            if !skill.redistributable {
-                return Err(format!(
-                    "skill {id} is not offered: {}; not redistributed by LynShen",
-                    skill.license
-                ));
-            }
-            skills::install_source_skill(&dir, &anthropic, skill)
-        }
-        "lynshen" => {
-            let market = skills::fetch_lynshen_marketplace()?;
-            let skill = market
-                .skills
-                .iter()
-                .find(|skill| skill.id == id)
-                .ok_or_else(|| format!("LynShen skill not found: {id}"))?;
-            skills::install_marketplace_skill(&dir, skill)
-        }
-        other => return Err(format!("unknown skill source: {other}")),
+    let found = if source == "anthropic" {
+        skills::anthropic_source()?
+    } else {
+        community_sources()
+            .into_iter()
+            .find_map(|(_, result)| result.ok().filter(|s| source_key(&s.repository) == source))
+            .ok_or_else(|| format!("unknown skill source: {source}"))?
+    };
+    let skill = found
+        .skills
+        .iter()
+        .find(|skill| skill.id == id)
+        .ok_or_else(|| format!("skill not found in {}: {id}", found.name))?;
+    if !skill.redistributable {
+        return Err(format!(
+            "skill {id} is not offered: {}; not redistributed by LynShen",
+            skill.license
+        ));
     }
-    .map_err(|error| error.to_string())
+    skills::install_source_skill(&dir, &found, skill).map_err(|error| error.to_string())
 }
