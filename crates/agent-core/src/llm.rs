@@ -1036,6 +1036,7 @@ impl OpenAiClient {
 
     fn run_subagent_tool(
         &self,
+        call_id: &str,
         name: &str,
         arguments: &str,
         cwd: &Path,
@@ -1049,7 +1050,7 @@ impl OpenAiClient {
             return None;
         }
         let result = match name {
-            "spawn_agent" => self.spawn_agent(arguments, cwd, input, pending_call_ids),
+            "spawn_agent" => self.spawn_agent(call_id, arguments, cwd, input, pending_call_ids),
             "wait_agent" => self.wait_agent(arguments),
             "list_agents" => self.list_agents(arguments),
             "send_message" => self.send_message(arguments),
@@ -1100,6 +1101,7 @@ impl OpenAiClient {
         } else if let Some(result) = self.run_goal_tool(&request.name, &request.arguments) {
             result
         } else if let Some(result) = self.run_subagent_tool(
+            &request.call_id,
             &request.name,
             &request.arguments,
             cwd,
@@ -1152,6 +1154,7 @@ impl OpenAiClient {
 
     fn spawn_agent(
         &self,
+        call_id: &str,
         arguments: &str,
         cwd: &Path,
         input: &[Value],
@@ -1278,6 +1281,7 @@ impl OpenAiClient {
             model: model.clone(),
             reasoning_effort: reasoning_effort.clone(),
             depth: child_depth,
+            tool_use_id: call_id.to_string(),
         })?;
         let child_input =
             build_subagent_input(input, pending_call_ids, &fork_turns, &slot.path, message)?;
@@ -1376,6 +1380,7 @@ impl OpenAiClient {
                 {
                     return Err("interrupted".to_string());
                 }
+                child_manager.record(&child_path, &event);
                 stats.record(event);
                 Ok(())
             });
@@ -2796,7 +2801,13 @@ mod tests {
     fn spawn_agent_rejects_unlisted_model_and_unsupported_effort() {
         let client = subagent_model_client();
         let spawn = |arguments: Value| {
-            client.spawn_agent(&arguments.to_string(), Path::new("."), &[], &HashSet::new())
+            client.spawn_agent(
+                "call_test",
+                &arguments.to_string(),
+                Path::new("."),
+                &[],
+                &HashSet::new(),
+            )
         };
         let error =
             spawn(json!({ "task_name": "a", "message": "m", "model": "gpt-other" })).unwrap_err();
