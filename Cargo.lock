@@ -1018,6 +1018,7 @@ dependencies = [
  "getrandom 0.2.17",
  "libc",
  "llm-provider-kit",
+ "regex",
  "semver",
  "serde_json",
  "sha2",

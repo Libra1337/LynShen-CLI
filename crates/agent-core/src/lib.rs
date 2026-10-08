@@ -20,6 +20,7 @@ pub mod protocol;
 pub mod provider_login;
 mod providers;
 pub mod sandbox;
+mod search;
 mod secrets;
 mod session;
 pub mod skills;
