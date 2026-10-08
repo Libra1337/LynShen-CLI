@@ -1690,8 +1690,12 @@ impl AgentCore {
                         self.overflow_retry_pending = true;
                         self.force_compaction = true;
                         events.push(AgentEvent::Info(
-                            "request exceeded the model's context window; compacting and retrying"
-                                .to_string(),
+                            if error == crate::llm::MID_TURN_COMPACTION {
+                                "context reached the compaction threshold; compacting and continuing"
+                            } else {
+                                "request exceeded the model's context window; compacting and retrying"
+                            }
+                            .to_string(),
                         ));
                     }
                     WorkerEvent::Error(error) => {
@@ -2106,7 +2110,7 @@ impl AgentCore {
         let (approval_tx, approval_rx) = mpsc::channel();
         self.approval_receiver = Some(approval_rx);
         self.pending_approvals.clear();
-        let Ok(client) = OpenAiClient::from_config(OpenAiClientConfig {
+        let Ok(mut client) = OpenAiClient::from_config(OpenAiClientConfig {
             model: self.config.model.clone(),
             provider: self.config.provider.clone(),
             protocol: self.config.protocol.clone(),
@@ -2159,6 +2163,7 @@ impl AgentCore {
             &self.config.current_model_config(),
             self.config.compaction_threshold_percent,
         );
+        client.set_context_budget(model_context_budget as u64);
         let forced = std::mem::take(&mut self.force_compaction);
         // The request is the conversation plus the prompt and tool definitions.
         let request_tokens = context_tokens + overhead_tokens(&overhead) as usize;
