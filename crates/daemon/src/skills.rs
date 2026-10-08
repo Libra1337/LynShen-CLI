@@ -45,7 +45,20 @@ fn community_sources() -> Vec<(String, Result<skills::SkillSource, String>)> {
     type Cached = (Instant, Result<skills::SkillSource, String>);
     static CACHE: Mutex<Vec<(String, Cached)>> = Mutex::new(Vec::new());
     const FRESH: Duration = Duration::from_secs(3600);
-    skills::COMMUNITY_SKILL_SOURCES
+    // `LYNSHEN_SKILL_SOURCES="Name=https://github.com/o/r;…"` replaces the
+    // list (empty: none, as the tests run offline).
+    let configured: Vec<(String, String)> = match std::env::var("LYNSHEN_SKILL_SOURCES") {
+        Ok(list) => list
+            .split(';')
+            .filter_map(|item| item.split_once('='))
+            .map(|(name, repository)| (name.trim().to_string(), repository.trim().to_string()))
+            .collect(),
+        Err(_) => skills::COMMUNITY_SKILL_SOURCES
+            .iter()
+            .map(|(name, repository)| (name.to_string(), repository.to_string()))
+            .collect(),
+    };
+    configured
         .iter()
         .map(|(name, repository)| {
             let cached = CACHE.lock().ok().and_then(|cache| {
@@ -60,11 +73,11 @@ fn community_sources() -> Vec<(String, Result<skills::SkillSource, String>)> {
                 let result = skills::fetch_github_source(name, repository);
                 if let Ok(mut cache) = CACHE.lock() {
                     cache.retain(|(repo, _)| repo != repository);
-                    cache.push((repository.to_string(), (Instant::now(), result.clone())));
+                    cache.push((repository.clone(), (Instant::now(), result.clone())));
                 }
                 result
             });
-            (name.to_string(), result)
+            (name.clone(), result)
         })
         .collect()
 }
@@ -82,7 +95,7 @@ fn source_key(repository: &str) -> String {
 fn catalog(dir: PathBuf) -> Result<Value, String> {
     let mut entries = Vec::new();
     let mut warnings = Vec::new();
-    let mut add = |source: &skills::SkillSource, key: &str| {
+    let mut add = |source: &skills::SkillSource, key: &str, shown: &str| {
         entries.extend(source.skills.iter().map(|skill| {
             json!({
                 "id": skill.id,
@@ -90,7 +103,7 @@ fn catalog(dir: PathBuf) -> Result<Value, String> {
                 "description": skill.description,
                 "tags": skill.tags,
                 "source": key,
-                "sourceName": source.name,
+                "sourceName": shown,
                 "isDefault": false,
                 "installed": skills::skill_installed(&dir, &skill.id),
                 "license": skill.license,
@@ -99,10 +112,10 @@ fn catalog(dir: PathBuf) -> Result<Value, String> {
             })
         }))
     };
-    add(&skills::anthropic_source()?, "anthropic");
+    add(&skills::anthropic_source()?, "anthropic", "Anthropic");
     for (name, result) in community_sources() {
         match result {
-            Ok(source) => add(&source, &source_key(&source.repository)),
+            Ok(source) => add(&source, &source_key(&source.repository), &source.name),
             Err(error) => warnings.push(format!("{name}: {error}")),
         }
     }

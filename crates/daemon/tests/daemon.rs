@@ -2504,52 +2504,12 @@ fn only_the_desktop_starts_acp_agents_which_run_like_any_session() {
     );
 }
 
-/// A one-route HTTP server standing in for the LynShen API: every request
-/// gets `body` as JSON.
-fn fake_lynshen_api(body: Value) -> String {
-    use std::io::{BufRead, BufReader, Write};
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let address = listener.local_addr().unwrap();
-    thread::spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(mut stream) = stream else { continue };
-            let mut reader = BufReader::new(&stream);
-            let mut line = String::new();
-            while reader.read_line(&mut line).is_ok_and(|read| read > 2) {
-                line.clear();
-            }
-            let body = body.to_string();
-            let _ = write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-        }
-    });
-    format!("http://{address}")
-}
-
-fn set_lynshen_api_url(url: &str) {
-    let path = PathBuf::from(std::env::var_os("HOME").unwrap()).join(".lynshen/config.json");
-    let mut config: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-    config["lynshen_api_url"] = json!(url);
-    fs::write(&path, config.to_string()).unwrap();
-}
-
 #[test]
 fn the_desktop_lists_and_installs_skills_into_the_engines_directory() {
     let _guard = setup();
+    // No community repositories: the catalog is Anthropic's bundled index, offline.
+    std::env::set_var("LYNSHEN_SKILL_SOURCES", "");
     let home = PathBuf::from(std::env::var_os("HOME").unwrap());
-    set_lynshen_api_url(&fake_lynshen_api(json!({
-        "skills": [{
-            "id": "review",
-            "name": "Review",
-            "description": "Review code",
-            "content": "Be strict.",
-            "tags": ["code"]
-        }],
-        "default_skill_ids": ["review"]
-    })));
     let daemon = start_daemon();
     let mut desktop = Client::connect(&daemon);
     let entry = |catalog: &Value, source: &str, id: &str| {
@@ -2567,40 +2527,28 @@ fn the_desktop_lists_and_installs_skills_into_the_engines_directory() {
         json!({ "op": "skills_catalog", "backend": "lynshen" }),
     );
     assert_eq!(catalog["type"], "skills_catalog", "{catalog}");
+    // The LynShen marketplace is gone: nothing asks for it, nothing warns.
     assert_eq!(catalog["warnings"], json!([]));
+    assert!(catalog["skills"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|skill| skill["source"] == "anthropic"));
     let lynshen_dir = home.join(".lynshen/skills");
     assert_eq!(catalog["installDir"], json!(lynshen_dir));
-    let review = entry(&catalog, "lynshen", "review");
-    assert_eq!(
-        (&review["isDefault"], &review["installed"], &review["tags"]),
-        (&json!(true), &json!(false), &json!(["code"]))
-    );
     let pdf = entry(&catalog, "anthropic", "pdf");
     assert_eq!(pdf["redistributable"], false);
+    assert_eq!(pdf["sourceName"], "Anthropic");
     assert!(pdf["homepage"]
         .as_str()
         .unwrap()
         .starts_with("https://github.com/anthropics/skills/tree/"));
+    entry(&catalog, "anthropic", "frontend-design");
     let refused = request(
         &mut desktop,
         json!({ "op": "skill_install", "source": "anthropic", "skill": "pdf" }),
     );
     assert_eq!(refused["type"], "error", "{refused}");
-
-    let installed = request(
-        &mut desktop,
-        json!({ "op": "skill_install", "source": "lynshen", "skill": "review", "backend": "lynshen" }),
-    );
-    assert_eq!(installed["type"], "skill_installed", "{installed}");
-    assert_eq!(installed["path"], json!(lynshen_dir.join("review")));
-    assert!(fs::read_to_string(lynshen_dir.join("review/SKILL.md"))
-        .unwrap()
-        .contains("Be strict."));
-    let catalog = request(
-        &mut desktop,
-        json!({ "op": "skills_catalog", "backend": "lynshen" }),
-    );
-    assert_eq!(entry(&catalog, "lynshen", "review")["installed"], true);
 
     // Claude Code sessions read their own directory.
     let catalog = request(
@@ -2608,10 +2556,9 @@ fn the_desktop_lists_and_installs_skills_into_the_engines_directory() {
         json!({ "op": "skills_catalog", "backend": "claude" }),
     );
     assert_eq!(catalog["installDir"], json!(home.join(".claude/skills")));
-    assert_eq!(entry(&catalog, "lynshen", "review")["installed"], false);
     for op in [
         json!({ "op": "skill_install", "source": "elsewhere", "skill": "review" }),
-        json!({ "op": "skill_install", "source": "lynshen", "skill": "missing" }),
+        json!({ "op": "skill_install", "source": "lynshen", "skill": "review" }),
         json!({ "op": "skill_install", "source": "anthropic", "skill": "../escape" }),
     ] {
         assert_eq!(request(&mut desktop, op)["type"], "error");
@@ -2629,31 +2576,10 @@ fn the_desktop_lists_and_installs_skills_into_the_engines_directory() {
     for op in ["skills_catalog", "skill_install"] {
         let refused = request(
             &mut phone,
-            json!({ "op": op, "source": "lynshen", "skill": "review" }),
+            json!({ "op": op, "source": "anthropic", "skill": "frontend-design" }),
         );
         assert_eq!(refused["type"], "error", "{refused}");
     }
-
-    // Without the LynShen marketplace the Anthropic catalog still lists.
-    let closed = TcpListener::bind("127.0.0.1:0").unwrap();
-    set_lynshen_api_url(&format!("http://{}", closed.local_addr().unwrap()));
-    drop(closed);
-    let catalog = request(
-        &mut desktop,
-        json!({ "op": "skills_catalog", "backend": "lynshen" }),
-    );
-    assert_eq!(
-        catalog["warnings"].as_array().unwrap().len(),
-        1,
-        "{catalog}"
-    );
-    entry(&catalog, "anthropic", "frontend-design");
-    assert!(catalog["skills"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|skill| skill["source"] == "anthropic"));
-    let _ = fs::remove_dir_all(lynshen_dir.join("review"));
 }
 
 /// Requirement `id` in a `requirements` frame.
