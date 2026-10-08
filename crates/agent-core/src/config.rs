@@ -971,11 +971,30 @@ fn write_atomically(path: &Path, contents: &str, mode: Option<u32>) -> io::Resul
         let _ = fs::remove_file(&temp);
         return Err(error);
     }
-    if let Err(error) = fs::rename(&temp, path) {
-        let _ = fs::remove_file(&temp);
-        return Err(error);
+    // Windows refuses to replace a file another process has open (the
+    // desktop reading config.json, an antivirus scan); that lasts moments, so
+    // retry briefly instead of failing the save (a model pick that silently
+    // did nothing).
+    let mut attempt = 0;
+    loop {
+        match fs::rename(&temp, path) {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if attempt < 20
+                    && matches!(
+                        error.kind(),
+                        io::ErrorKind::PermissionDenied | io::ErrorKind::ResourceBusy
+                    ) =>
+            {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(25 * attempt));
+            }
+            Err(error) => {
+                let _ = fs::remove_file(&temp);
+                return Err(error);
+            }
+        }
     }
-    Ok(())
 }
 
 /// When config.json fails to parse (invalid values, malformed JSON), offer an
