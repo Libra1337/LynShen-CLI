@@ -48,6 +48,7 @@ After `hello`, before any command, the engine emits its startup batch:
 {"type":"command_list","commands":[{"command":"/help","marker":null,"args":"","description":"..."}]}
 {"type":"approval_mode","mode":"manual"}
 {"type":"mcp_servers","servers":[...]}
+{"type":"task_board","tasks":[...]}                          // only when the session's task board has tasks
 {"type":"trust_prompt","cwd":"...","repo_root":"..."}        // only when an untrusted project has local resources
 {"type":"info","message":"..."}                              // session_start hook output, if any
 ```
@@ -212,6 +213,40 @@ the new state; then `agent_runs`. An unknown target, an agent that is still
 running or one without a worktree emits `merge_result` with `ok: false` and
 `error`.
 
+The worktree registry is saved with the session: after an engine or daemon
+restart (the session opened again with `/resume` or `session_open`), the
+worktree agents come back as `agent_runs` rows and this op still merges them.
+A worktree whose directory is gone is dropped then; an agent that was still
+running when the engine stopped comes back `interrupted`.
+
+### `close_agent`
+
+```json
+{"op":"close_agent","target":"/root/scout"}
+```
+
+The stop button of a subagent: stops it, foreground or background, and the
+foreground agents it started (the same as the model's `close_agent` tool).
+`target` is the agent's path, or its task name for a subagent of the main
+agent. Emits `subagent_lifecycle` (`closed`) and `agent_runs`; an unknown
+target emits `error`. A closed background agent never starts a main turn.
+
+### `pick_attempt`
+
+```json
+{"op":"pick_attempt","group":"fix","target":"fix_a2"}
+```
+
+Keeps one attempt of a best-of-N group (see "Agent team" → "Best of N"):
+`target` is the attempt's task name, path or number (`"2"`). Attempts still
+running are closed first; the picked one must have finished. It is applied
+as `merge_agent` `apply` does, then every other attempt is discarded. Emits
+one `merge_result` per agent (the apply first), their `subagent_lifecycle`
+events and `agent_runs`. When the apply conflicts nothing is written and the
+other attempts are kept (one `merge_result`). An unknown group or target
+emits `error`. Like `merge_agent`, the op asks for no approval; the model's
+`pick_attempt` tool asks in `manual` mode.
+
 ### `approve_plan`
 
 ```json
@@ -279,7 +314,7 @@ Every line is `{"type": <name>, ...}`. All types emitted by the engine:
 | `model_status` | `provider`, `model`, `reasoning_effort`, `context_window`, `context_limit`, `max_output_tokens`, `reasoning_efforts`, `state` | Current model selection; deduplicated, re-emitted on change. Claude Code sessions add their own fields (`docs/daemon-protocol.md` → Other engines). |
 | `command_list` | `commands: [{command, marker, args, description}]` | Available slash commands incl. custom and MCP prompt commands. |
 | `approval_mode` | `mode` | Current approval mode; emitted at startup and on change. |
-| `agent_runs` | `workflows: []`, `agents: [{id, label, model, effort, state, started_at, duration_ms, tokens, tool_calls, prompt, result, error, type: "subagent", tool_use_id, activity, role, plan_step, isolation, workdir, files_changed}]` | Every subagent of the session, oldest first. `id` is its path (`/root/<task_name>`), `state` ∈ `pending`/`running`/`completed`/`errored`/`interrupted`/`closed`/`budget_exhausted`/`conflict`/`merged`/`discarded`, `started_at` epoch ms, `tool_use_id` the parent's `spawn_agent` call, `activity` its latest action in a few words ("Running cargo test"). `role` and `plan_step` are strings or `null`. `isolation` is `worktree` or `none`; a worktree agent has `workdir` (its worktree, else `null`) and `files_changed` (paths relative to the worktree, once finished). See "Agent team". |
+| `agent_runs` | `workflows: []`, `agents: [{id, label, model, effort, state, started_at, duration_ms, tokens, tool_calls, prompt, result, error, type: "subagent", tool_use_id, activity, role, plan_step, isolation, workdir, files_changed, background, attempt_group, attempt}]` | Every subagent of the session, oldest first (the 24 most recent finished ones, and every one with a worktree to merge). `id` is its path (`/root/<task_name>`), `state` ∈ `pending`/`running`/`completed`/`errored`/`interrupted`/`closed`/`budget_exhausted`/`conflict`/`merged`/`discarded`, `started_at` epoch ms (reset by `resume_agent`), `tool_use_id` the parent's `spawn_agent` call (empty for a reviewer started by `agents.review_on_complete`), `activity` its latest action in a few words ("Running cargo test"). `role` and `plan_step` are strings or `null`. `isolation` is `worktree` or `none`; a worktree agent has `workdir` (its worktree, else `null`) and `files_changed` (paths relative to the worktree, once finished). `background`: it keeps running after its parent's turn ends. `attempt_group` (the task name given to `spawn_agent`) and `attempt` (1–4) are set for best-of-N attempts, else `null`. See "Agent team". |
 | `plan_draft` | `id`, `title`, `append` | Plan mode: the plan while the model writes its `propose_plan` call. `append` is the Markdown added since the previous `plan_draft` of the same `id`; `title` is the title so far. The finished plan follows as `proposed_plan` with the same `id`. Not replayed. |
 | `proposed_plan` | `id`, `title`, `markdown`, `status` | Plan mode: a plan from `propose_plan`. `status` is `pending`, then `approved` or `revising` after `approve_plan`. Session replay (`transcript`) carries it as `{"role":"plan","id","title","content","status"}` with the latest status. |
 | `mcp_servers` | `servers: [{name, transport, state, tools, error?}]` | MCP server states; `state` ∈ `connecting`/`connected`/`failed`/`disabled`. |
@@ -300,10 +335,11 @@ Every line is `{"type": <name>, ...}`. All types emitted by the engine:
 | `action_deferred` | `id`, `session_id`, `cwd`, `call_id`, `name`, `arguments`, `summary`, `subagent_id`, `digest`, `created_at` | An unattended session recorded a gated call instead of prompting; decide it with `decide_action`. |
 | `action_decided` | `id`, `decision`, `output`, `is_error` | A deferred action was decided; `output` is the tool result when it ran, `null` when declined. |
 | `attended` | `attended` | Current attended state, after `set_attended`. |
-| `subagent_lifecycle` | `path`, `status`, `message`, `label`, `model`, `tool_use_id`, `role`, `plan_step` | Subagent spawn/progress/finish notices. `status` is a state of `agent_runs` or `message` (a message was queued for it). `role` and `plan_step` are strings or `null`. |
-| `agent_message` | `from`, `to`, `summary` | An agent sent another one a message with `send_message`. `from` and `to` are agent paths (`/root` is the main agent); `summary` is the message, cut to 200 characters. |
+| `subagent_lifecycle` | `path`, `status`, `message`, `label`, `model`, `tool_use_id`, `role`, `plan_step`, `background`, `attempt_group`, `attempt` | Subagent spawn/progress/finish notices. `status` is a state of `agent_runs` or `message` (a message was queued for it); `pending` with message `resumed` when `resume_agent` runs it again. `role`, `plan_step` and `attempt_group` are strings or `null`, `attempt` a number or `null`, `background` a boolean (as in `agent_runs`). |
+| `agent_message` | `from`, `to`, `summary` | An agent sent another one a message with `send_message` (parent, child or sibling). `from` and `to` are agent paths (`/root` is the main agent); `summary` is the message, cut to 200 characters. Also sent when a background agent's result reaches the main agent (`from` the agent, `to` `/root`, `summary` the start of its result) and when a `task_completed` or `agent_idle` hook reports (`from` `hook:task_completed` or `hook:agent_idle`). |
+| `task_board` | `tasks: [{id, title, detail, status, owner, depends_on, role, files, result, updated_at}]` | The session's shared task board, whole, after every change. `id` is `t1`, `t2`, …; `status` ∈ `pending`/`claimed`/`completed`/`failed`/`blocked`; `owner` the claiming agent's path or `null`; `depends_on` task ids; `role` and `result` strings or `null`; `detail` a string (empty when none); `files` paths; `updated_at` epoch ms. Part of the startup batch and of a resumed session's events when the board has tasks. See "Agent team" → "Task board". |
 | `merge_result` | `target`, `action`, `ok`, `files`, `conflicts`, `error` | `merge_agent` ran, from the model or the op. `files`: what the worktree changes. `ok: true`: applied (`apply`) or deleted (`discard`). `ok: false` with `conflicts`: nothing was written. `ok: false` with `error` (a string, else `null`): the merge could not run. |
-| `team_budget` | `used`, `limit` | Input + output tokens the subagents of the running turn used, against `agents.turn_token_budget`. Sent at the first spawn of a turn and each time `used` reaches another tenth of `limit`; never without a budget. |
+| `team_budget` | `used`, `limit` | Input + output tokens the subagents used in the current budget window, against `agents.turn_token_budget`. A window opens with each main turn except one the engine starts for a background result, which continues it. Sent at the first spawn of a window and each time `used` reaches another tenth of `limit`; never without a budget. |
 | `usage` | `input_tokens`, `cached_input_tokens`, `output_tokens`, `reasoning_tokens` | Real API usage for the completed turn. |
 | `context_usage` | `tokens`, `tokenizer`, `cost` | Tokenizer-counted context size; `cost` is cumulative USD (0 when unpriced). |
 | `compaction_start` / `compaction_end` | — | Context compaction began/finished. |
@@ -331,7 +367,7 @@ them, and merge the work of those that write in a worktree.
 without the object gets the defaults. Changes apply from the next turn.
 
 ```json
-{"agents": {"max_live": 4, "max_depth": 2, "turn_token_budget": 0, "fanout": "auto", "keep_worktrees_days": 7}}
+{"agents": {"max_live": 4, "max_depth": 2, "turn_token_budget": 0, "fanout": "auto", "keep_worktrees_days": 7, "wake_on_result": true, "review_on_complete": false}}
 ```
 
 | Key | Default | Meaning |
@@ -341,6 +377,8 @@ without the object gets the defaults. Changes apply from the next turn.
 | `turn_token_budget` | `0` | Input + output tokens all subagents of one main turn may use together. `0`: no limit. At 80% every running subagent, and the main agent, gets a message to wrap up. At 100% `spawn_agent` refuses, and each running subagent stops before its next model request with state `budget_exhausted`; its output so far is kept. |
 | `fanout` | `auto` | `off`: no subagent tools. `plan`: an agent that can write (one without a read-only role) starts only when the latest proposed plan was approved, with `plan_step` naming a step of the `update_plan` checklist (its text or its number from 1); `explorer` and `reviewer` start at any time. `auto`: the model decides. |
 | `keep_worktrees_days` | `7` | Subagent worktrees older than this are deleted when an engine opens the project. `0` keeps them. |
+| `wake_on_result` | `true` | When a background subagent of the main agent finishes (or a `task_completed` / `agent_idle` hook reports) while the main agent is idle, the engine starts a main turn by itself on that result. Not while the team budget is used up; the result then waits for the next turn. |
+| `review_on_complete` | `false` | A board task completed with `role: "worker"` (or owned by a `worker` agent) gets a background `reviewer` subagent of the main agent, `review_<task id>`, on the owner's diff. It counts toward the budget and `max_live`; when it cannot start, the main agent gets a message saying why. |
 
 ### Roles
 
@@ -384,10 +422,119 @@ subagents of a read-only agent are read-only too.
 ### Messages
 
 A subagent calls `send_message` with `target: "parent"` to write to the agent
-that started it. The parent reads the message before its next model request.
-A parent that waits in `wait_agent` returns at once, with the messages in the
-result: `"messages": [{"from": "/root/worker_a", "message": "..."}]`. Each
-message, in either direction, emits `agent_message`.
+that started it. `target` may also be a sibling: its task name (a name is
+looked up among the sender's own subagents first, then among its siblings)
+or its path; `/root` is the main agent. The recipient reads the message
+before its next model request. A parent that waits in `wait_agent` returns at
+once, with the messages in the result: `"messages": [{"from":
+"/root/worker_a", "message": "..."}]` (a background result adds `"kind":
+"result"` and `"status"`, a hook's output `"kind": "hook"` and `"ok"`). Each
+message, in any direction, emits `agent_message`.
+
+### Task board
+
+One board per session, shared by the main agent and every subagent, saved
+with the session (it survives an engine or daemon restart) and sent whole as
+`task_board` after each change.
+
+| Tool | Arguments | Result |
+| --- | --- | --- |
+| `task_create` | `title`, optional `detail`, `depends_on` (task ids), `role`, `files` | `{"id": "t1"}` |
+| `task_list` | — | `{"tasks": [...]}` (the `task_board` rows) |
+| `task_update` | `id`, `action` ∈ `claim`/`release`/`complete`/`fail`/`block`, optional `result`, `note` | the task |
+
+- `claim` takes a `pending` task whose `depends_on` tasks are all
+  `completed`; claims are atomic (one owner).
+- Only the owner, or the main agent, may `release` (back to `pending`, from
+  `claimed` or `blocked`), `complete`, `fail` or `block` a task. The main
+  agent may also complete, fail or block a task nobody claimed.
+- `fail` blocks every `pending` task that depends on it, directly or not; a
+  new task on a failed one starts `blocked`.
+- `result` (or `note`) is kept on the task: the outcome, or why it failed or
+  is blocked.
+- Completing a task runs the `task_completed` hooks; with
+  `agents.review_on_complete`, a worker's task gets a reviewer (the
+  `task_update` result then names it in `review`).
+
+The board tools are coordination: read-only roles and plan mode may use them.
+
+### Background agents
+
+`spawn_agent` with `background: true` starts an agent that keeps running
+when the turn of the agent that started it ends. Without it (the default), a
+turn that ends, fails or is interrupted closes its subagents. An interrupt
+closes foreground agents only; so does the end of a subagent's own run (its
+foreground subagents close with it). Closing an engine, switching sessions
+and the `close_agent` op or tool stop background agents too.
+
+When a background subagent of the main agent finishes, its result goes to
+the main agent as `<subagent_result path="/root/x" status="completed">…</subagent_result>`:
+read before its next request while it works, handed over by `wait_agent`,
+or, while it is idle and `agents.wake_on_result` is on, as the input of a
+main turn the engine starts by itself (one per batch of results; each
+result is delivered once, and an `agent_message` from the agent to `/root`
+is emitted). That turn has no `user_message` event, and its input is left
+out of the transcript replay like other runtime messages; the reply is in it.
+A closed or interrupted agent wakes nobody.
+
+### Resuming an agent
+
+`resume_agent` (`target`, `message`) runs a finished subagent (any state
+but `pending` and `running`) again on its own conversation plus `message`,
+with the model, effort, role, access and limits it was started with, in its
+worktree when that still exists (a new one when it was merged or discarded),
+in the background if it was started so. Agents restored after an engine
+restart have no conversation and cannot be resumed.
+
+### Best of N
+
+`spawn_agent` with `attempts` (1–4; above 1 only with worktree isolation:
+`isolation: "worktree"` or the `worker` role, otherwise refused) starts that
+many agents on the same message, `<task_name>_a1` … `<task_name>_aN`, each in
+its own worktree, with `attempt_group: "<task_name>"` and `attempt: k`. They
+are reserved together: when `max_live` leaves too few slots, none starts.
+`wait_agent` with `targets: ["<task_name>"]` returns once every attempt has
+finished, with `"attempts": {"<task_name>": [{path, attempt, state, summary,
+files, added, removed}]}`, the diff of each against its base, to compare
+them. The `pick_attempt` tool (`group`, `target`) or op keeps one.
+
+### Hooks
+
+`task_completed` and `agent_idle` join the other hooks in `hooks.json`
+(`~/.lynshen/hooks.json`, and `<cwd>/.lynshen/hooks.json` in a trusted
+project), with the same entry shape:
+
+```json
+{"task_completed": [{"command": "cargo test 2>&1 | tail -20"}],
+ "agent_idle": [{"command": "./scripts/check.sh"}]}
+```
+
+- `task_completed` runs, on its own thread, when a board task is completed,
+  in the owner's working directory (its worktree; the main agent's directory
+  for an unowned task). stdin: `{"event": "task_completed", "task": {…},
+  "workdir", "cwd"}`; environment: `LYNSHEN_HOOK_EVENT`,
+  `LYNSHEN_HOOK_WORKDIR`, `LYNSHEN_TASK_ID`, `LYNSHEN_TASK` (the task JSON).
+- `agent_idle` runs when a subagent's run ends (completed, errored or out of
+  budget; not when it was closed), in its working directory, before the
+  agent is marked finished. stdin: `{"event": "agent_idle", "agent": {path,
+  status, error, summary, workdir, files_changed, role, background},
+  "workdir", "cwd"}`; environment: `LYNSHEN_HOOK_EVENT`,
+  `LYNSHEN_HOOK_WORKDIR`, `LYNSHEN_AGENT` (its path).
+
+A hook's stdout, trimmed and cut to 4000 characters, goes to the main agent
+as `<hook_result hook="task_completed" ok="true">…</hook_result>` and an
+`agent_message` from `hook:<event>`; a hook that exits 0 with no output says
+nothing. A non-zero exit sends `ok="false"` with its stderr (else stdout, else
+the exit code). Hook output wakes an idle main agent like a background
+result.
+
+### Worktree confinement
+
+A subagent with a worktree writes only there: its file tools, and its shell,
+which starts in the worktree and, in the sandbox, can write only the
+worktree, temp and package caches (`docs/sandbox.md` → "Worktree
+subagents"). Leaving the sandbox always asks a person unless an `allow`
+command rule matches.
 
 ### Plan owners
 
@@ -443,7 +590,8 @@ Suggested rendering (as used by LynShen Desktop):
 | `model_view` / `tree_view` / `resume_view` / `checkpoint_view` | pickers/sidebars |
 | `goal` / `context_usage` / `usage` | status bar |
 | `agent_runs` / `subagent_lifecycle` / `agent_message` / `team_budget` | agent cards and the team summary |
-| `merge_result` | result of the merge / discard buttons (`merge_agent` op) |
+| `task_board` | the team's task board |
+| `merge_result` | result of the merge / discard / pick buttons (`merge_agent`, `pick_attempt` ops) |
 | `compaction_*` | compaction progress |
 | `status` / `info` / `error` | status line / toasts |
 | `pending_messages` | queued-message indicator |

@@ -740,8 +740,9 @@ also carries `session`, which the Android app opens.
 
 Every op from `docs/serve-protocol.md` (`user_message`, `command`, `steer`,
 `interrupt`, `approve`, `set_approval_mode`, `decide_action`, `merge_agent`,
-`mcp_*`) is accepted with a `session` field and forwarded to that session's engine. Its
-events carry the same `session` field.
+`close_agent`, `pick_attempt`, `mcp_*`) is accepted with a `session` field and forwarded to that session's engine. Its
+events carry the same `session` field. A LynShen session's snapshot (`watch`)
+includes its `task_board` when the board has tasks.
 
 `set_approval_mode` applies at once where the engine allows it: a LynShen
 session's running turn (and its subagents) gates its next tool call by the
