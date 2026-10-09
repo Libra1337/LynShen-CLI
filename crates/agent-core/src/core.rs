@@ -2057,67 +2057,40 @@ impl AgentCore {
         let skills_tokens =
             crate::tokens::count_text(&self.config.model, &crate::prompt::skills_block(&skills))
                 .tokens as u64;
-        if let Ok(image_model) = crate::config::read_image_model_at(self.config.path()) {
-            self.config.image_model = image_model;
-        }
+        // Desktop edits the image model, subagent models, context windows and
+        // groups in config.json while engines run. An unreadable file keeps
+        // the values this engine already has.
+        let _ = self.config.reload_live_settings();
         let model_headers = self.model_headers();
         let images = crate::images::ImageTools::from_config(
             &self.config,
             self.provider_api_key(),
             &model_headers,
         );
-        let images_enabled = images.is_ok();
         self.tool_state.set_images(images);
-        let prompt_tools = crate::tools::prompt_tool_names(
-            &self.config.edit_tools,
-            true,
-            signed_in,
-            images_enabled,
-        );
-        let mut system_prompt = build_system_prompt(
+        let system_prompt = build_system_prompt(
             &base_prompt,
             &PromptContext {
                 date: current_utc_date(),
                 cwd: self.cwd.clone(),
-                tools: prompt_tools,
                 edit_tools: self.config.edit_tools.clone(),
                 project_instructions,
                 skills,
                 chat: self.chat,
+                sandbox: self
+                    .tool_state
+                    .sandbox()
+                    .map(|sandbox| sandbox.prompt())
+                    .unwrap_or_default(),
+                plan_mode: self.approval_mode.get() == ApprovalMode::Plan,
+                host: self
+                    .host
+                    .as_ref()
+                    .map(|host| (host.prompt)())
+                    .unwrap_or_default(),
             },
         );
-        if let Some(sandbox) = self.tool_state.sandbox() {
-            let note = sandbox.prompt(&self.cwd);
-            if !note.is_empty() {
-                system_prompt.push_str("\n\n");
-                system_prompt.push_str(&note);
-            }
-        }
-        if let Some(host) = &self.host {
-            let extra = (host.prompt)();
-            if !extra.trim().is_empty() {
-                system_prompt.push_str("\n\n");
-                system_prompt.push_str(extra.trim_end());
-            }
-        }
-        if self.approval_mode.get() == ApprovalMode::Plan && !self.chat {
-            system_prompt.push_str("\n\n");
-            system_prompt.push_str(crate::plan_mode::PROMPT_ADDENDUM);
-        }
 
-        // Desktop edits subagent_models in config.json while engines run. An
-        // unreadable file keeps the list this engine already has.
-        if let Ok(models) = crate::config::read_subagent_models_at(self.config.path()) {
-            self.config.subagent_models = models;
-        }
-        // Same for the hand-set context windows (model settings in Desktop).
-        if let Ok(overrides) = crate::config::read_context_window_overrides_at(self.config.path()) {
-            self.config.context_window_overrides = overrides;
-        }
-        // And the group picked per model, which the window follows.
-        if let Ok(groups) = crate::config::read_lynshen_groups_at(self.config.path()) {
-            self.config.lynshen_groups = groups;
-        }
         let prompt_tokens =
             crate::tokens::count_text(&self.config.model, &system_prompt).tokens as u64;
         let (goal_tool_tx, goal_tool_rx) = mpsc::channel();
@@ -2143,6 +2116,7 @@ impl AgentCore {
             connect_timeout: Duration::from_secs(self.config.connect_timeout_seconds),
             read_timeout: Duration::from_secs(self.config.read_timeout_seconds),
             goal_tool_tx: Some(goal_tool_tx),
+            has_goal: self.session.goal().is_some(),
             approval_tx: Some(approval_tx),
             approval_mode: self.approval_mode.clone(),
             safety_model: Some(self.config.safety().0).filter(|model| !model.trim().is_empty()),
@@ -2172,8 +2146,8 @@ impl AgentCore {
         };
         self.context_overhead = Some(overhead);
         let request_items = self.session.request_context_items();
-        let (context_tokens, context_tokenizer) =
-            self.session.context_token_usage(&self.config.model);
+        let count = crate::tokens::count_values(&self.config.model, request_items.iter());
+        let (context_tokens, context_tokenizer) = (count.tokens, count.tokenizer);
         let model_context_budget = target_context_budget(
             &self.config.current_model_config(),
             self.config.compaction_threshold_percent,
@@ -2416,6 +2390,7 @@ impl AgentCore {
             connect_timeout: Duration::from_secs(self.config.connect_timeout_seconds),
             read_timeout: Duration::from_secs(self.config.read_timeout_seconds),
             goal_tool_tx: None,
+            has_goal: false,
             approval_tx: None,
             approval_mode: self.approval_mode.clone(),
             safety_model: None,
@@ -2469,6 +2444,7 @@ impl AgentCore {
             connect_timeout: Duration::from_secs(self.config.connect_timeout_seconds),
             read_timeout: Duration::from_secs(self.config.read_timeout_seconds),
             goal_tool_tx: None,
+            has_goal: false,
             approval_tx: None,
             approval_mode: self.approval_mode.clone(),
             safety_model: None,
@@ -4805,9 +4781,10 @@ fn provider_api_key(config: &Config, auth: &AuthStore) -> Option<String> {
 
 /// The gateway route chosen per model, as the gateway's routing header: the
 /// LynShen group, or the Monoize Provider. Read from disk so a choice made in
-/// Desktop applies from the next turn.
+/// Desktop applies from the next turn; only read, since this runs every turn
+/// and `load_or_create` would rewrite the file under Desktop.
 fn model_headers(config: &Config) -> HashMap<String, Vec<(String, String)>> {
-    match Config::load_or_create() {
+    match Config::load_existing() {
         Ok(disk) if disk.provider == config.provider => route_headers(&disk),
         _ => route_headers(config),
     }
@@ -4885,6 +4862,7 @@ fn title_request(
         connect_timeout: Duration::from_secs(config.connect_timeout_seconds),
         read_timeout: Duration::from_secs(config.read_timeout_seconds),
         goal_tool_tx: None,
+        has_goal: false,
         approval_tx: None,
         approval_mode: LiveApprovalMode::new(config.approval_mode),
         safety_model: None,

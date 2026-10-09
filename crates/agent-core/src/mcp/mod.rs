@@ -209,7 +209,9 @@ impl McpManager {
     }
 
     /// Model tool definitions for every connected server, refreshed first if a
-    /// server signaled a tool-list change. Duplicate full names lose.
+    /// server signaled a tool-list change. Duplicate full names lose. Sorted
+    /// by name, so a server that lists its tools in another order does not
+    /// change the request prefix providers cache.
     pub fn definitions(&self) -> Vec<Value> {
         let mut definitions = Vec::new();
         let mut seen = std::collections::HashSet::new();
@@ -274,6 +276,7 @@ impl McpManager {
                 }
             }
         }
+        definitions.sort_by(|left, right| left["name"].as_str().cmp(&right["name"].as_str()));
         definitions
     }
 
@@ -663,6 +666,25 @@ mod tests {
         assert_eq!(definitions[0]["name"], "mcp__files__echo");
         assert_eq!(definitions[0]["description"], "Echo text");
         assert_eq!(definitions[0]["parameters"]["type"], "object");
+    }
+
+    #[test]
+    fn definitions_are_sorted_by_name_whatever_order_the_server_lists() {
+        let tools = json!([
+            { "name": "zeta", "inputSchema": { "type": "object" } },
+            { "name": "alpha", "inputSchema": { "type": "object" } },
+            { "name": "mid", "inputSchema": { "type": "object" } }
+        ]);
+        let manager = manager_with_tools("files", tools, json!({}));
+        let names = manager
+            .definitions()
+            .iter()
+            .map(|definition| definition["name"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            ["mcp__files__alpha", "mcp__files__mid", "mcp__files__zeta"]
+        );
     }
 
     #[test]

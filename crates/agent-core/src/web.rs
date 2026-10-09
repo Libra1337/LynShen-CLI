@@ -33,16 +33,15 @@ pub fn search_definition() -> Value {
     json!({
         "type": "function",
         "name": "web_search",
-        "description": "Search the web and return ranked results: title, url, a snippet of the relevant page text, and the published date when known. Use it for current information, or to find pages you do not have a URL for; then read the pages you need in full with web_fetch. Write the query the way you would type it into a search engine. Each call is billed to the user's LynShen account.",
+        "description": "Search the web. Returns ranked results with title, url, snippet and date; read the pages you need with web_fetch. Each call is billed to the user's LynShen account.",
         "parameters": {
             "type": "object",
             "properties": {
-                "query": { "type": "string", "description": "Search query, at most 400 characters." },
-                "max_results": { "type": "number", "description": "Number of results, 1-10. Defaults to 10." },
-                "freshness": { "type": "string", "enum": ["day", "week", "month", "year"], "description": "Only return pages published within this period." }
+                "query": { "type": "string", "description": "Up to 400 characters." },
+                "max_results": { "type": "number", "description": "1-10, default 10." },
+                "freshness": { "type": "string", "enum": ["day", "week", "month", "year"], "description": "Only pages published within this period." }
             },
-            "required": ["query"],
-            "additionalProperties": false
+            "required": ["query"]
         }
     })
 }

@@ -41,273 +41,189 @@ pub enum ToolExecutionEvent {
     Update(String),
 }
 
+/// Built-in tool definitions. Descriptions say only what a call cannot show:
+/// the parameter names and types carry the rest. `exec_command`, `execute`
+/// and `shell_command` are accepted as aliases of `bash` but not offered.
 pub fn definitions() -> Vec<Value> {
     with_function_tool_defaults(vec![
         json!({
             "type": "function",
             "name": "read",
-            "description": "Read a text file, image, or binary file metadata. Text supports 1-indexed offset and line limit. Prefer offset/limit for large files; broad reads return a soft warning instead of being blocked. Safe to call in parallel with other read-only tools.",
+            "description": "Read a file: text with LINE#HASH line anchors, an image, or binary metadata. Use offset and limit for large files.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Relative or absolute file path." },
-                    "offset": { "type": "number", "description": "1-indexed line to start reading from. Defaults to 1." },
-                    "limit": { "type": "number", "description": "Optional maximum lines to read. Defaults to no line limit." }
+                    "path": { "type": "string" },
+                    "offset": { "type": "number", "description": "1-indexed start line." },
+                    "limit": { "type": "number", "description": "Max lines." }
                 },
-                "required": ["path"],
-                "additionalProperties": false
+                "required": ["path"]
             }
         }),
         json!({
             "type": "function",
             "name": "str_replace",
-            "description": "Apply one or more exact targeted text replacements to a UTF-8 file. The file must be read first, and each oldText must match exactly once in the current file. Combine multiple edits for the same file in one call.",
+            "description": "Replace exact text in a file you have read. Each oldText must match exactly once in the file before the call; put all edits to one file in one call.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Relative or absolute file path." },
+                    "path": { "type": "string" },
                     "edits": {
                         "type": "array",
-                        "description": "Targeted replacements matched against the original file.",
                         "items": {
                             "type": "object",
                             "properties": {
-                                "oldText": { "type": "string", "description": "Exact unique text to replace." },
-                                "newText": { "type": "string", "description": "Replacement text." }
+                                "oldText": { "type": "string" },
+                                "newText": { "type": "string" }
                             },
-                            "required": ["oldText", "newText"],
-                            "additionalProperties": false
+                            "required": ["oldText", "newText"]
                         }
                     }
                 },
-                "required": ["path", "edits"],
-                "additionalProperties": false
+                "required": ["path", "edits"]
             }
         }),
         json!({
             "type": "function",
             "name": "hashline_edit",
-            "description": "Patch one UTF-8 file using LINE#HASH anchors from the most recent read output. Supports replace, append, and prepend line edits. Prefer this after read() when exact oldText is awkward.",
+            "description": "Edit a file by the LINE#HASH anchors of your latest read of it. Put all edits to one file in one call.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Relative or absolute file path." },
+                    "path": { "type": "string" },
                     "edits": {
                         "type": "array",
-                        "description": "Hashline edits over this file. Anchors are copied from read().hashlines.",
                         "items": {
                             "type": "object",
                             "properties": {
-                                "op": { "type": "string", "enum": ["replace", "append", "prepend"], "description": "replace a line/range, append after pos, or prepend before pos." },
-                                "pos": { "type": "string", "description": "LINE#HASH anchor. Required for replace; optional for append/prepend." },
-                                "end": { "type": "string", "description": "Inclusive LINE#HASH range end for replace." },
-                                "lines": {
-                                    "description": "Literal replacement/insertion lines. No LINE#HASH prefixes and no diff +/- prefixes.",
-                                    "oneOf": [
-                                        { "type": "array", "items": { "type": "string" } },
-                                        { "type": "string" }
-                                    ]
-                                }
+                                "op": { "type": "string", "enum": ["replace", "append", "prepend"], "description": "replace pos..end, append after pos, prepend before pos. Without pos, append/prepend go to the end/start of the file." },
+                                "pos": { "type": "string", "description": "LINE#HASH anchor; required for replace." },
+                                "end": { "type": "string", "description": "Last LINE#HASH of a replaced range." },
+                                "lines": { "type": "array", "items": { "type": "string" }, "description": "New lines, without anchors or diff markers." }
                             },
-                            "required": ["op", "lines"],
-                            "additionalProperties": false
+                            "required": ["op", "lines"]
                         }
                     }
                 },
-                "required": ["path", "edits"],
-                "additionalProperties": false
+                "required": ["path", "edits"]
             }
         }),
         json!({
             "type": "function",
             "name": "write",
-            "description": "Write full UTF-8 file content. Creates new files without a prior read; existing files must be read first before overwriting. Prefer for greenfield files or full-file rewrites.",
+            "description": "Write a whole file. A new file needs no read; read an existing file before overwriting it.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Relative or absolute file path." },
-                    "content": { "type": "string", "description": "Full file content to write." }
+                    "path": { "type": "string" },
+                    "content": { "type": "string" }
                 },
-                "required": ["path", "content"],
-                "additionalProperties": false
+                "required": ["path", "content"]
             }
         }),
         json!({
             "type": "function",
             "name": "apply_patch",
-            "description": "Apply a unified git diff patch to the current workspace. Use this for multi-file edits when exact replacement tools are awkward. If a patch fails, inspect the error and retry with a corrected minimal patch.",
+            "description": "Apply a unified diff to the workspace, as git apply does. Suits edits across several files.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "patch": { "type": "string", "description": "Unified diff text accepted by git apply." }
+                    "patch": { "type": "string" }
                 },
-                "required": ["patch"],
-                "additionalProperties": false
+                "required": ["patch"]
             }
         }),
         json!({
             "type": "function",
             "name": "bash",
-            "description": "Run a shell command in the workspace. Returns exit code, stdout, stderr, timeout state, truncation state, or a session_id for long-running commands. Prefer commands that narrow output with paths, filters, or limits. Group dependent shell checks into one command when that reduces round trips; issue independent bash/read/ripgrep calls in the same assistant response when possible.",
+            "description": "Run a shell command in the workspace and return its exit code and output. With yield_time_ms, a command still running then returns a session_id for write_stdin.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "command": { "type": "string", "description": "Shell command to run." },
-                    "workdir": { "type": "string", "description": "Working directory for the command. Relative paths are resolved from the current workspace. Defaults to current workspace." },
-                    "timeout": { "type": "number", "description": "Timeout in seconds. Defaults to 60." },
-                    "yield_time_ms": { "type": "number", "description": "Return early after this many milliseconds if the command is still running. Use for dev servers, watchers, and long tasks." }
+                    "command": { "type": "string" },
+                    "workdir": { "type": "string" },
+                    "timeout": { "type": "number", "description": "Seconds, default 60." },
+                    "yield_time_ms": { "type": "number", "description": "Return early after this many ms if still running (servers, watchers, long jobs)." }
                 },
-                "required": ["command"],
-                "additionalProperties": false
-            }
-        }),
-        json!({
-            "type": "function",
-            "name": "exec_command",
-            "description": "Codex-compatible shell execution alias. Runs a shell command and returns output or a session_id for ongoing interaction. Use it like bash; prefer this name when following Codex-style command plans. Prefer specific paths, globs, head/tail, or tool-native limits for large outputs; broad output returns a soft warning. Independent exec_command calls may be emitted together in one assistant response.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "cmd": { "type": "string", "description": "Shell command to execute." },
-                    "workdir": { "type": "string", "description": "Working directory for the command. Relative paths are resolved from the current workspace. Defaults to current workspace." },
-                    "timeout": { "type": "number", "description": "Timeout in seconds. Defaults to 60." },
-                    "yield_time_ms": { "type": "number", "description": "Return early after this many milliseconds if the command is still running." },
-                    "max_output_tokens": { "type": "number", "description": "Optional compatibility hint. LynShen may still project very large outputs through its global output budget." },
-                    "tty": { "type": "boolean", "description": "Compatibility hint accepted for Codex-style calls; LynShen command execution does not require it." },
-                    "login": { "type": "boolean", "description": "Compatibility hint accepted for Codex-style calls; LynShen uses its configured shell invocation." }
-                },
-                "required": ["cmd"],
-                "additionalProperties": false
+                "required": ["command"]
             }
         }),
         json!({
             "type": "function",
             "name": "write_stdin",
-            "description": "Send input to a running bash/exec_command session or poll it. Use the session_id returned by bash or exec_command.",
+            "description": "Send input to a running bash session, or poll it for output.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "session_id": { "type": "number", "description": "Running bash session id." },
-                    "text": { "type": "string", "description": "Text to write to stdin. Omit or pass empty text to only poll." },
-                    "chars": { "type": "string", "description": "Codex-compatible alias for text." },
-                    "yield_time_ms": { "type": "number", "description": "Milliseconds to wait for more output. Defaults to 1000." }
+                    "session_id": { "type": "number" },
+                    "text": { "type": "string", "description": "Omit to only poll." },
+                    "yield_time_ms": { "type": "number", "description": "How long to wait for output, default 1000." }
                 },
-                "required": ["session_id"],
-                "additionalProperties": false
+                "required": ["session_id"]
             }
         }),
         json!({
             "type": "function",
             "name": "ls",
-            "description": "List directory contents sorted alphabetically. Directories have a trailing slash. Safe to call in parallel with other read-only exploration tools.",
+            "description": "List a directory, sorted; directories end with /.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Directory to list. Defaults to current workspace." },
-                    "limit": { "type": "number", "description": "Optional maximum entries to return. Defaults to no entry limit." }
-                },
-                "additionalProperties": false
+                    "path": { "type": "string" },
+                    "limit": { "type": "number", "description": "Max entries." }
+                }
             }
         }),
         json!({
             "type": "function",
             "name": "ripgrep",
-            "description": "Search file contents with ripgrep (rg). Respects .gitignore by default and returns matching lines with paths and line numbers. Prefer a narrow path/glob or limit for broad patterns; large result sets return a soft warning. Use multiple ripgrep calls in one response for independent search hypotheses.",
+            "description": "Search file contents with ripgrep (respects .gitignore). Returns matching lines with paths and line numbers.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "pattern": { "type": "string", "description": "Search pattern." },
-                    "path": { "type": "string", "description": "File or directory to search. Defaults to current workspace." },
-                    "glob": { "type": "string", "description": "Optional glob filter, e.g. *.rs or **/*.ts." },
-                    "ignoreCase": { "type": "boolean", "description": "Case-insensitive search. Defaults to false." },
-                    "literal": { "type": "boolean", "description": "Treat pattern as a literal string. Defaults to false." },
-                    "contextLines": { "type": "number", "description": "Lines before and after each match. Defaults to 0." },
-                    "limit": { "type": "number", "description": "Optional maximum output lines. Defaults to no output line limit." }
+                    "pattern": { "type": "string", "description": "Regex, or plain text with literal: true." },
+                    "path": { "type": "string", "description": "File or directory." },
+                    "glob": { "type": "string", "description": "File filter, e.g. *.rs." },
+                    "ignoreCase": { "type": "boolean" },
+                    "literal": { "type": "boolean" },
+                    "contextLines": { "type": "number", "description": "Lines shown around each match." },
+                    "limit": { "type": "number", "description": "Max output lines." }
                 },
-                "required": ["pattern"],
-                "additionalProperties": false
+                "required": ["pattern"]
             }
         }),
         json!({
             "type": "function",
             "name": "outline",
-            "description": "Return a lightweight symbol outline for a source file without reading the full body. Safe to call in parallel with other read-only tools.",
+            "description": "List a source file's symbols with line numbers, without reading the whole file.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Source file path." },
-                    "limit": { "type": "number", "description": "Maximum symbols to return. Defaults to 200." }
+                    "path": { "type": "string" },
+                    "limit": { "type": "number", "description": "Max symbols, default 200." }
                 },
-                "required": ["path"],
-                "additionalProperties": false
+                "required": ["path"]
             }
         }),
         json!({
             "type": "function",
             "name": "checkpoint",
-            "description": "Create, list, or restore lightweight file checkpoints under .lynshen/checkpoints. This is for local rollback, not git.",
+            "description": "Snapshot files under .lynshen/checkpoints, list snapshots, or restore one (local rollback, not git).",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": { "type": "string", "enum": ["create", "list", "restore"], "description": "Checkpoint action." },
-                    "name": { "type": "string", "description": "Checkpoint name for create." },
-                    "id": { "type": "string", "description": "Checkpoint id for restore." },
-                    "paths": { "type": "array", "items": { "type": "string" }, "description": "Files to snapshot for create." }
+                    "action": { "type": "string", "enum": ["create", "list", "restore"] },
+                    "name": { "type": "string", "description": "For create." },
+                    "id": { "type": "string", "description": "For restore." },
+                    "paths": { "type": "array", "items": { "type": "string" }, "description": "Files to snapshot, for create." }
                 },
-                "required": ["action"],
-                "additionalProperties": false
+                "required": ["action"]
             }
         }),
         crate::web_fetch::definition(),
         crate::web::search_definition(),
         crate::images::definition(),
     ])
-}
-
-/// Static tool names for the system prompt's "Available tools" line. Mirrors
-/// the fixed entries in `definitions()` in the same order, with edit tools
-/// filtered to the enabled set; the subagent tools are only listed when they
-/// would actually be offered. Dynamic tools added per turn in
-/// `OpenAiClient::tool_definitions` (MCP, goal/plan) are not part
-/// of this list.
-pub fn prompt_tool_names(
-    edit_tools: &[String],
-    subagents: bool,
-    web_search: bool,
-    images: bool,
-) -> Vec<&'static str> {
-    let mut names = vec!["read"];
-    for name in crate::config::EDIT_TOOL_NAMES {
-        if edit_tools.iter().any(|tool| tool == name) {
-            names.push(name);
-        }
-    }
-    names.extend([
-        "bash",
-        "exec_command",
-        "write_stdin",
-        "ls",
-        "ripgrep",
-        "outline",
-        "checkpoint",
-        "web_fetch",
-    ]);
-    if web_search {
-        names.push("web_search");
-    }
-    if images {
-        names.push(crate::images::TOOL_NAME);
-    }
-    if subagents {
-        names.extend([
-            "spawn_agent",
-            "wait_agent",
-            "list_agents",
-            "send_message",
-            "close_agent",
-        ]);
-    }
-    names
 }
 
 fn with_function_tool_defaults(mut definitions: Vec<Value>) -> Vec<Value> {
@@ -1791,7 +1707,7 @@ fn finished_or_unknown(session_id: u64, wrote_input: bool) -> Result<Value, Stri
             Ok(result)
         }
         None => Err(format!(
-            "shell session {session_id} is not running (it finished earlier or never existed); start the command again with exec_command if needed"
+            "shell session {session_id} is not running (it finished earlier or never existed); start the command again with bash if needed"
         )),
     }
 }
@@ -4495,7 +4411,6 @@ mod tests {
                 "write",
                 "apply_patch",
                 "bash",
-                "exec_command",
                 "write_stdin",
                 "ls",
                 "ripgrep",
@@ -4512,56 +4427,20 @@ mod tests {
     }
 
     #[test]
-    fn prompt_tool_names_match_filtered_definitions() {
-        // Mirror of the static filter OpenAiClient::tool_definitions applies:
-        // definitions() minus disabled edit tools, before the conditional
-        // subagent/dynamic additions.
-        let edit_tools = crate::config::default_edit_tools();
-        let definitions = definitions();
-        let expected = definitions
-            .iter()
-            .filter_map(|tool| tool.get("name").and_then(Value::as_str))
-            .filter(|name| {
-                crate::config::canonical_edit_tool_name(name)
-                    .is_none_or(|canonical| edit_tools.iter().any(|tool| tool == canonical))
-            })
+    fn shell_aliases_run_as_bash_without_being_offered() {
+        let names = definitions()
+            .into_iter()
+            .filter_map(|tool| tool["name"].as_str().map(str::to_string))
             .collect::<Vec<_>>();
-        assert_eq!(prompt_tool_names(&edit_tools, false, true, true), expected);
-        let without = prompt_tool_names(&edit_tools, false, false, false);
-        assert!(!without.contains(&"web_search"));
-        assert!(!without.contains(&"generate_image"));
-
-        let all = vec![
-            "str_replace".to_string(),
-            "hashline_edit".to_string(),
-            "write".to_string(),
-            "apply_patch".to_string(),
-        ];
-        let names = prompt_tool_names(&all, true, false, true);
-        assert_eq!(
-            names,
-            [
-                "read",
-                "str_replace",
-                "hashline_edit",
-                "write",
-                "apply_patch",
-                "bash",
-                "exec_command",
-                "write_stdin",
-                "ls",
-                "ripgrep",
-                "outline",
-                "checkpoint",
-                "web_fetch",
-                "generate_image",
-                "spawn_agent",
-                "wait_agent",
-                "list_agents",
-                "send_message",
-                "close_agent",
-            ]
-        );
+        let dir = std::env::temp_dir();
+        for alias in ["exec_command", "execute", "shell_command"] {
+            assert!(
+                !names.iter().any(|name| name == alias),
+                "{alias} is offered"
+            );
+            let output = run_tool(alias, &json!({ "cmd": "echo alias-ok" }).to_string(), &dir);
+            assert!(output.contains("alias-ok"), "{alias}: {output}");
+        }
     }
 
     #[test]

@@ -1419,7 +1419,7 @@ fn a_chat_session_runs_in_the_chats_directory_with_the_chat_prompt() {
         .filter_map(|frame| frame["delta"].as_str().or(frame["text"].as_str()))
         .collect();
     assert!(
-        reply.contains(lynshen_agent_core::chat::CHAT_TOOL_GUIDANCE),
+        reply.contains(lynshen_agent_core::chat::CHAT_SYSTEM_PROMPT),
         "{reply}"
     );
 }

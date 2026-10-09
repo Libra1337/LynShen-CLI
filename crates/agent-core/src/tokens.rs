@@ -1,5 +1,22 @@
 use serde_json::Value;
+use std::{
+    collections::HashMap,
+    hash::{DefaultHasher, Hash, Hasher},
+    sync::{Mutex, OnceLock},
+};
 use tiktoken_rs::bpe_for_model;
+
+/// Texts at least this long have their count remembered. The engine recounts
+/// the whole conversation after every item it gains (the context gauge), and
+/// all but the newest items are unchanged: without this a long session spent
+/// about 0.1 s of tokenizing per 130k tokens on every tool call.
+const MEMO_MIN_BYTES: usize = 512;
+const MEMO_MAX_ENTRIES: usize = 16_384;
+
+fn memo() -> &'static Mutex<HashMap<u64, usize>> {
+    static MEMO: OnceLock<Mutex<HashMap<u64, usize>>> = OnceLock::new();
+    MEMO.get_or_init(Mutex::default)
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct TokenCount {
@@ -21,8 +38,26 @@ pub(crate) fn count_text(model: &str, text: &str) -> TokenCount {
         },
         |bpe| (bpe, requested),
     );
+    let tokens = if text.len() < MEMO_MIN_BYTES {
+        bpe.count_with_special_tokens(text)
+    } else {
+        let mut hasher = DefaultHasher::new();
+        (tokenizer, text).hash(&mut hasher);
+        let key = hasher.finish();
+        let remembered = memo().lock().ok().and_then(|memo| memo.get(&key).copied());
+        remembered.unwrap_or_else(|| {
+            let tokens = bpe.count_with_special_tokens(text);
+            if let Ok(mut memo) = memo().lock() {
+                if memo.len() >= MEMO_MAX_ENTRIES {
+                    memo.clear();
+                }
+                memo.insert(key, tokens);
+            }
+            tokens
+        })
+    };
     TokenCount {
-        tokens: bpe.count_with_special_tokens(text),
+        tokens,
         tokenizer: tokenizer.to_string(),
     }
 }
@@ -69,6 +104,21 @@ mod tests {
 
         assert!(count.tokens > 0);
         assert_eq!(count.tokenizer, "gpt-5");
+    }
+
+    #[test]
+    fn long_texts_count_the_same_from_memory() {
+        let text = "fn main() { println!(\"hello\"); }\n".repeat(64);
+        let first = count_text("gpt-5", &text).tokens;
+        let tokenizer = bpe_for_model("gpt-5").unwrap();
+        assert_eq!(first, tokenizer.count_with_special_tokens(&text));
+        assert_eq!(count_text("gpt-5", &text).tokens, first);
+        // A different text is not mistaken for a remembered one.
+        let longer = format!("{text}// one more line\n");
+        assert_eq!(
+            count_text("gpt-5", &longer).tokens,
+            tokenizer.count_with_special_tokens(&longer)
+        );
     }
 
     #[test]

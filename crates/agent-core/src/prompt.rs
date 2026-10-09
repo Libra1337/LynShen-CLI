@@ -3,49 +3,51 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const TOOL_GUIDANCE_PREFIX: &str = "prefer read/ls/ripgrep/outline for targeted exploration; use bash or exec_command for shell commands and verification; when several read-only searches or inspections are independent, issue them together in the same assistant response; group dependent shell checks into one command when that reduces round trips; keep dependent edit-after-read and verify-after-edit steps ordered; read an existing file before changing it;";
-const TOOL_GUIDANCE_SUFFIX: &str =
-    "if a tool fails, correct the call or use another suitable tool and continue when feasible.";
 const PROJECT_INSTRUCTIONS_MAX_BYTES: usize = 64 * 1024;
 
-/// Tool guidance assembled from the enabled edit tools so the prompt only
-/// describes edit commands that are actually exposed to the model.
+/// How to use the tools in a coding session, naming only the edit tools that
+/// are enabled. Behavior (finish the task, verify, ...) is the base prompt's.
 fn tool_guidance(edit_tools: &[String]) -> String {
     let enabled = |name: &str| edit_tools.iter().any(|tool| tool == name);
     let edit_names: Vec<&str> = crate::config::EDIT_TOOL_NAMES
         .into_iter()
         .filter(|name| enabled(name))
         .collect();
-    let mut guidance = TOOL_GUIDANCE_PREFIX.to_string();
-    if enabled("write") {
-        guidance.push_str(" write can create new files without a prior read;");
+    let mut guidance = "Tool use: explore with read, ls and ripgrep; run commands with bash. Make independent calls (reads, searches, checks) together in one response.".to_string();
+    if edit_names.is_empty() {
+        guidance.push_str(" No file-edit tools are enabled: describe the changes instead.");
+        return guidance;
+    }
+    guidance.push_str(&format!(
+        " Read a file before you edit it. Edit files with {}.",
+        edit_names.join(" or ")
+    ));
+    guidance.push_str(if enabled("write") {
+        " Create new files with write."
     } else if enabled("apply_patch") {
-        guidance.push_str(" apply_patch can create new files;");
-    } else if !edit_names.is_empty() {
-        guidance.push_str(" create new files with bash (e.g. a heredoc);");
-    }
-    match edit_names.as_slice() {
-        [] => {
-            guidance.push_str(" no file-edit tools are enabled; describe needed changes instead;")
-        }
-        [name] => guidance.push_str(&format!(" use {name} for file edits;")),
-        names => guidance.push_str(&format!(" use {} for file edits;", names.join(", "))),
-    }
-    guidance.push(' ');
-    guidance.push_str(TOOL_GUIDANCE_SUFFIX);
+        " Create new files with apply_patch."
+    } else {
+        " Create new files with bash (for example a heredoc)."
+    });
     guidance
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PromptContext {
     pub date: String,
     pub cwd: PathBuf,
-    pub tools: Vec<&'static str>,
     pub edit_tools: Vec<String>,
     pub project_instructions: Vec<ProjectInstruction>,
     pub skills: Vec<SkillPromptItem>,
-    /// A chat session gets research guidance instead of coding guidance.
+    /// A chat session: its base prompt carries its own tool guidance, and
+    /// plan mode does not apply.
     pub chat: bool,
+    /// The shell sandbox's note; empty without a sandbox.
+    pub sandbox: String,
+    pub plan_mode: bool,
+    /// What the host adds to every turn (a daemon agent's brief and peers);
+    /// empty without a host.
+    pub host: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,22 +69,18 @@ pub struct SkillCommand {
     pub skill: SkillPromptItem,
 }
 
+/// The system prompt, ordered for prompt caching: what is the same across
+/// sessions and turns comes first, so providers can reuse the cached prefix.
+/// Base prompt and tool guidance (fixed per config), project instructions
+/// and skills (fixed per project), the sandbox note, then the working
+/// directory and the date (the date changes daily), plan mode (changes when
+/// the user switches mode) and last the host's text (may change every turn).
 pub fn build_system_prompt(base: &str, context: &PromptContext) -> String {
     let mut prompt = base.trim_end().to_string();
-    prompt.push_str("\n\n<runtime_context>\n");
-    prompt.push_str(&format!("Current date: {}\n", context.date));
-    prompt.push_str(&format!(
-        "Current working directory: {}\n",
-        context.cwd.display()
-    ));
-    prompt.push_str(&format!("Available tools: {}\n", context.tools.join(", ")));
-    let guidance = if context.chat {
-        crate::chat::CHAT_TOOL_GUIDANCE.to_string()
-    } else {
-        tool_guidance(&context.edit_tools)
-    };
-    prompt.push_str(&format!("Tool guidance: {guidance}\n"));
-    prompt.push_str("</runtime_context>");
+    if !context.chat {
+        prompt.push_str("\n\n");
+        prompt.push_str(&tool_guidance(&context.edit_tools));
+    }
 
     if !context.project_instructions.is_empty() {
         prompt.push_str("\n\n<project_context>\n");
@@ -98,6 +96,23 @@ pub fn build_system_prompt(base: &str, context: &PromptContext) -> String {
     }
 
     prompt.push_str(&skills_block(&context.skills));
+    if !context.sandbox.trim().is_empty() {
+        prompt.push_str("\n\n");
+        prompt.push_str(context.sandbox.trim_end());
+    }
+    prompt.push_str(&format!(
+        "\n\n<env>\nWorking directory: {}\nDate: {}\n</env>",
+        context.cwd.display(),
+        context.date
+    ));
+    if context.plan_mode && !context.chat {
+        prompt.push_str("\n\n");
+        prompt.push_str(crate::plan_mode::PROMPT_ADDENDUM);
+    }
+    if !context.host.trim().is_empty() {
+        prompt.push_str("\n\n");
+        prompt.push_str(context.host.trim_end());
+    }
     prompt
 }
 
@@ -107,26 +122,14 @@ pub fn skills_block(skills: &[SkillPromptItem]) -> String {
     if skills.is_empty() {
         return block;
     }
-    block.push_str(
-        "\n\nThe following skills provide specialized instructions for specific tasks.\n",
-    );
-    block.push_str("Read the full skill file when the task matches its description.\n");
-    block.push_str(
-        "When a skill file references a relative path, resolve it against the skill directory.\n\n",
-    );
-    block.push_str("<available_skills>\n");
+    block.push_str("\n\nSkills: when a task matches a skill's description, read its file first. Resolve relative paths in a skill against its directory.\n<available_skills>\n");
     for skill in skills {
-        block.push_str("  <skill>\n");
-        block.push_str(&format!("    <name>{}</name>\n", escape_xml(&skill.name)));
         block.push_str(&format!(
-            "    <description>{}</description>\n",
+            "<skill name=\"{}\" location=\"{}\">{}</skill>\n",
+            escape_xml(&skill.name),
+            escape_xml(&skill.path.display().to_string()),
             escape_xml(&skill.description)
         ));
-        block.push_str(&format!(
-            "    <location>{}</location>\n",
-            escape_xml(&skill.path.display().to_string())
-        ));
-        block.push_str("  </skill>\n");
     }
     block.push_str("</available_skills>");
     block
@@ -415,33 +418,37 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    #[test]
-    fn chat_prompt_uses_research_guidance() {
-        let prompt = build_system_prompt(
-            "Chat prompt",
-            &PromptContext {
-                date: "2026-09-29".to_string(),
-                cwd: PathBuf::from("/home/u/.lynshen/chats/c1"),
-                tools: vec!["web_search", "web_fetch"],
-                edit_tools: crate::config::default_edit_tools(),
-                project_instructions: Vec::new(),
-                skills: Vec::new(),
-                chat: true,
-            },
-        );
-        assert!(prompt.contains(crate::chat::CHAT_TOOL_GUIDANCE));
-        assert!(!prompt.contains(TOOL_GUIDANCE_PREFIX));
+    fn coding_context(edit_tools: Vec<String>) -> PromptContext {
+        PromptContext {
+            date: "2026-05-27".to_string(),
+            cwd: PathBuf::from("/repo"),
+            edit_tools,
+            ..PromptContext::default()
+        }
     }
 
     #[test]
-    fn prompt_includes_runtime_context_and_skills() {
+    fn chat_prompt_has_no_coding_tool_guidance() {
+        let prompt = build_system_prompt(
+            crate::chat::CHAT_SYSTEM_PROMPT,
+            &PromptContext {
+                chat: true,
+                plan_mode: true,
+                ..coding_context(crate::config::default_edit_tools())
+            },
+        );
+        assert!(!prompt.contains("Tool use:"));
+        assert!(!prompt.contains("<plan_mode>"));
+        assert!(prompt.contains("web_fetch"));
+        assert!(prompt.ends_with("Date: 2026-05-27\n</env>"));
+    }
+
+    #[test]
+    fn prompt_includes_env_project_context_and_skills() {
         let prompt = build_system_prompt(
             "Base prompt",
             &PromptContext {
-                date: "2026-05-27".to_string(),
                 cwd: PathBuf::from("C:/repo"),
-                tools: vec!["read", "bash"],
-                edit_tools: crate::config::default_edit_tools(),
                 project_instructions: vec![ProjectInstruction {
                     path: PathBuf::from("C:/repo/AGENTS.md"),
                     content: "Follow project rules.".to_string(),
@@ -451,82 +458,101 @@ mod tests {
                     description: "Review <code> & tests".to_string(),
                     path: PathBuf::from("C:/skills/review/SKILL.md"),
                 }],
-                chat: false,
+                ..coding_context(crate::config::default_edit_tools())
             },
         );
 
-        assert!(prompt.contains("<runtime_context>"));
-        assert!(prompt.contains("Current date: 2026-05-27"));
-        assert!(prompt.contains("Available tools: read, bash"));
+        assert!(prompt.contains("<env>\nWorking directory: C:/repo\nDate: 2026-05-27\n</env>"));
         assert!(prompt.contains("<project_context>"));
         assert!(prompt.contains("Follow project rules."));
         assert!(prompt.contains("<available_skills>"));
-        assert!(prompt.contains("Review &lt;code&gt; &amp; tests"));
+        assert!(prompt.contains(
+            "<skill name=\"review\" location=\"C:/skills/review/SKILL.md\">Review &lt;code&gt; &amp; tests</skill>"
+        ));
     }
 
     #[test]
-    fn default_prompt_advertises_only_hashline_edit() {
-        let edit_tools = crate::config::default_edit_tools();
+    fn stable_parts_come_before_the_date_mode_and_host_text() {
         let prompt = build_system_prompt(
-            "Base",
+            "Base prompt",
             &PromptContext {
-                date: "2026-05-27".to_string(),
-                cwd: PathBuf::from("/repo"),
-                tools: crate::tools::prompt_tool_names(&edit_tools, true, false, false),
-                edit_tools,
-                project_instructions: Vec::new(),
-                skills: Vec::new(),
-                chat: false,
+                project_instructions: vec![ProjectInstruction {
+                    path: PathBuf::from("/repo/AGENTS.md"),
+                    content: "Follow project rules.".to_string(),
+                }],
+                skills: vec![SkillPromptItem {
+                    name: "review".to_string(),
+                    description: "Review code".to_string(),
+                    path: PathBuf::from("/skills/review/SKILL.md"),
+                }],
+                sandbox: "<sandbox mode=\"workspace-write\">\nnote\n</sandbox>".to_string(),
+                plan_mode: true,
+                host: "Peers: ops (busy)".to_string(),
+                ..coding_context(crate::config::default_edit_tools())
             },
         );
-        let tools_line = prompt
-            .lines()
-            .find(|line| line.starts_with("Available tools:"))
-            .expect("tools line");
-        let listed: Vec<&str> = tools_line
-            .trim_start_matches("Available tools: ")
-            .split(", ")
-            .collect();
-        assert!(listed.contains(&"hashline_edit"));
-        for disabled in ["str_replace", "write", "apply_patch"] {
-            assert!(
-                !listed.contains(&disabled),
-                "tools list advertises {disabled}"
-            );
-        }
-        let guidance = prompt
-            .lines()
-            .find(|line| line.starts_with("Tool guidance:"))
-            .expect("guidance line");
-        assert!(guidance.contains("use hashline_edit for file edits"));
-        assert!(!guidance.contains("str_replace"));
-        assert!(!guidance.contains("apply_patch"));
-        assert!(!guidance.contains(" write"));
-    }
-
-    #[test]
-    fn prompt_lists_enabled_edit_tools_and_new_file_rule() {
-        let edit_tools = vec![
-            "hashline_edit".to_string(),
-            "write".to_string(),
-            "apply_patch".to_string(),
+        let position = |needle: &str| {
+            prompt
+                .find(needle)
+                .unwrap_or_else(|| panic!("missing {needle}"))
+        };
+        let order = [
+            position("Base prompt"),
+            position("Tool use:"),
+            position("<project_context>"),
+            position("<available_skills>"),
+            position("<sandbox"),
+            position("<env>"),
+            position("Date: 2026-05-27"),
+            position("<plan_mode>"),
+            position("Peers: ops (busy)"),
         ];
-        let prompt = build_system_prompt(
-            "Base",
+        assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{order:?}");
+        // Only the date line differs between two days' prompts, near the end.
+        let tomorrow = build_system_prompt(
+            "Base prompt",
             &PromptContext {
-                date: "2026-05-27".to_string(),
-                cwd: PathBuf::from("/repo"),
-                tools: crate::tools::prompt_tool_names(&edit_tools, false, false, false),
-                edit_tools,
-                project_instructions: Vec::new(),
-                skills: Vec::new(),
-                chat: false,
+                date: "2026-05-28".to_string(),
+                ..coding_context(crate::config::default_edit_tools())
             },
         );
-        assert!(prompt.contains("Available tools: read, hashline_edit, write, apply_patch"));
-        assert!(prompt.contains("use hashline_edit, write, apply_patch for file edits"));
-        assert!(prompt.contains("write can create new files without a prior read"));
-        assert!(!prompt.contains("spawn_agent"));
+        let today = build_system_prompt(
+            "Base prompt",
+            &coding_context(crate::config::default_edit_tools()),
+        );
+        let shared = today
+            .bytes()
+            .zip(tomorrow.bytes())
+            .take_while(|(a, b)| a == b)
+            .count();
+        assert_eq!(&today[shared..], "7\n</env>");
+    }
+
+    #[test]
+    fn default_guidance_names_only_hashline_edit() {
+        let prompt =
+            build_system_prompt("Base", &coding_context(crate::config::default_edit_tools()));
+        assert!(prompt.contains("Edit files with hashline_edit."));
+        assert!(prompt.contains("Create new files with bash"));
+        for disabled in ["str_replace", "apply_patch", "with write"] {
+            assert!(!prompt.contains(disabled), "guidance names {disabled}");
+        }
+    }
+
+    #[test]
+    fn guidance_lists_enabled_edit_tools_and_new_file_rule() {
+        let all = |names: &[&str]| names.iter().map(|name| name.to_string()).collect();
+        let prompt = build_system_prompt(
+            "Base",
+            &coding_context(all(&["hashline_edit", "write", "apply_patch"])),
+        );
+        assert!(prompt.contains("Edit files with hashline_edit or write or apply_patch."));
+        assert!(prompt.contains("Create new files with write."));
+        let patch_only = build_system_prompt("Base", &coding_context(all(&["apply_patch"])));
+        assert!(patch_only.contains("Create new files with apply_patch."));
+        let none = build_system_prompt("Base", &coding_context(Vec::new()));
+        assert!(none.contains("No file-edit tools are enabled"));
+        assert!(!none.contains("Edit files with"));
     }
 
     #[test]

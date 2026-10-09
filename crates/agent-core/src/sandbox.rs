@@ -332,7 +332,7 @@ impl SandboxPolicy {
     }
 
     /// A paragraph for the system prompt describing the sandbox.
-    pub fn prompt(&self, cwd: &Path) -> String {
+    pub fn prompt(&self) -> String {
         if !self.is_sandboxed() {
             return String::new();
         }
@@ -367,11 +367,10 @@ impl SandboxPolicy {
             )
         };
         format!(
-            "<sandbox mode=\"{}\">\nShell commands run in a sandbox. {writable}{readable} Network is {}. Credentials such as ~/.ssh are unreadable. When a command needs more (committing to git, writing elsewhere{}), run it with `escalate: true` and a one-line `justification`; it then runs outside the sandbox if approved. Working directory: {}.\n</sandbox>",
+            "<sandbox mode=\"{}\">\nShell commands run in a sandbox. {writable}{readable} Network is {}. Credentials such as ~/.ssh are unreadable. A command that needs more (committing to git, writing elsewhere{}) runs outside the sandbox with `escalate: true` and a one-line `justification`, once approved.\n</sandbox>",
             self.mode.as_str(),
             if self.network { "on" } else { "off" },
             if self.network { "" } else { ", network access" },
-            cwd.display()
         )
     }
 }

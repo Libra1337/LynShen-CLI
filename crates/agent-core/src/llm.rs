@@ -93,6 +93,9 @@ pub struct OpenAiClient {
     context_budget: u64,
     provider_kind: Protocol,
     goal_tool_tx: Option<Sender<GoalToolRequest>>,
+    /// The session has a goal: which goal tools are offered (see
+    /// `goal_tool_definitions`).
+    has_goal: bool,
     approval_tx: Option<Sender<ApprovalRequest>>,
     /// Which tool classes this client gates on the approval channel: the
     /// session's live mode, so a switch applies to the next call mid-turn.
@@ -163,6 +166,8 @@ pub struct OpenAiClientConfig<'a> {
     pub connect_timeout: Duration,
     pub read_timeout: Duration,
     pub goal_tool_tx: Option<Sender<GoalToolRequest>>,
+    /// The session has a goal when the turn starts.
+    pub has_goal: bool,
     pub approval_tx: Option<Sender<ApprovalRequest>>,
     pub approval_mode: LiveApprovalMode,
     /// Model the `auto` mode safety classifier runs on (same provider/base_url
@@ -512,6 +517,7 @@ impl OpenAiClient {
             context_budget: 0,
             provider_kind,
             goal_tool_tx: config.goal_tool_tx,
+            has_goal: config.has_goal,
             approval_tx: config.approval_tx,
             approval_mode: config.approval_mode,
             enabled_edit_tools: config.edit_tools,
@@ -1034,7 +1040,7 @@ impl OpenAiClient {
         (system, mcp)
     }
 
-    fn tool_definitions(&self) -> Vec<Value> {
+    pub(crate) fn tool_definitions(&self) -> Vec<Value> {
         if let Some(host) = self.host.as_ref().filter(|host| host.exclusive) {
             return host.tools.clone();
         }
@@ -1073,19 +1079,25 @@ impl OpenAiClient {
                     .and_then(Value::as_object_mut)
                     .filter(|_| shell)
                 {
-                    properties.insert("escalate".to_string(), json!({
-                        "type": "boolean",
-                        "description": "Run outside the sandbox (for example to commit to git or write outside the writable directories). Needs approval."
-                    }));
-                    properties.insert("justification".to_string(), json!({
-                        "type": "string",
-                        "description": "With escalate: one line on why the command must run outside the sandbox."
-                    }));
+                    properties.insert(
+                        "escalate".to_string(),
+                        json!({
+                            "type": "boolean",
+                            "description": "Run outside the sandbox; needs approval."
+                        }),
+                    );
+                    properties.insert(
+                        "justification".to_string(),
+                        json!({
+                            "type": "string",
+                            "description": "With escalate: why, in one line."
+                        }),
+                    );
                 }
             }
         }
         if self.goal_tool_tx.is_some() {
-            definitions.extend(goal_tool_definitions());
+            definitions.extend(goal_tool_definitions(self.has_goal));
             definitions.push(plan_tool_definition());
             if self.approval_mode.get() == ApprovalMode::Plan {
                 definitions.push(crate::plan_mode::propose_plan_definition());
@@ -1402,6 +1414,7 @@ impl OpenAiClient {
             // Claude uses Anthropic Messages, the rest Responses).
             provider_kind: protocol,
             goal_tool_tx: None,
+            has_goal: false,
             // The child shares the parent's approval channel and live mode.
             approval_tx: self.approval_tx.clone(),
             approval_mode: self.approval_mode.clone(),
@@ -1902,28 +1915,47 @@ fn allowed_subagent_models(own: &str, specs: &[SubagentModelSpec]) -> String {
 
 fn efforts_label(efforts: &[String]) -> String {
     if efforts.is_empty() {
-        "reasoning effort: model default".to_string()
+        "default effort".to_string()
     } else {
-        format!("reasoning effort: {}", efforts.join(" | "))
+        format!("effort {}", efforts.join("|"))
     }
 }
 
 /// The spawn_agent `model`/`reasoning_effort` guidance: which models the agent
 /// may pick, their tiers, and when to use each (config `subagent_models`).
+/// Models without a note share one line per effort list; a model with a note
+/// gets its own line.
 fn subagent_model_guide(own: &str, own_efforts: &[String], specs: &[SubagentModelSpec]) -> String {
-    let mut guide = format!(
-        "\n\nModels: pick the one that suits the task; when the user names a model for subagents, use it. Omit model to use your own.\n- {own} (your model; {})",
-        efforts_label(own_efforts)
+    let mut guide = "\nModels (pick one that suits the task; use the one the user names; omit model for yours):".to_string();
+    let entries = std::iter::once((format!("{own} (yours)"), own_efforts, "")).chain(
+        specs.iter().filter(|spec| spec.name != own).map(|spec| {
+            (
+                spec.name.clone(),
+                spec.reasoning_efforts.as_slice(),
+                spec.description.as_str(),
+            )
+        }),
     );
-    for spec in specs.iter().filter(|spec| spec.name != own) {
-        guide.push_str(&format!(
-            "\n- {} ({})",
-            spec.name,
-            efforts_label(&spec.reasoning_efforts)
-        ));
-        if !spec.description.is_empty() {
-            guide.push_str(&format!(": {}", spec.description));
+    let mut grouped: Vec<(&[String], Vec<String>)> = Vec::new();
+    let mut noted = Vec::new();
+    for (name, efforts, note) in entries {
+        if !note.is_empty() {
+            noted.push(format!("\n- {name}: {}; {note}", efforts_label(efforts)));
+        } else if let Some((_, names)) = grouped.iter_mut().find(|(group, _)| *group == efforts) {
+            names.push(name);
+        } else {
+            grouped.push((efforts, vec![name]));
         }
+    }
+    for (efforts, names) in grouped {
+        guide.push_str(&format!(
+            "\n- {}: {}",
+            names.join(", "),
+            efforts_label(efforts)
+        ));
+    }
+    for line in noted {
+        guide.push_str(&line);
     }
     guide
 }
@@ -1937,46 +1969,36 @@ fn subagent_definitions(
     let mut spawn = json!({
             "type": "function",
             "name": "spawn_agent",
-            "description": format!("Start a background subagent for an independent task. By default it starts with a fresh context (only your message) and works in your cwd, so its file writes land directly in your tree; give it a self-contained task. Set isolation to \"worktree\" to run it in a per-agent workspace under .lynshen/agents/ (a detached git worktree inside a repository, otherwise a fresh directory) whose changes you harvest via workdir and files_changed — use this when several agents write in parallel. The agent inherits tools, system prompt, and skills and returns immediately. Keep at most {MAX_LIVE_SUBAGENTS} live agents; nesting is capped at depth {MAX_SUBAGENT_DEPTH}.{}", subagent_model_guide(own_model, own_efforts, models)),
+            "description": format!("Start a background subagent on a self-contained task and return at once; collect it with wait_agent. It has your tools, prompt and skills, starts with only your message, and works in your cwd. At most {MAX_LIVE_SUBAGENTS} live agents and {MAX_SUBAGENT_DEPTH} levels of nesting.{}", subagent_model_guide(own_model, own_efforts, models)),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "task_name": {
                         "type": "string",
-                        "description": "Stable lowercase identifier for this child under the current agent path. Use lowercase letters, digits, and underscores."
+                        "description": "Short id: lowercase letters, digits, underscores."
                     },
-                    "message": {
-                        "type": "string",
-                        "description": "Self-contained task for the subagent."
-                    },
+                    "message": { "type": "string" },
                     "fork_turns": {
                         "type": "string",
-                        "description": "Context to fork into the subagent: none (default, fresh context), all, or a positive integer string for the last N user turns."
+                        "description": "Context to copy: none (default), all, or the last N user turns as a number string."
                     },
                     "isolation": {
                         "type": "string",
                         "enum": ["none", "worktree"],
-                        "description": "Workspace: none (default) shares your cwd; worktree gives the agent an isolated workspace whose writes you harvest."
+                        "description": "worktree: a private workspace under .lynshen/agents/ for agents that write in parallel; harvest its changes from workdir and files_changed."
                     },
                     "reasoning_effort": {
                         "type": "string",
-                        "description": "Optional reasoning effort: one of the chosen model's tiers listed above. Defaults to its lowest tier."
+                        "description": "One of the chosen model's efforts; default its lowest."
                     },
-                    "max_tool_calls": {
-                        "type": "number",
-                        "description": "Optional tool-call budget. Unlimited by default."
-                    },
+                    "max_tool_calls": { "type": "number" },
                     "timeout_secs": {
                         "type": "number",
-                        "description": "Optional wall-clock timeout in seconds (minimum 10). No timeout by default."
+                        "description": "Wall-clock limit, at least 10."
                     },
-                    "max_output_tokens": {
-                        "type": "number",
-                        "description": "Optional per-response output token cap. Defaults to and is capped at the chosen model's limit."
-                    }
+                    "max_output_tokens": { "type": "number" }
                 },
-                "required": ["task_name", "message"],
-                "additionalProperties": false
+                "required": ["task_name", "message"]
             }
     });
     if choosable {
@@ -1991,7 +2013,7 @@ fn subagent_definitions(
         spawn["parameters"]["properties"]["model"] = json!({
             "type": "string",
             "enum": names,
-            "description": "Optional model for the subagent, chosen from the models listed above. Defaults to your model."
+            "description": "Default: yours."
         });
     }
     vec![
@@ -1999,63 +2021,59 @@ fn subagent_definitions(
         json!({
             "type": "function",
             "name": "wait_agent",
-            "description": "Wait for one or more subagents to finish and return their current status/results. Without targets, returns when any agent finishes or there are no live agents.",
+            "description": "Wait for subagents to finish and return their status and results. Without targets, returns when any finishes or none is live.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "targets": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "Optional agent paths or child names to wait for."
+                        "description": "Agent paths or names."
                     },
                     "timeout_ms": {
                         "type": "number",
-                        "description": "Optional wait timeout in milliseconds. Defaults to 30000 and is capped at 30000."
+                        "description": "At most 30000 (the default)."
                     }
-                },
-                "additionalProperties": false
+                }
             }
         }),
         json!({
             "type": "function",
             "name": "list_agents",
-            "description": "List known subagents and their statuses for this active turn.",
+            "description": "List this turn's subagents and their status.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path_prefix": {
                         "type": "string",
-                        "description": "Optional absolute path or child-name prefix filter."
+                        "description": "Filter by path or name prefix."
                     }
-                },
-                "additionalProperties": false
+                }
             }
         }),
         json!({
             "type": "function",
             "name": "send_message",
-            "description": "Queue a short message for a running subagent. The subagent receives it before its next model call.",
+            "description": "Queue a message for a running subagent; it reads it before its next model call.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "target": { "type": "string", "description": "Agent path or child name." },
-                    "message": { "type": "string", "description": "Message to deliver." }
+                    "target": { "type": "string", "description": "Agent path or name." },
+                    "message": { "type": "string" }
                 },
-                "required": ["target", "message"],
-                "additionalProperties": false
+                "required": ["target", "message"]
             }
         }),
         json!({
             "type": "function",
             "name": "close_agent",
-            "description": "Interrupt and close a running subagent.",
+            "description": "Stop and close a running subagent.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "target": { "type": "string", "description": "Agent path or child name." }
+                    "target": { "type": "string", "description": "Agent path or name." }
                 },
-                "required": ["target"],
-                "additionalProperties": false
+                "required": ["target"]
             }
         }),
     ]
@@ -2391,76 +2409,76 @@ fn filter_pending_subagent_items(
         .collect()
 }
 
-fn goal_tool_definitions() -> Vec<Value> {
-    vec![
+/// The goal tools for a session with or without a goal: create_goal only
+/// without one (it fails once a goal exists), get_goal and update_goal only
+/// with one. A goal created mid-turn gets its tools from the next turn, which
+/// goal continuation starts.
+fn goal_tool_definitions(has_goal: bool) -> Vec<Value> {
+    let [get, create, update] = [
         json!({
             "type": "function",
             "name": "get_goal",
-            "description": "Get the current goal for this session, including status, token budget, token usage, and elapsed time.",
+            "description": "Get the session goal: status, token budget and usage, elapsed time.",
             "parameters": {
                 "type": "object",
-                "properties": {},
-                "additionalProperties": false
+                "properties": {}
             }
         }),
         json!({
             "type": "function",
             "name": "create_goal",
-            "description": "Create a goal only when explicitly requested. Fails if a goal already exists.",
+            "description": "Set the session goal, only when the user asks for one.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "objective": { "type": "string", "description": "Concrete objective to pursue." },
-                    "token_budget": { "type": "number", "description": "Optional positive token budget." }
+                    "objective": { "type": "string", "description": "Concrete, checkable objective." },
+                    "token_budget": { "type": "number" }
                 },
-                "required": ["objective"],
-                "additionalProperties": false
+                "required": ["objective"]
             }
         }),
         json!({
             "type": "function",
             "name": "update_goal",
-            "description": "Mark the existing goal complete or blocked. Do not use this for pause, resume, budget-limited, or usage-limited status changes.",
+            "description": "Mark the goal complete (all required work done) or blocked (progress cannot continue).",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "status": {
-                        "type": "string",
-                        "enum": ["complete", "blocked"],
-                        "description": "Set complete only when all required work is done; set blocked only when progress genuinely cannot continue."
-                    }
+                    "status": { "type": "string", "enum": ["complete", "blocked"] }
                 },
-                "required": ["status"],
-                "additionalProperties": false
+                "required": ["status"]
             }
         }),
-    ]
+    ];
+    if has_goal {
+        vec![get, update]
+    } else {
+        vec![create]
+    }
 }
 
 fn plan_tool_definition() -> Value {
     json!({
         "type": "function",
         "name": "update_plan",
-        "description": "Maintain a short, visible task plan for multi-step work. Call it at the start to lay out the steps, and again whenever the plan changes — mark exactly one step in_progress and flip finished steps to completed. Keep steps concise (a handful of words). Skip it for trivial single-step tasks.",
+        "description": "Show the user a short plan for multi-step work and update it as you go: one step in_progress, finished steps completed. Skip it for simple tasks.",
         "parameters": {
             "type": "object",
             "properties": {
                 "plan": {
                     "type": "array",
-                    "description": "The full ordered list of steps; replaces the previous plan.",
+                    "description": "All steps in order, a few words each; replaces the previous plan.",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "step": { "type": "string", "description": "Short description of the step." },
+                            "step": { "type": "string" },
                             "status": { "type": "string", "enum": ["pending", "in_progress", "completed"] }
                         },
-                        "required": ["step", "status"],
-                        "additionalProperties": false
+                        "required": ["step", "status"]
                     }
                 }
             },
-            "required": ["plan"],
-            "additionalProperties": false
+            "required": ["plan"]
         }
     })
 }
@@ -2772,6 +2790,7 @@ mod tests {
             connect_timeout: Duration::from_secs(1),
             read_timeout: Duration::from_secs(1),
             goal_tool_tx: None,
+            has_goal: false,
             approval_tx: None,
             approval_mode: LiveApprovalMode::default(),
             safety_model: None,
@@ -2839,6 +2858,30 @@ mod tests {
     }
 
     #[test]
+    fn goal_tools_follow_whether_the_session_has_a_goal() {
+        let names = |has_goal: bool| {
+            let mut config = test_client_config();
+            let (goal_tx, _goal_rx) = mpsc::channel();
+            config.goal_tool_tx = Some(goal_tx);
+            config.has_goal = has_goal;
+            OpenAiClient::from_config(config)
+                .unwrap()
+                .tool_definitions()
+                .into_iter()
+                .filter_map(|tool| tool["name"].as_str().map(str::to_string))
+                .filter(|name| name.contains("goal") || name == "update_plan")
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(false), ["create_goal", "update_plan"]);
+        assert_eq!(names(true), ["get_goal", "update_goal", "update_plan"]);
+        // A client without the goal channel (a subagent) offers none.
+        assert!(!test_client()
+            .tool_definitions()
+            .iter()
+            .any(|tool| tool["name"].as_str().unwrap().contains("goal")));
+    }
+
+    #[test]
     fn spawn_agent_definition_lists_choosable_models_and_guidance() {
         let client = subagent_model_client();
         let spawn = client
@@ -2847,11 +2890,8 @@ mod tests {
             .find(|definition| definition["name"] == "spawn_agent")
             .unwrap();
         let description = spawn["description"].as_str().unwrap();
-        assert!(
-            description.contains("- gpt-main (your model; reasoning effort: low | medium | high)")
-        );
-        assert!(description
-            .contains("- claude-helper (reasoning effort: low | high): broad code search"));
+        assert!(description.contains("- gpt-main (yours): effort low|medium|high"));
+        assert!(description.contains("- claude-helper: effort low|high; broad code search"));
         assert!(!description.contains("not-configured"));
         assert_eq!(
             spawn["parameters"]["properties"]["model"]["enum"],
@@ -2892,10 +2932,10 @@ mod tests {
             spawn["parameters"]["properties"]["model"]["enum"],
             json!(["gpt-main", "claude-helper"])
         );
-        assert!(spawn["description"]
-            .as_str()
-            .unwrap()
-            .contains("when the user names a model for subagents, use it"));
+        let description = spawn["description"].as_str().unwrap();
+        assert!(description.contains("use the one the user names"));
+        // Models with the same efforts and no note share a line.
+        assert!(description.contains("- gpt-main (yours), claude-helper: effort low|high"));
     }
 
     #[test]
