@@ -69,6 +69,15 @@ pub struct SkillCommand {
     pub skill: SkillPromptItem,
 }
 
+/// Where the per-session part of the system prompt begins: everything before
+/// it is the stable prefix providers cache across sessions and subagents.
+pub(crate) const ENV_START: &str = "\n\n<env>\n";
+
+/// The length of the system prompt's stable prefix (see `ENV_START`).
+pub(crate) fn stable_prefix_len(system_prompt: &str) -> Option<usize> {
+    system_prompt.find(ENV_START)
+}
+
 /// The system prompt, ordered for prompt caching: what is the same across
 /// sessions and turns comes first, so providers can reuse the cached prefix.
 /// Base prompt and tool guidance (fixed per config), project instructions
@@ -101,7 +110,7 @@ pub fn build_system_prompt(base: &str, context: &PromptContext) -> String {
         prompt.push_str(context.sandbox.trim_end());
     }
     prompt.push_str(&format!(
-        "\n\n<env>\nWorking directory: {}\nDate: {}\n</env>",
+        "{ENV_START}Working directory: {}\nDate: {}\n</env>",
         context.cwd.display(),
         context.date
     ));
@@ -425,6 +434,23 @@ mod tests {
             edit_tools,
             ..PromptContext::default()
         }
+    }
+
+    #[test]
+    fn the_stable_prefix_is_the_same_across_days_and_directories() {
+        let context = |cwd: &str, date: &str| PromptContext {
+            date: date.to_string(),
+            cwd: PathBuf::from(cwd),
+            ..coding_context(vec!["hashline_edit".to_string()])
+        };
+        let a = build_system_prompt("base", &context("/a", "2026-10-09"));
+        let b = build_system_prompt("base", &context("/b/worktree", "2026-10-10"));
+        let (sa, sb) = (
+            stable_prefix_len(&a).unwrap(),
+            stable_prefix_len(&b).unwrap(),
+        );
+        assert_eq!(a[..sa], b[..sb]);
+        assert!(a[sa..].starts_with(ENV_START) && a[sa..].contains("2026-10-09"));
     }
 
     #[test]

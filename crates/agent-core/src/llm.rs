@@ -94,8 +94,9 @@ pub struct OpenAiClient {
     provider_kind: Protocol,
     goal_tool_tx: Option<Sender<GoalToolRequest>>,
     /// The session has a goal: which goal tools are offered (see
-    /// `goal_tool_definitions`).
-    has_goal: bool,
+    /// `goal_tool_definitions`). Set when create_goal succeeds, so the
+    /// turn's next request already offers get_goal and update_goal.
+    has_goal: std::cell::Cell<bool>,
     approval_tx: Option<Sender<ApprovalRequest>>,
     /// Which tool classes this client gates on the approval channel: the
     /// session's live mode, so a switch applies to the next call mid-turn.
@@ -517,7 +518,7 @@ impl OpenAiClient {
             context_budget: 0,
             provider_kind,
             goal_tool_tx: config.goal_tool_tx,
-            has_goal: config.has_goal,
+            has_goal: std::cell::Cell::new(config.has_goal),
             approval_tx: config.approval_tx,
             approval_mode: config.approval_mode,
             enabled_edit_tools: config.edit_tools,
@@ -982,6 +983,7 @@ impl OpenAiClient {
         let body = anthropic::request_body(&anthropic::AnthropicRequest {
             model: &self.model,
             system_prompt: &self.system_prompt,
+            stable_system_len: crate::prompt::stable_prefix_len(&self.system_prompt),
             input: &input,
             tools: &tools,
             max_output_tokens: self.max_output_tokens,
@@ -1097,7 +1099,7 @@ impl OpenAiClient {
             }
         }
         if self.goal_tool_tx.is_some() {
-            definitions.extend(goal_tool_definitions(self.has_goal));
+            definitions.extend(goal_tool_definitions(self.has_goal.get()));
             definitions.push(plan_tool_definition());
             if self.approval_mode.get() == ApprovalMode::Plan {
                 definitions.push(crate::plan_mode::propose_plan_definition());
@@ -1205,7 +1207,7 @@ impl OpenAiClient {
                 ),
             }
         } else {
-            tools::run_tool_with_events(
+            let mut result = tools::run_tool_with_events(
                 &request.name,
                 &request.arguments,
                 cwd,
@@ -1219,7 +1221,16 @@ impl OpenAiClient {
                         output,
                     })
                 },
-            )
+            );
+            if request.name == "read" {
+                let hashline_edit = self
+                    .enabled_edit_tools
+                    .iter()
+                    .any(|tool| tool == "hashline_edit");
+                result.model_output =
+                    tools::read_output_for_editing(result.model_output, hashline_edit);
+            }
+            result
         };
         result
     }
@@ -1414,7 +1425,7 @@ impl OpenAiClient {
             // Claude uses Anthropic Messages, the rest Responses).
             provider_kind: protocol,
             goal_tool_tx: None,
-            has_goal: false,
+            has_goal: false.into(),
             // The child shares the parent's approval channel and live mode.
             approval_tx: self.approval_tx.clone(),
             approval_mode: self.approval_mode.clone(),
@@ -1625,6 +1636,9 @@ impl OpenAiClient {
             output: json!({ "error": error.to_string() }).to_string(),
             is_error: true,
         });
+        if name == "create_goal" && !response.is_error {
+            self.has_goal.set(true);
+        }
         Some(tools::ToolExecutionResult {
             model_output: response.output.clone(),
             output: response.output,
@@ -2411,8 +2425,7 @@ fn filter_pending_subagent_items(
 
 /// The goal tools for a session with or without a goal: create_goal only
 /// without one (it fails once a goal exists), get_goal and update_goal only
-/// with one. A goal created mid-turn gets its tools from the next turn, which
-/// goal continuation starts.
+/// with one. A goal created mid-turn switches them from the next request.
 fn goal_tool_definitions(has_goal: bool) -> Vec<Value> {
     let [get, create, update] = [
         json!({
@@ -2855,6 +2868,36 @@ mod tests {
         // Claude on the gateway speaks Anthropic Messages, not the parent's Responses.
         assert_eq!(spec.protocol, Protocol::resolve("", "claude-helper"));
         assert_ne!(spec.protocol, client.provider_kind);
+    }
+
+    #[test]
+    fn a_goal_created_mid_turn_gets_its_tools_on_the_next_request() {
+        let mut config = test_client_config();
+        let (goal_tx, goal_rx) = mpsc::channel::<GoalToolRequest>();
+        config.goal_tool_tx = Some(goal_tx);
+        let handler = std::thread::spawn(move || {
+            let request = goal_rx.recv().unwrap();
+            let _ = request.response_tx.send(ToolGoalResponse {
+                output: json!({ "goal": "ship it" }).to_string(),
+                is_error: false,
+            });
+        });
+        let client = OpenAiClient::from_config(config).unwrap();
+        let goal_names = || {
+            client
+                .tool_definitions()
+                .into_iter()
+                .filter_map(|tool| tool["name"].as_str().map(str::to_string))
+                .filter(|name| name.contains("goal"))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(goal_names(), ["create_goal"]);
+        let result = client
+            .run_goal_tool("create_goal", r#"{"objective":"ship it"}"#)
+            .unwrap();
+        assert!(!result.is_error);
+        handler.join().unwrap();
+        assert_eq!(goal_names(), ["get_goal", "update_goal"]);
     }
 
     #[test]

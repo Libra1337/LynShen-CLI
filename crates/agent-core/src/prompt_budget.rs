@@ -205,6 +205,7 @@ fn request_bodies(system: &str, definitions: &[Value]) -> [(&'static str, usize)
     let anthropic_body = anthropic::request_body(&anthropic::AnthropicRequest {
         model: MODEL,
         system_prompt: system,
+        stable_system_len: crate::prompt::stable_prefix_len(system),
         input: &[],
         tools: &anthropic_tools,
         max_output_tokens: 32_000,
