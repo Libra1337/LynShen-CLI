@@ -40,6 +40,9 @@ pub struct Turns {
     reply: String,
     /// The latest reply's last TAIL_LIMIT characters.
     tail: String,
+    /// A tool call came after some reply text: the next text starts a new
+    /// paragraph.
+    after_tool: bool,
     replying: bool,
     done: u32,
     /// A turn has started and not yet ended.
@@ -82,16 +85,28 @@ impl Turns {
                 self.latest = clip(content, LATEST_LIMIT);
                 self.reply.clear();
                 self.tail.clear();
+                self.after_tool = false;
                 self.replying = false;
                 false
             }
             Some("assistant_start") => {
                 self.reply.clear();
                 self.tail.clear();
+                self.after_tool = false;
+                false
+            }
+            // Text after a tool call is a new paragraph of the reply, not a
+            // continuation of the sentence before the call.
+            Some("tool_start") => {
+                self.after_tool = !self.tail.is_empty();
                 false
             }
             Some("assistant_delta") => {
-                let delta = event["delta"].as_str().unwrap_or_default();
+                let mut delta = event["delta"].as_str().unwrap_or_default().to_string();
+                if std::mem::take(&mut self.after_tool) && !delta.trim().is_empty() {
+                    delta.insert_str(0, "\n\n");
+                }
+                let delta = delta.as_str();
                 if self.reply.chars().count() < REPLY_LIMIT {
                     self.reply.push_str(delta);
                 }
@@ -256,6 +271,16 @@ mod tests {
         assert!(later.contains("Current title: 修复登录页跳转"));
         assert!(later.contains("Latest request:\n顺便加个导出按钮"));
         assert!(!later.contains("先看路由"));
+    }
+
+    #[test]
+    fn reply_text_after_a_tool_call_is_a_new_paragraph() {
+        let mut turns = Turns::default();
+        turns.observe(&json!({ "type": "assistant_start" }));
+        turns.observe(&json!({ "type": "assistant_delta", "delta": "I'll create the file." }));
+        turns.observe(&json!({ "type": "tool_start", "name": "write" }));
+        turns.observe(&json!({ "type": "assistant_delta", "delta": "done" }));
+        assert_eq!(turns.tail(), "I'll create the file.\n\ndone");
     }
 
     #[test]
