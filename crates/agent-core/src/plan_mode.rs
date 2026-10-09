@@ -123,9 +123,18 @@ const READ_ONLY_TOOLS: &[&str] = &[
     TOOL_NAME,
 ];
 
-/// Why plan mode refuses this call, or None when it may run. `mcp_read_only`
-/// is the MCP server's readOnlyHint for the tool, when it gave one.
-pub fn refusal(name: &str, arguments: &str, mcp_read_only: Option<bool>) -> Option<String> {
+/// Why a call is not read-only.
+enum Change {
+    /// A shell command that is not a known read-only command.
+    Command(String),
+    /// Any other tool that changes things.
+    Tool,
+}
+
+/// What makes this call change something, or None when it only reads.
+/// `mcp_read_only` is the MCP server's readOnlyHint for the tool, when it
+/// gave one.
+fn change(name: &str, arguments: &str, mcp_read_only: Option<bool>) -> Option<Change> {
     if READ_ONLY_TOOLS.contains(&name) {
         return None;
     }
@@ -141,10 +150,7 @@ pub fn refusal(name: &str, arguments: &str, mcp_read_only: Option<bool>) -> Opti
                 .unwrap_or_default();
             let escalated = args.get("escalate").and_then(Value::as_bool) == Some(true);
             if escalated || !is_read_only_command(command) {
-                return Some(format!(
-                    "plan mode: `{}` was not run because it is not a known read-only command. Only read-only commands run in plan mode (git status/diff/log/show, ls, cat, head, tail, grep, rg, find, wc and similar, optionally piped together). Use read, ls and ripgrep to investigate, and put the commands that change things into the plan you deliver with {TOOL_NAME}.",
-                    command.trim()
-                ));
+                return Some(Change::Command(command.trim().to_string()));
             }
             true
         }
@@ -153,10 +159,36 @@ pub fn refusal(name: &str, arguments: &str, mcp_read_only: Option<bool>) -> Opti
         "checkpoint" => field("action") == "list",
         _ => false,
     };
-    (!allowed).then(|| {
-        format!(
+    (!allowed).then_some(Change::Tool)
+}
+
+/// Why plan mode refuses this call, or None when it may run. `mcp_read_only`
+/// is the MCP server's readOnlyHint for the tool, when it gave one.
+pub fn refusal(name: &str, arguments: &str, mcp_read_only: Option<bool>) -> Option<String> {
+    change(name, arguments, mcp_read_only).map(|change| match change {
+        Change::Command(command) => format!(
+            "plan mode: `{command}` was not run because it is not a known read-only command. Only read-only commands run in plan mode (git status/diff/log/show, ls, cat, head, tail, grep, rg, find, wc and similar, optionally piped together). Use read, ls and ripgrep to investigate, and put the commands that change things into the plan you deliver with {TOOL_NAME}."
+        ),
+        Change::Tool => format!(
             "plan mode: {name} was not run. You are in plan mode, where only read-only tools run and nothing in the workspace may change. Finish investigating, then call {TOOL_NAME} with your plan; the user approves it before anything is changed."
-        )
+        ),
+    })
+}
+
+/// Why a subagent with a read-only role may not make this call (the same
+/// rules as plan mode), or None when it may run.
+pub fn read_only_refusal(
+    name: &str,
+    arguments: &str,
+    mcp_read_only: Option<bool>,
+) -> Option<String> {
+    change(name, arguments, mcp_read_only).map(|change| match change {
+        Change::Command(command) => format!(
+            "read-only role: `{command}` was not run because it is not a known read-only command. Use read-only commands (git status/diff/log/show, ls, cat, grep, rg, find and similar) and report what should change."
+        ),
+        Change::Tool => format!(
+            "read-only role: {name} was not run. Your role cannot change anything; report what should change to your parent instead."
+        ),
     })
 }
 
@@ -349,6 +381,27 @@ mod tests {
             None
         )
         .is_some());
+    }
+
+    #[test]
+    fn a_read_only_role_gets_the_same_rules_with_its_own_message() {
+        assert_eq!(read_only_refusal("read", "{}", None), None);
+        assert_eq!(read_only_refusal("send_message", "{}", None), None);
+        assert_eq!(
+            read_only_refusal("bash", r#"{"command":"git diff HEAD"}"#, None),
+            None
+        );
+        for (tool, args) in [
+            ("hashline_edit", "{}"),
+            ("write", "{}"),
+            ("merge_agent", r#"{"target":"w","action":"apply"}"#),
+            ("bash", r#"{"command":"cargo fmt"}"#),
+            ("mcp__db__drop", "{}"),
+        ] {
+            let reason = read_only_refusal(tool, args, None).expect(tool);
+            assert!(reason.starts_with("read-only role:"), "{reason}");
+            assert!(!reason.contains(TOOL_NAME), "{reason}");
+        }
     }
 
     #[test]

@@ -747,6 +747,9 @@ fn record_headless_event(event: &AgentEvent, stats: &mut HeadlessStats) {
             stats.subagent_events += 1;
             "subagent_lifecycle"
         }
+        AgentEvent::AgentMessage { .. } => "agent_message",
+        AgentEvent::MergeResult { .. } => "merge_result",
+        AgentEvent::TeamBudget { .. } => "team_budget",
         AgentEvent::AgentRuns(_) => "agent_runs",
         AgentEvent::SubagentTranscript { .. } => "subagent_transcript",
         AgentEvent::PlanDraft { .. } => "plan_draft",

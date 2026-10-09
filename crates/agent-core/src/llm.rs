@@ -1,14 +1,14 @@
 use crate::providers::CLIENT_NAME;
 use crate::{
-    config::{is_shell_tool, ApprovalMode, LiveApprovalMode, ModelConfig, SubagentModel},
+    config::{is_shell_tool, ApprovalMode, Fanout, LiveApprovalMode, ModelConfig, SubagentModel},
     hooks::Hooks,
     hunks::{self, HunkView},
     mcp::McpManager,
+    roles::Role,
     sandbox::RuleAction,
     session::extract_response_text,
     subagents::{
-        prepare_workspace, SubagentManager, SubagentRunResult, SubagentSpawn, MAX_LIVE_SUBAGENTS,
-        MAX_SUBAGENT_DEPTH,
+        prepare_workspace, SubagentManager, SubagentRunResult, SubagentSpawn, BUDGET_EXHAUSTED,
     },
     tools,
 };
@@ -105,6 +105,11 @@ pub struct OpenAiClient {
     /// rejected with a clear error if the model calls them anyway.
     enabled_edit_tools: Vec<String>,
     subagent_manager: Option<SubagentManager>,
+    /// Roles spawn_agent offers (built-in, user and trusted project files).
+    roles: Vec<Role>,
+    /// A read-only role: only read-only tools run, as in plan mode; its
+    /// subagents are read-only too.
+    read_only: bool,
     agent_path: String,
     agent_depth: u64,
     /// When set (subagents), mutating file tools may only target paths under
@@ -185,6 +190,8 @@ pub struct OpenAiClientConfig<'a> {
     pub tool_state: tools::ToolState,
     pub host: Option<crate::host::HostExtensions>,
     pub subagent_manager: Option<SubagentManager>,
+    /// Roles spawn_agent offers (see `roles::discover`).
+    pub roles: Vec<Role>,
     pub hooks: Hooks,
 }
 
@@ -405,6 +412,22 @@ impl SubagentTurnStats {
     }
 }
 
+/// What a spawn_agent call starts (see `OpenAiClient::spawn_settings`).
+struct SpawnSettings<'a> {
+    role: Option<&'a Role>,
+    read_only: bool,
+    plan_step: Option<String>,
+    model: String,
+    efforts: Vec<String>,
+    protocol: Protocol,
+    reasoning_effort: String,
+    max_output_tokens: u64,
+    max_tool_calls: Option<u64>,
+    timeout: Option<Duration>,
+    fork_turns: String,
+    worktree: bool,
+}
+
 enum ParallelToolMessage {
     Update {
         call_id: String,
@@ -522,7 +545,9 @@ impl OpenAiClient {
             approval_mode: config.approval_mode,
             enabled_edit_tools: config.edit_tools,
             subagent_manager: config.subagent_manager,
-            agent_path: "/root".to_string(),
+            roles: config.roles,
+            read_only: false,
+            agent_path: crate::subagents::ROOT_PATH.to_string(),
             agent_depth: 0,
             write_root: None,
             extra_read_roots: config.extra_read_roots,
@@ -566,6 +591,16 @@ impl OpenAiClient {
             // conversation is compacted and the turn continues from there.
             if self.context_budget > 0 && last_input.get() > self.context_budget {
                 return Err(MID_TURN_COMPACTION.to_string());
+            }
+            // The team's token budget is used up: a subagent stops here and
+            // keeps what it produced so far.
+            if self.agent_depth > 0
+                && self
+                    .subagent_manager
+                    .as_ref()
+                    .is_some_and(SubagentManager::budget_exhausted)
+            {
+                return Err(BUDGET_EXHAUSTED.to_string());
             }
             self.append_queued_subagent_messages(&mut input, &mut emit)?;
             emit(StreamEvent::CallStart)?;
@@ -651,22 +686,18 @@ impl OpenAiClient {
             let mut blocked_results = Vec::new();
             let mut allowed_requests = Vec::new();
             for request in tool_requests {
-                // Plan mode: only read-only calls run (the live mode, so a
-                // switch mid-turn applies to the next call).
-                if self.approval_mode.get() == ApprovalMode::Plan {
-                    let read_only_hint = self.mcp.tool_read_only_hint(&request.name);
-                    if let Some(reason) =
-                        crate::plan_mode::refusal(&request.name, &request.arguments, read_only_hint)
-                    {
-                        emit(StreamEvent::ToolStart {
-                            call_id: request.call_id.clone(),
-                            name: request.name.clone(),
-                        })?;
-                        let result = json_tool_result(json!({ "error": reason }), true);
-                        emit_tool_output(&request, &result, &mut emit)?;
-                        blocked_results.push(ToolCallResult { request, result });
-                        continue;
-                    }
+                // Plan mode and read-only roles: only read-only calls run
+                // (the live mode, so a switch mid-turn applies to the next
+                // call).
+                if let Some(reason) = self.read_only_refusal(&request) {
+                    emit(StreamEvent::ToolStart {
+                        call_id: request.call_id.clone(),
+                        name: request.name.clone(),
+                    })?;
+                    let result = json_tool_result(json!({ "error": reason }), true);
+                    emit_tool_output(&request, &result, &mut emit)?;
+                    blocked_results.push(ToolCallResult { request, result });
+                    continue;
                 }
                 if let Some(reason) = self.hooks.pre_tool(&request.name, &request.arguments, cwd) {
                     emit(StreamEvent::ToolStart {
@@ -706,7 +737,7 @@ impl OpenAiClient {
                 let needs_approval = match gate {
                     SandboxGate::Ask => true,
                     SandboxGate::Run => false,
-                    SandboxGate::Mode | SandboxGate::Forbid => self.needs_approval(&request.name),
+                    SandboxGate::Mode | SandboxGate::Forbid => self.call_needs_approval(&request),
                 };
                 if !needs_approval {
                     approved_requests.push(request);
@@ -827,6 +858,19 @@ impl OpenAiClient {
             if plan_delivered {
                 return Ok(());
             }
+        }
+    }
+
+    /// Why plan mode or a read-only role refuses this call; None when it
+    /// may run.
+    fn read_only_refusal(&self, request: &ToolCallRequest) -> Option<String> {
+        let read_only_hint = self.mcp.tool_read_only_hint(&request.name);
+        if self.approval_mode.get() == ApprovalMode::Plan {
+            crate::plan_mode::refusal(&request.name, &request.arguments, read_only_hint)
+        } else if self.read_only {
+            crate::plan_mode::read_only_refusal(&request.name, &request.arguments, read_only_hint)
+        } else {
+            None
         }
     }
 
@@ -1053,12 +1097,21 @@ impl OpenAiClient {
                     .is_none_or(|name| self.disabled_tool_error(name).is_none())
             })
             .collect::<Vec<_>>();
-        if self.allow_subagents && self.subagent_manager.is_some() {
-            definitions.extend(subagent_definitions(
-                &self.model,
-                &self.reasoning_efforts,
-                &self.subagent_models,
-            ));
+        if let Some(manager) = &self.subagent_manager {
+            let config = manager.config();
+            if self.allow_subagents && config.fanout != Fanout::Off {
+                definitions.extend(subagent_definitions(
+                    &self.model,
+                    &self.reasoning_efforts,
+                    &self.subagent_models,
+                    &self.roles,
+                    config,
+                    self.agent_depth > 0,
+                ));
+            } else if self.agent_depth > 0 {
+                // A subagent that may not spawn can still write to its parent.
+                definitions.push(send_message_definition(true));
+            }
         }
         definitions.extend(self.mcp.definitions());
         if let Some(host) = &self.host {
@@ -1117,7 +1170,12 @@ impl OpenAiClient {
     ) -> Option<tools::ToolExecutionResult> {
         if !matches!(
             name,
-            "spawn_agent" | "wait_agent" | "list_agents" | "send_message" | "close_agent"
+            "spawn_agent"
+                | "wait_agent"
+                | "list_agents"
+                | "send_message"
+                | "close_agent"
+                | "merge_agent"
         ) {
             return None;
         }
@@ -1127,6 +1185,7 @@ impl OpenAiClient {
             "list_agents" => self.list_agents(arguments),
             "send_message" => self.send_message(arguments),
             "close_agent" => self.close_agent(arguments),
+            "merge_agent" => self.merge_agent(arguments),
             _ => unreachable!(),
         };
         Some(match result {
@@ -1224,30 +1283,56 @@ impl OpenAiClient {
         result
     }
 
-    fn spawn_agent(
+    /// A spawn_agent call's settings: the role's defaults with the call's own
+    /// parameters on top, checked against the models, efforts and
+    /// `agents.fanout`.
+    fn spawn_settings(
         &self,
-        call_id: &str,
-        arguments: &str,
-        cwd: &Path,
-        input: &[Value],
-        pending_call_ids: &HashSet<String>,
-    ) -> Result<Value, String> {
-        let manager = self
-            .subagent_manager
-            .clone()
-            .ok_or_else(|| "subagent manager is unavailable".to_string())?;
+        args: &Value,
+        manager: &SubagentManager,
+    ) -> Result<SpawnSettings<'_>, String> {
+        let config = manager.config();
+        if config.fanout == Fanout::Off {
+            return Err(
+                "subagents are turned off (agents.fanout is off). Do the task yourself."
+                    .to_string(),
+            );
+        }
         if !self.allow_subagents {
             return Err("agent depth limit reached. Solve the task yourself.".to_string());
         }
-        let args = serde_json::from_str::<Value>(arguments)
-            .map_err(|error| format!("invalid JSON arguments: {error}"))?;
-        let task_name = required_str(&args, "task_name")?;
-        let message = required_str(&args, "message")?;
-        let requested_model = args
-            .get("model")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty());
+        let text = |key: &str| {
+            args.get(key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        };
+        let role = match text("role") {
+            None => None,
+            Some(name) => Some(
+                self.roles
+                    .iter()
+                    .find(|role| role.name == name)
+                    .ok_or_else(|| {
+                        format!(
+                            "unknown role \"{name}\"; roles: {}",
+                            self.roles
+                                .iter()
+                                .map(|role| role.name.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    })?,
+            ),
+        };
+        // A read-only agent's subagents are read-only too.
+        let read_only = self.read_only || role.is_some_and(|role| role.read_only);
+        let (plan_approved, plan_steps) = manager.shared().plan();
+        let plan_step = resolve_plan_step(text("plan_step"), &plan_steps);
+        if config.fanout == Fanout::Plan && !read_only {
+            check_plan_step(plan_approved, &plan_steps, plan_step.as_deref())?;
+        }
+        let requested_model = text("model").or_else(|| role.and_then(|role| role.model.as_deref()));
         // The child's model: our own, or one of the configured subagent models.
         let (model, efforts, model_max_output_tokens, protocol) = match requested_model {
             None => (
@@ -1268,8 +1353,14 @@ impl OpenAiClient {
                     .iter()
                     .find(|spec| spec.name == name)
                     .ok_or_else(|| {
+                        let source = match role {
+                            Some(role) if text("model").is_none() => {
+                                format!(" (the {} role's model; pass model to override)", role.name)
+                            }
+                            _ => String::new(),
+                        };
                         format!(
-                            "model \"{name}\" is not allowed for subagents; allowed: {}",
+                            "model \"{name}\" is not allowed for subagents{source}; allowed: {}",
                             allowed_subagent_models(&self.model, &self.subagent_models)
                         )
                     })?;
@@ -1281,11 +1372,8 @@ impl OpenAiClient {
                 )
             }
         };
-        let reasoning_effort = match args
-            .get("reasoning_effort")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
+        let reasoning_effort = match text("reasoning_effort")
+            .or_else(|| role.and_then(|role| role.reasoning_effort.as_deref()))
         {
             Some(explicit) if efforts.is_empty() || efforts.iter().any(|e| e == explicit) => {
                 explicit.to_string()
@@ -1308,10 +1396,12 @@ impl OpenAiClient {
         let max_tool_calls = args
             .get("max_tool_calls")
             .and_then(Value::as_u64)
+            .or_else(|| role.and_then(|role| role.max_tool_calls))
             .map(|value| value.max(1));
         let timeout = args
             .get("timeout_secs")
             .and_then(Value::as_u64)
+            .or_else(|| role.and_then(|role| role.timeout_secs))
             .map(|value| Duration::from_secs(value.max(10)));
         let max_output_tokens = args
             .get("max_output_tokens")
@@ -1323,28 +1413,65 @@ impl OpenAiClient {
                     cap => value.clamp(512, cap.max(512)),
                 }
             });
-        let fork_turns = args
-            .get("fork_turns")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or("none")
-            .to_string();
+        let fork_turns = text("fork_turns").unwrap_or("none").to_string();
         validate_fork_turns(&fork_turns)?;
-        let isolate = match args
-            .get("isolation")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .unwrap_or("none")
-        {
-            "none" | "" => false,
-            "worktree" => true,
-            other => {
+        let worktree = match text("isolation") {
+            None => role.is_some_and(|role| role.worktree),
+            Some("none") => false,
+            Some("worktree") => true,
+            Some(other) => {
                 return Err(format!(
                     "isolation must be \"none\" or \"worktree\", got \"{other}\""
                 ))
             }
         };
+        Ok(SpawnSettings {
+            role,
+            read_only,
+            plan_step,
+            model,
+            efforts,
+            protocol,
+            reasoning_effort,
+            max_output_tokens,
+            max_tool_calls,
+            timeout,
+            fork_turns,
+            worktree,
+        })
+    }
+
+    fn spawn_agent(
+        &self,
+        call_id: &str,
+        arguments: &str,
+        cwd: &Path,
+        input: &[Value],
+        pending_call_ids: &HashSet<String>,
+    ) -> Result<Value, String> {
+        let manager = self
+            .subagent_manager
+            .clone()
+            .ok_or_else(|| "subagent manager is unavailable".to_string())?;
+        let args = serde_json::from_str::<Value>(arguments)
+            .map_err(|error| format!("invalid JSON arguments: {error}"))?;
+        let task_name = required_str(&args, "task_name")?;
+        let message = required_str(&args, "message")?;
+        let SpawnSettings {
+            role,
+            read_only,
+            plan_step,
+            model,
+            efforts,
+            protocol,
+            reasoning_effort,
+            max_output_tokens,
+            max_tool_calls,
+            timeout,
+            fork_turns,
+            worktree: isolate,
+        } = self.spawn_settings(&args, &manager)?;
+        let max_depth = manager.config().max_depth;
         let child_depth = self.agent_depth.saturating_add(1);
         let slot = manager.reserve_spawn(SubagentSpawn {
             parent_path: self.agent_path.clone(),
@@ -1354,6 +1481,8 @@ impl OpenAiClient {
             reasoning_effort: reasoning_effort.clone(),
             depth: child_depth,
             tool_use_id: call_id.to_string(),
+            role: role.map(|role| role.name.clone()),
+            plan_step,
         })?;
         let child_input =
             build_subagent_input(input, pending_call_ids, &fork_turns, &slot.path, message)?;
@@ -1377,6 +1506,9 @@ impl OpenAiClient {
             .map_or_else(|| cwd.to_path_buf(), |workspace| workspace.root.clone());
         let workdir_display = child_cwd.display().to_string();
         manager.set_workdir(&slot.path, &workdir_display);
+        if let Some(workspace) = &workspace {
+            manager.register_workspace(&slot.path, workspace, cwd);
+        }
         let started = Instant::now();
         let child_manager = manager.clone();
         let child_path = slot.path.clone();
@@ -1392,9 +1524,16 @@ impl OpenAiClient {
                     &self.system_prompt,
                     &child_path,
                     workspace.as_ref().map(|workspace| workspace.root.as_path()),
+                    read_only,
                 );
                 if self.approval_mode.get() == ApprovalMode::Plan {
                     prompt.push_str(crate::plan_mode::SUBAGENT_NOTE);
+                }
+                if let Some(role) = role.filter(|role| !role.instructions.is_empty()) {
+                    prompt.push_str(&format!(
+                        "\n\n<role name=\"{}\">\n{}\n</role>",
+                        role.name, role.instructions
+                    ));
                 }
                 prompt
             },
@@ -1406,7 +1545,7 @@ impl OpenAiClient {
             connect_timeout: self.connect_timeout,
             read_timeout: timeout
                 .map_or(self.read_timeout, |timeout| self.read_timeout.min(timeout)),
-            allow_subagents: child_depth < MAX_SUBAGENT_DEPTH,
+            allow_subagents: child_depth < max_depth,
             max_tool_calls,
             deadline: timeout.map(|timeout| started + timeout),
             context_budget: 0,
@@ -1420,6 +1559,8 @@ impl OpenAiClient {
             approval_mode: self.approval_mode.clone(),
             enabled_edit_tools: self.enabled_edit_tools.clone(),
             subagent_manager: Some(manager.clone()),
+            roles: self.roles.clone(),
+            read_only,
             agent_path: child_path.clone(),
             agent_depth: child_depth,
             // Without isolation the child shares the parent's write boundary
@@ -1484,12 +1625,16 @@ impl OpenAiClient {
             }
         });
 
-        Ok(json!({
+        let mut result = json!({
             "task_name": task_name,
             "path": slot.path,
             "status": "running",
             "workdir": workdir_display,
-        }))
+        });
+        if let Some(role) = role {
+            result["role"] = json!(role.name);
+        }
+        Ok(result)
     }
 
     fn wait_agent(&self, arguments: &str) -> Result<Value, String> {
@@ -1558,6 +1703,18 @@ impl OpenAiClient {
         result
     }
 
+    fn merge_agent(&self, arguments: &str) -> Result<Value, String> {
+        let manager = self
+            .subagent_manager
+            .clone()
+            .ok_or_else(|| "subagent manager is unavailable".to_string())?;
+        let args = serde_json::from_str::<Value>(arguments)
+            .map_err(|error| format!("invalid JSON arguments: {error}"))?;
+        let target = required_str(&args, "target")?;
+        let action = required_str(&args, "action")?;
+        manager.merge_agent(&self.agent_path, target, action)
+    }
+
     fn append_queued_subagent_messages(
         &self,
         input: &mut Vec<Value>,
@@ -1583,7 +1740,10 @@ impl OpenAiClient {
                 "role": "user",
                 "content": [{
                     "type": "input_text",
-                    "text": format!("<subagent_message>\n{message}\n</subagent_message>")
+                    "text": format!(
+                        "<subagent_message from=\"{}\">\n{}\n</subagent_message>",
+                        message.from, message.text
+                    )
                 }]
             });
             inject_input_item(input, item, emit)?;
@@ -1708,6 +1868,15 @@ impl OpenAiClient {
             }
             _ => SandboxGate::Mode,
         }
+    }
+
+    /// `needs_approval` for one call: merge_agent asks only to apply, since
+    /// discarding a worktree changes nothing in the workspace.
+    fn call_needs_approval(&self, request: &ToolCallRequest) -> bool {
+        if request.name == "merge_agent" && merge_action(&request.arguments) != "apply" {
+            return false;
+        }
+        self.needs_approval(&request.name)
     }
 
     fn needs_approval(&self, name: &str) -> bool {
@@ -1837,7 +2006,15 @@ impl OpenAiClient {
             .send(ApprovalRequest {
                 call_id: request.call_id.clone(),
                 name: request.name.clone(),
-                summary: approval_summary(&request.name, &request.arguments),
+                summary: match (&self.subagent_manager, request.name.as_str()) {
+                    (Some(manager), "merge_agent") => {
+                        let args =
+                            serde_json::from_str::<Value>(&request.arguments).unwrap_or_default();
+                        let target = args.get("target").and_then(Value::as_str).unwrap_or("");
+                        manager.merge_summary(&self.agent_path, target)
+                    }
+                    _ => approval_summary(&request.name, &request.arguments),
+                },
                 arguments: request.arguments.clone(),
                 cwd: cwd.to_path_buf(),
                 subagent_id: (self.agent_depth > 0).then(|| self.agent_path.clone()),
@@ -1964,12 +2141,35 @@ fn subagent_definitions(
     own_model: &str,
     own_efforts: &[String],
     models: &[SubagentModelSpec],
+    roles: &[Role],
+    config: &crate::config::AgentsConfig,
+    subagent: bool,
 ) -> Vec<Value> {
     let choosable = models.iter().any(|spec| spec.name != own_model);
+    let mut description = format!(
+        "Start a background subagent on a self-contained task and return at once; collect it with wait_agent. It has your tools, prompt and skills, starts with only your message, and works in your cwd. At most {} live agents and {} levels of nesting. Fan out only for truly independent parts; retry a failed task at most once.{}",
+        config.max_live,
+        config.max_depth,
+        subagent_model_guide(own_model, own_efforts, models)
+    );
+    if !roles.is_empty() {
+        description.push_str("\nRoles:");
+        for role in roles {
+            description.push_str(&format!("\n- {}", role.name));
+            if !role.description.is_empty() {
+                description.push_str(&format!(": {}", role.description));
+            }
+        }
+    }
+    if config.fanout == Fanout::Plan {
+        description.push_str(
+            "\nAn agent without a read-only role starts only for a step of the approved plan (plan_step).",
+        );
+    }
     let mut spawn = json!({
             "type": "function",
             "name": "spawn_agent",
-            "description": format!("Start a background subagent on a self-contained task and return at once; collect it with wait_agent. It has your tools, prompt and skills, starts with only your message, and works in your cwd. At most {MAX_LIVE_SUBAGENTS} live agents and {MAX_SUBAGENT_DEPTH} levels of nesting.{}", subagent_model_guide(own_model, own_efforts, models)),
+            "description": description,
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1985,7 +2185,7 @@ fn subagent_definitions(
                     "isolation": {
                         "type": "string",
                         "enum": ["none", "worktree"],
-                        "description": "worktree: a private workspace under .lynshen/agents/ for agents that write in parallel; harvest its changes from workdir and files_changed."
+                        "description": "worktree: a private git worktree (see merge_agent)."
                     },
                     "reasoning_effort": {
                         "type": "string",
@@ -2001,6 +2201,15 @@ fn subagent_definitions(
                 "required": ["task_name", "message"]
             }
     });
+    if !roles.is_empty() {
+        spawn["parameters"]["properties"]["role"] = json!({ "type": "string" });
+    }
+    if config.fanout == Fanout::Plan {
+        spawn["parameters"]["properties"]["plan_step"] = json!({
+            "type": "string",
+            "description": "The update_plan step it does."
+        });
+    }
     if choosable {
         let names = std::iter::once(own_model)
             .chain(
@@ -2051,19 +2260,7 @@ fn subagent_definitions(
                 }
             }
         }),
-        json!({
-            "type": "function",
-            "name": "send_message",
-            "description": "Queue a message for a running subagent; it reads it before its next model call.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "target": { "type": "string", "description": "Agent path or name." },
-                    "message": { "type": "string" }
-                },
-                "required": ["target", "message"]
-            }
-        }),
+        send_message_definition(subagent),
         json!({
             "type": "function",
             "name": "close_agent",
@@ -2076,7 +2273,101 @@ fn subagent_definitions(
                 "required": ["target"]
             }
         }),
+        json!({
+            "type": "function",
+            "name": "merge_agent",
+            "description": "Apply (all or nothing) or discard a finished worktree agent's changes.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target": { "type": "string" },
+                    "action": { "type": "string", "enum": ["apply", "discard"] }
+                },
+                "required": ["target", "action"]
+            }
+        }),
     ]
+}
+
+/// send_message; a subagent's may also go to its parent.
+fn send_message_definition(subagent: bool) -> Value {
+    let (description, target) = if subagent {
+        (
+            "Queue a message for a running subagent, or for your parent (target \"parent\"); it is read before their next model call.",
+            "Agent path or name, or parent.",
+        )
+    } else {
+        (
+            "Queue a message for a running subagent; it reads it before its next model call.",
+            "Agent path or name.",
+        )
+    };
+    json!({
+        "type": "function",
+        "name": "send_message",
+        "description": description,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "target": { "type": "string", "description": target },
+                "message": { "type": "string" }
+            },
+            "required": ["target", "message"]
+        }
+    })
+}
+
+/// The `action` of a merge_agent call ("" when missing).
+fn merge_action(arguments: &str) -> String {
+    serde_json::from_str::<Value>(arguments)
+        .ok()
+        .and_then(|args| {
+            args.get("action")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_default()
+}
+
+/// A spawn's `plan_step` as the plan's own wording: a 1-based step number
+/// or a step's text in any case becomes that step; anything else is kept.
+fn resolve_plan_step(step: Option<&str>, steps: &[String]) -> Option<String> {
+    let step = step?;
+    let by_number = step
+        .parse::<usize>()
+        .ok()
+        .and_then(|number| number.checked_sub(1))
+        .and_then(|index| steps.get(index));
+    let by_text = steps
+        .iter()
+        .find(|known| known.trim().eq_ignore_ascii_case(step));
+    Some(
+        by_number
+            .or(by_text)
+            .cloned()
+            .unwrap_or_else(|| step.to_string()),
+    )
+}
+
+/// `agents.fanout = plan`: an agent that may write starts only for a step of
+/// an approved plan.
+fn check_plan_step(approved: bool, steps: &[String], step: Option<&str>) -> Result<(), String> {
+    if !approved {
+        return Err("agents.fanout is plan: an agent that can write starts only for a step of an approved plan, and there is none. Use a read-only role (explorer or reviewer), or do the work yourself.".to_string());
+    }
+    let Some(step) = step else {
+        return Err(
+            "agents.fanout is plan: pass plan_step, the step of the approved plan this agent does."
+                .to_string(),
+        );
+    };
+    if !steps.is_empty() && !steps.iter().any(|known| known == step) {
+        return Err(format!(
+            "plan_step \"{step}\" is not a step of the plan; steps: {}",
+            steps.join("; ")
+        ));
+    }
+    Ok(())
 }
 
 fn json_tool_result(value: Value, is_error: bool) -> tools::ToolExecutionResult {
@@ -2319,16 +2610,23 @@ fn subagent_system_prompt(
     parent_system: &str,
     path: &str,
     workspace_root: Option<&Path>,
+    read_only: bool,
 ) -> String {
     let workspace = match workspace_root {
         Some(root) => format!(
-            " Your working directory is an isolated workspace at {}; all file writes must stay inside it (writes outside are rejected) and the parent harvests your changes from there.",
+            " Your working directory is an isolated workspace at {}; all file writes must stay inside it (writes outside are rejected) and the parent merges your changes from there.",
             root.display()
         ),
+        None if read_only => String::new(),
         None => " You share the parent's working directory; other agents may be editing it too, so change only the files your task needs.".to_string(),
     };
+    let access = if read_only {
+        " Your role is read-only: tools that change files and commands that are not read-only are refused."
+    } else {
+        ""
+    };
     format!(
-        "{parent_system}\n\n<subagent_context>\nYou are LynShen subagent {path}. Work only on the task delegated by the parent. Keep work bounded: inspect only what is needed, avoid broad refactors, and stop when you have enough evidence.{workspace} Return a concise self-contained answer with Summary, Evidence, Files/commands checked, and Risks or unknowns. Do not ask follow-up questions unless the task is impossible without missing information.\n</subagent_context>"
+        "{parent_system}\n\n<subagent_context>\nYou are LynShen subagent {path}. Work only on the task delegated by the parent. Keep work bounded: inspect only what is needed, avoid broad refactors, and stop when you have enough evidence.{workspace}{access} Return a concise self-contained answer with Summary, Evidence, Files/commands checked, and Risks or unknowns. Do not ask follow-up questions unless the task is impossible without missing information; to tell or ask your parent something mid-task, use send_message with target \"parent\".\n</subagent_context>"
     )
 }
 
@@ -2472,7 +2770,9 @@ fn plan_tool_definition() -> Value {
                         "type": "object",
                         "properties": {
                             "step": { "type": "string" },
-                            "status": { "type": "string", "enum": ["pending", "in_progress", "completed"] }
+                            "status": { "type": "string", "enum": ["pending", "in_progress", "completed"] },
+                            "agent": { "type": "string", "description": "Subagent doing it." },
+                            "files": { "type": "array", "items": { "type": "string" } }
                         },
                         "required": ["step", "status"]
                     }
@@ -2801,6 +3101,7 @@ mod tests {
             tool_state: tools::ToolState::default(),
             host: None,
             subagent_manager: None,
+            roles: Vec::new(),
             hooks: Hooks::default(),
         }
     }
@@ -2961,6 +3262,301 @@ mod tests {
         }))
         .unwrap_err();
         assert!(error.contains("not supported by claude-helper; use one of: low, high"));
+    }
+
+    fn team_client(agents: crate::config::AgentsConfig) -> OpenAiClient {
+        let mut client = subagent_model_client();
+        client.subagent_manager = Some(SubagentManager::new(
+            agents,
+            crate::subagents::TeamShared::default(),
+        ));
+        let mut roles = crate::roles::builtin();
+        roles.push(
+            crate::roles::parse(
+                "---\nname: tester\ndescription: runs tests\nmodel: claude-helper\nreasoning_effort: high\naccess: read-only\nisolation: worktree\nmax_tool_calls: 30\ntimeout_secs: 600\n---\nRun the tests.",
+                "tester",
+            )
+            .unwrap(),
+        );
+        roles.push(crate::roles::parse("---\nname: odd\nmodel: gpt-gone\n---\n", "odd").unwrap());
+        client.roles = roles;
+        client
+    }
+
+    fn settings(client: &OpenAiClient, args: Value) -> Result<SpawnSettings<'_>, String> {
+        client.spawn_settings(&args, client.subagent_manager.as_ref().unwrap())
+    }
+
+    #[test]
+    fn a_role_supplies_defaults_and_call_parameters_win() {
+        let client = team_client(Default::default());
+        let tester = settings(&client, json!({ "role": "tester" })).unwrap();
+        assert_eq!(tester.role.unwrap().name, "tester");
+        assert_eq!(tester.model, "claude-helper");
+        assert_eq!(tester.reasoning_effort, "high");
+        assert!(tester.read_only && tester.worktree);
+        assert_eq!(tester.max_tool_calls, Some(30));
+        assert_eq!(tester.timeout, Some(Duration::from_secs(600)));
+
+        let overridden = settings(
+            &client,
+            json!({
+                "role": "tester",
+                "model": "gpt-main",
+                "reasoning_effort": "medium",
+                "isolation": "none",
+                "max_tool_calls": 5,
+                "timeout_secs": 20
+            }),
+        )
+        .unwrap();
+        assert_eq!(overridden.model, "gpt-main");
+        assert_eq!(overridden.reasoning_effort, "medium");
+        assert!(!overridden.worktree);
+        assert_eq!(overridden.max_tool_calls, Some(5));
+        assert_eq!(overridden.timeout, Some(Duration::from_secs(20)));
+        // Access is the role's; no parameter widens it.
+        assert!(overridden.read_only);
+
+        let worker = settings(&client, json!({ "role": "worker" })).unwrap();
+        assert!(worker.worktree && !worker.read_only);
+        assert_eq!(worker.model, "gpt-main");
+        assert_eq!(worker.reasoning_effort, "low");
+        let plain = settings(&client, json!({})).unwrap();
+        assert!(plain.role.is_none() && !plain.worktree && !plain.read_only);
+
+        let error = settings(&client, json!({ "role": "boss" })).err().unwrap();
+        assert!(error.contains("unknown role \"boss\"; roles: explorer, reviewer, worker"));
+        let error = settings(&client, json!({ "role": "odd" })).err().unwrap();
+        assert!(error.contains("the odd role's model"), "{error}");
+    }
+
+    #[test]
+    fn a_read_only_agent_is_refused_changes_and_passes_it_on() {
+        let mut client = team_client(Default::default());
+        let call = |name: &str, arguments: Value| ToolCallRequest {
+            call_id: "c".to_string(),
+            name: name.to_string(),
+            arguments: arguments.to_string(),
+        };
+        let edit = call("hashline_edit", json!({ "path": "a.rs" }));
+        let read = call("read", json!({ "path": "a.rs" }));
+        let status = call("bash", json!({ "command": "git status" }));
+        let build = call("bash", json!({ "command": "cargo build" }));
+        let merge = call("merge_agent", json!({ "target": "w", "action": "apply" }));
+        assert!(client.read_only_refusal(&edit).is_none());
+
+        client.read_only = true;
+        for refused in [&edit, &build, &merge] {
+            let reason = client.read_only_refusal(refused).expect(&refused.name);
+            assert!(reason.starts_with("read-only role:"), "{reason}");
+        }
+        assert!(client.read_only_refusal(&read).is_none());
+        assert!(client.read_only_refusal(&status).is_none());
+        // Its subagents are read-only whatever their role.
+        assert!(
+            settings(&client, json!({ "role": "worker" }))
+                .unwrap()
+                .read_only
+        );
+        // Plan mode keeps its own wording.
+        client.approval_mode.set(ApprovalMode::Plan);
+        assert!(client
+            .read_only_refusal(&edit)
+            .unwrap()
+            .starts_with("plan mode:"));
+    }
+
+    fn tool_names(client: &OpenAiClient) -> Vec<String> {
+        definition_names(client)
+            .into_iter()
+            .filter(|name| prompt_group_is_team(name))
+            .collect()
+    }
+
+    fn prompt_group_is_team(name: &str) -> bool {
+        matches!(
+            name,
+            "spawn_agent"
+                | "wait_agent"
+                | "list_agents"
+                | "send_message"
+                | "close_agent"
+                | "merge_agent"
+        )
+    }
+
+    #[test]
+    fn the_team_tools_list_roles_and_merge() {
+        let client = team_client(Default::default());
+        assert_eq!(
+            tool_names(&client),
+            [
+                "spawn_agent",
+                "wait_agent",
+                "list_agents",
+                "send_message",
+                "close_agent",
+                "merge_agent"
+            ]
+        );
+        let definitions = client.tool_definitions();
+        let spawn = &definitions[definitions
+            .iter()
+            .position(|d| d["name"] == "spawn_agent")
+            .unwrap()];
+        let description = spawn["description"].as_str().unwrap();
+        assert!(description.contains("At most 4 live agents and 2 levels"));
+        assert!(description.contains("\n- tester: runs tests"));
+        assert!(description.contains("\n- worker: writes in its own worktree"));
+        assert!(description.contains("\n- odd") && !description.contains("- odd:"));
+        assert_eq!(spawn["parameters"]["properties"]["role"]["type"], "string");
+        assert!(spawn["parameters"]["properties"]["plan_step"].is_null());
+        let send = definitions
+            .iter()
+            .find(|d| d["name"] == "send_message")
+            .unwrap();
+        assert!(!send["description"].as_str().unwrap().contains("parent"));
+
+        // A subagent that may not spawn still has send_message, with parent.
+        let mut leaf = team_client(Default::default());
+        leaf.agent_depth = 2;
+        leaf.agent_path = "/root/a/b".to_string();
+        leaf.allow_subagents = false;
+        assert_eq!(tool_names(&leaf), ["send_message"]);
+        let send = leaf
+            .tool_definitions()
+            .into_iter()
+            .find(|d| d["name"] == "send_message")
+            .unwrap();
+        assert!(send["description"].as_str().unwrap().contains("\"parent\""));
+        // So does one that may spawn.
+        let mut middle = team_client(Default::default());
+        middle.agent_depth = 1;
+        middle.agent_path = "/root/a".to_string();
+        assert_eq!(tool_names(&middle).len(), 6);
+        let send = middle
+            .tool_definitions()
+            .into_iter()
+            .find(|d| d["name"] == "send_message")
+            .unwrap();
+        assert!(send["description"].as_str().unwrap().contains("\"parent\""));
+    }
+
+    #[test]
+    fn fanout_off_offers_no_agents_and_refuses_spawns() {
+        let client = team_client(crate::config::AgentsConfig {
+            fanout: Fanout::Off,
+            ..Default::default()
+        });
+        assert!(tool_names(&client).is_empty());
+        let error = settings(&client, json!({ "role": "explorer" }))
+            .err()
+            .unwrap();
+        assert!(error.contains("agents.fanout is off"), "{error}");
+    }
+
+    #[test]
+    fn fanout_plan_starts_writers_only_for_an_approved_plan_step() {
+        let client = team_client(crate::config::AgentsConfig {
+            fanout: Fanout::Plan,
+            ..Default::default()
+        });
+        let spawn = client
+            .tool_definitions()
+            .into_iter()
+            .find(|d| d["name"] == "spawn_agent")
+            .unwrap();
+        assert_eq!(
+            spawn["parameters"]["properties"]["plan_step"]["type"],
+            "string"
+        );
+        assert!(spawn["description"]
+            .as_str()
+            .unwrap()
+            .contains("step of the approved plan"));
+
+        // Read-only roles are free.
+        assert!(settings(&client, json!({ "role": "explorer" })).is_ok());
+        assert!(settings(&client, json!({ "role": "reviewer" })).is_ok());
+        // Writers need an approved plan...
+        for args in [
+            json!({ "role": "worker" }),
+            json!({}),
+            json!({ "plan_step": "1" }),
+        ] {
+            let error = settings(&client, args).err().unwrap();
+            assert!(error.contains("approved plan"), "{error}");
+        }
+        let team = client.subagent_manager.as_ref().unwrap().shared();
+        team.set_plan(
+            true,
+            vec!["Add parser".to_string(), "Write tests".to_string()],
+        );
+        // ...and one of its steps.
+        let error = settings(&client, json!({ "role": "worker" }))
+            .err()
+            .unwrap();
+        assert!(error.contains("pass plan_step"), "{error}");
+        let by_number = settings(&client, json!({ "role": "worker", "plan_step": "2" })).unwrap();
+        assert_eq!(by_number.plan_step.as_deref(), Some("Write tests"));
+        let by_text = settings(
+            &client,
+            json!({ "role": "worker", "plan_step": "add PARSER" }),
+        )
+        .unwrap();
+        assert_eq!(by_text.plan_step.as_deref(), Some("Add parser"));
+        let error = settings(&client, json!({ "role": "worker", "plan_step": "Deploy" }))
+            .err()
+            .unwrap();
+        assert!(error.contains("not a step of the plan"), "{error}");
+        // Approved, but no update_plan checklist yet: any named step.
+        team.set_plan(true, Vec::new());
+        assert!(settings(&client, json!({ "plan_step": "Refactor io" })).is_ok());
+    }
+
+    #[test]
+    fn fanout_auto_lets_the_model_decide() {
+        let client = team_client(Default::default());
+        let worker = settings(
+            &client,
+            json!({ "role": "worker", "plan_step": "Free text" }),
+        )
+        .unwrap();
+        assert_eq!(worker.plan_step.as_deref(), Some("Free text"));
+        assert!(settings(&client, json!({})).is_ok());
+    }
+
+    #[test]
+    fn merge_apply_asks_like_an_edit_and_discard_never_asks() {
+        let (tx, _rx) = mpsc::channel();
+        let call = |action: &str| ToolCallRequest {
+            call_id: "c".to_string(),
+            name: "merge_agent".to_string(),
+            arguments: json!({ "target": "w", "action": action }).to_string(),
+        };
+        for (mode, apply) in [
+            (ApprovalMode::Manual, true),
+            (ApprovalMode::AutoEdit, false),
+            (ApprovalMode::Auto, false),
+            (ApprovalMode::FullAccess, false),
+        ] {
+            let client = approval_test_client(mode, Some(tx.clone()));
+            assert_eq!(
+                client.call_needs_approval(&call("apply")),
+                apply,
+                "{mode:?}"
+            );
+            assert!(!client.call_needs_approval(&call("discard")), "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn update_plan_steps_name_their_agent_and_files() {
+        let plan = plan_tool_definition();
+        let step = &plan["parameters"]["properties"]["plan"]["items"]["properties"];
+        assert_eq!(step["agent"]["type"], "string");
+        assert_eq!(step["files"]["items"]["type"], "string");
     }
 
     fn approval_test_client(

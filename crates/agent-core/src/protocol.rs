@@ -91,6 +91,12 @@ pub fn apply_op(core: &mut AgentCore, value: &Value) -> (bool, Vec<AgentEvent>) 
             )],
         },
         "agent_runs" => vec![core.agent_runs_event()],
+        // The desktop's merge / discard buttons: {"op":"merge_agent",
+        // "target":"/root/worker","action":"apply|discard"}.
+        "merge_agent" => {
+            let text = |key: &str| value.get(key).and_then(Value::as_str).unwrap_or_default();
+            core.merge_agent(text("target"), text("action"))
+        }
         "subagent_transcript" => {
             let id = value
                 .get("agent_id")
@@ -311,6 +317,8 @@ pub fn event_json(event: AgentEvent) -> Value {
             label,
             model,
             tool_use_id,
+            role,
+            plan_step,
         } => json!({
             "type": "subagent_lifecycle",
             "path": path,
@@ -319,6 +327,35 @@ pub fn event_json(event: AgentEvent) -> Value {
             "label": label,
             "model": model,
             "tool_use_id": tool_use_id,
+            "role": role,
+            "plan_step": plan_step,
+        }),
+        AgentEvent::AgentMessage { from, to, summary } => json!({
+            "type": "agent_message",
+            "from": from,
+            "to": to,
+            "summary": summary,
+        }),
+        AgentEvent::MergeResult {
+            target,
+            action,
+            ok,
+            files,
+            conflicts,
+            error,
+        } => json!({
+            "type": "merge_result",
+            "target": target,
+            "action": action,
+            "ok": ok,
+            "files": files,
+            "conflicts": conflicts,
+            "error": error,
+        }),
+        AgentEvent::TeamBudget { used, limit } => json!({
+            "type": "team_budget",
+            "used": used,
+            "limit": limit,
         }),
         AgentEvent::AgentRuns(agents) => json!({
             "type": "agent_runs",
@@ -462,6 +499,8 @@ pub fn event_json(event: AgentEvent) -> Value {
             "plan": items.into_iter().map(|item| json!({
                 "step": item.step,
                 "status": item.status,
+                "agent": item.agent,
+                "files": item.files,
             })).collect::<Vec<_>>()
         }),
         AgentEvent::PlanDraft { id, title, append } => json!({
@@ -610,6 +649,62 @@ mod tests {
         assert!(parse_approve_op(&bad_hunks_type)
             .unwrap_err()
             .contains("array"));
+    }
+
+    #[test]
+    fn team_events_have_their_wire_shapes() {
+        let lifecycle = event_json(AgentEvent::SubagentLifecycle {
+            path: "/root/w".to_string(),
+            status: "merged".to_string(),
+            message: "applied 2 files".to_string(),
+            label: "w".to_string(),
+            model: "m".to_string(),
+            tool_use_id: "call_1".to_string(),
+            role: Some("worker".to_string()),
+            plan_step: None,
+        });
+        assert_eq!(lifecycle["type"], "subagent_lifecycle");
+        assert_eq!(lifecycle["role"], "worker");
+        assert_eq!(lifecycle["plan_step"], Value::Null);
+        assert_eq!(
+            event_json(AgentEvent::AgentMessage {
+                from: "/root/w".to_string(),
+                to: "/root".to_string(),
+                summary: "which key?".to_string(),
+            }),
+            json!({ "type": "agent_message", "from": "/root/w", "to": "/root", "summary": "which key?" })
+        );
+        assert_eq!(
+            event_json(AgentEvent::MergeResult {
+                target: "/root/w".to_string(),
+                action: "apply".to_string(),
+                ok: false,
+                files: vec!["a.rs".to_string()],
+                conflicts: vec!["a.rs".to_string()],
+                error: None,
+            }),
+            json!({
+                "type": "merge_result", "target": "/root/w", "action": "apply", "ok": false,
+                "files": ["a.rs"], "conflicts": ["a.rs"], "error": null
+            })
+        );
+        assert_eq!(
+            event_json(AgentEvent::TeamBudget {
+                used: 320_000,
+                limit: 400_000
+            }),
+            json!({ "type": "team_budget", "used": 320000, "limit": 400000 })
+        );
+        let plan = event_json(AgentEvent::Plan(vec![crate::PlanItem {
+            step: "Add parser".to_string(),
+            status: "in_progress".to_string(),
+            agent: Some("/root/parser".to_string()),
+            files: vec!["src/parse.rs".to_string()],
+        }]));
+        assert_eq!(
+            plan["plan"][0],
+            json!({ "step": "Add parser", "status": "in_progress", "agent": "/root/parser", "files": ["src/parse.rs"] })
+        );
     }
 
     #[test]

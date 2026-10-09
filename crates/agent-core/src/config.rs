@@ -130,8 +130,12 @@ impl ApprovalMode {
         if is_shell_tool(tool_name) {
             return *self != Self::FullAccess;
         }
-        // generate_image writes files into the workspace like `write`.
-        if is_edit_tool(tool_name) || tool_name == crate::images::TOOL_NAME {
+        // generate_image writes files into the workspace like `write`, and
+        // merge_agent (apply) brings a subagent's changes into it.
+        if is_edit_tool(tool_name)
+            || tool_name == crate::images::TOOL_NAME
+            || tool_name == "merge_agent"
+        {
             return self.is_strict();
         }
         // Network egress can exfiltrate local context, so the strictest mode

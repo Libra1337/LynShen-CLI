@@ -650,6 +650,7 @@ mod tests {
             &AgentEvent::Plan(vec![lynshen_agent_core::PlanItem {
                 step: "write tests".to_string(),
                 status: "in_progress".to_string(),
+                ..Default::default()
             }]),
         )
         .unwrap();

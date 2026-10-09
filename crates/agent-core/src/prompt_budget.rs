@@ -103,6 +103,7 @@ fn default_client(system_prompt: String) -> OpenAiClient {
         tool_state: default_tool_state(),
         host: None,
         subagent_manager: Some(SubagentManager::default()),
+        roles: crate::roles::builtin(),
         hooks: Hooks::default(),
     })
     .expect("default client")
@@ -113,9 +114,8 @@ fn group(name: &str) -> &'static str {
         "bash" | "exec_command" | "write_stdin" => "shell",
         "web_fetch" | "web_search" => "web",
         "generate_image" => "image",
-        "spawn_agent" | "wait_agent" | "list_agents" | "send_message" | "close_agent" => {
-            "subagents"
-        }
+        "spawn_agent" | "wait_agent" | "list_agents" | "send_message" | "close_agent"
+        | "merge_agent" => "subagents",
         "get_goal" | "create_goal" | "update_goal" => "goals",
         "update_plan" | "propose_plan" => "plan",
         _ => "files",
@@ -253,12 +253,17 @@ fn print_prompt_token_report() {
 /// tokens of system prompt and 3647 of tool definitions (0.4.19).
 const BASELINE_CODING_TOKENS: usize = 4521;
 
+/// The first request may carry at most this share of the baseline, in
+/// percent. 60 when the budget was set; 61 since the agent team tools
+/// (roles, merge_agent, plan step owners) added about 160 tokens.
+const MAX_PERCENT_OF_BASELINE: usize = 61;
+
 #[test]
 fn default_coding_request_stays_lean() {
     let budget = measure(false);
     let total = budget.system + budget.tools_responses;
     assert!(
-        total * 10 <= BASELINE_CODING_TOKENS * 6,
+        total * 100 <= BASELINE_CODING_TOKENS * MAX_PERCENT_OF_BASELINE,
         "system prompt + tools grew to {total} tokens; run print_prompt_token_report"
     );
 }
