@@ -505,10 +505,14 @@ fn subagents_report_their_work_to_the_agent_trace() {
 
     let args = serde_json::json!({ "task_name": "lister", "message": "RUN: ls" });
     core.submit_user_message(format!("CALL spawn_agent {args}"));
-    // Whole batches: the lifecycle events follow `ready` in the same batch.
+    // The lifecycle events can come after `ready` on a slower machine: wait
+    // for the turn and for them.
     let mut events = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(20);
-    while !events.iter().any(is_ready) && Instant::now() < deadline {
+    let lifecycle = |event: &AgentEvent| matches!(event, AgentEvent::SubagentLifecycle { .. });
+    while !(events.iter().any(is_ready) && events.iter().any(lifecycle))
+        && Instant::now() < deadline
+    {
         events.extend(core.poll_events());
         thread::sleep(Duration::from_millis(10));
     }
@@ -653,6 +657,16 @@ fn a_worker_runs_in_a_worktree_that_the_merge_op_brings_back() {
     core.submit_user_message(format!("CALL spawn_agent {args}"));
     let mut events = pump(&mut core, is_ready);
     let deadline = Instant::now() + Duration::from_secs(20);
+    // The row can report the worker finished before its lifecycle events
+    // are polled (a slower machine): wait for both.
+    let worker_event = |events: &[AgentEvent]| {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                AgentEvent::SubagentLifecycle { role: Some(role), .. } if role == "worker"
+            )
+        })
+    };
     let row = loop {
         events.extend(core.poll_events());
         let AgentEvent::AgentRuns(rows) = core.agent_runs_event() else {
@@ -662,16 +676,15 @@ fn a_worker_runs_in_a_worktree_that_the_merge_op_brings_back() {
             .into_iter()
             .find(|row| row["label"] == "builder")
             .expect("row");
-        if row["state"] != "running" && row["state"] != "pending" {
+        if row["state"] != "running" && row["state"] != "pending" && worker_event(&events) {
             break row;
         }
-        assert!(Instant::now() < deadline, "the worker never finished");
+        assert!(
+            Instant::now() < deadline,
+            "the worker never finished, or no lifecycle event named its role"
+        );
         thread::sleep(Duration::from_millis(20));
     };
-    assert!(events.iter().any(|event| matches!(
-        event,
-        AgentEvent::SubagentLifecycle { role: Some(role), .. } if role == "worker"
-    )));
     assert_eq!(row["role"], "worker");
     assert_eq!(row["isolation"], "worktree");
     let workdir = std::path::PathBuf::from(row["workdir"].as_str().unwrap());
@@ -749,10 +762,14 @@ fn a_plan_step_names_its_agent_and_the_agent_events_carry_the_step() {
 
     let args = serde_json::json!({ "task_name": "mapper", "role": "explorer", "message": "look" });
     core.submit_user_message(format!("CALL spawn_agent {args}"));
-    // Whole batches: the lifecycle events follow `ready` in the same batch.
+    // The lifecycle events can come after `ready` on a slower machine: wait
+    // for the turn and for them.
     let mut events = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(20);
-    while !events.iter().any(is_ready) && Instant::now() < deadline {
+    let lifecycle = |event: &AgentEvent| matches!(event, AgentEvent::SubagentLifecycle { .. });
+    while !(events.iter().any(is_ready) && events.iter().any(lifecycle))
+        && Instant::now() < deadline
+    {
         events.extend(core.poll_events());
         thread::sleep(Duration::from_millis(10));
     }
