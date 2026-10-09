@@ -1772,6 +1772,25 @@ pub fn project_model_output(name: &str, output: &str, cwd: &Path) -> String {
     .to_string()
 }
 
+/// A read's text reaches the model once: as hashlines when hashline_edit
+/// edits files (it needs their anchors), else as the plain content. Small
+/// reads carried both, the same text twice.
+pub(crate) fn read_output_for_editing(model_output: String, hashline_edit: bool) -> String {
+    let Ok(Value::Object(mut map)) = serde_json::from_str::<Value>(&model_output) else {
+        return model_output;
+    };
+    let has = |key: &str| map.get(key).is_some_and(Value::is_string);
+    if !(has("content") && has("hashlines")) {
+        return model_output;
+    }
+    map.remove(if hashline_edit {
+        "content"
+    } else {
+        "hashlines"
+    });
+    Value::Object(map).to_string()
+}
+
 fn project_read_model_output(name: &str, output: &str, cwd: &Path) -> Option<String> {
     if env::var("LYNSHEN_PROJECT_READ_MODEL_OUTPUT")
         .ok()
@@ -3900,6 +3919,24 @@ mod tests {
         assert_eq!(
             image["content"][0]["image_url"],
             "data:image/png;base64,AAEC"
+        );
+    }
+
+    #[test]
+    fn a_read_reaches_the_model_in_the_form_its_edit_tool_uses() {
+        let output = json!({ "path": "a.txt", "content": "hello\n", "hashlines": "1#ab:hello\n" })
+            .to_string();
+        let hashline: Value =
+            serde_json::from_str(&read_output_for_editing(output.clone(), true)).unwrap();
+        assert!(hashline.get("content").is_none() && hashline["hashlines"] == "1#ab:hello\n");
+        let plain: Value = serde_json::from_str(&read_output_for_editing(output, false)).unwrap();
+        assert!(plain.get("hashlines").is_none() && plain["content"] == "hello\n");
+        // A large read already lost its content: the hashlines stay.
+        let projected = json!({ "path": "a.txt", "hashlines": "1#ab:hello" }).to_string();
+        assert_eq!(read_output_for_editing(projected.clone(), false), projected);
+        assert_eq!(
+            read_output_for_editing("not json".to_string(), true),
+            "not json"
         );
     }
 
