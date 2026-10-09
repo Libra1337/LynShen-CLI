@@ -1,6 +1,6 @@
 pkgbase = lynshen-cli-bin
 	pkgdesc = LynShen CLI: a coding agent in the terminal
-	pkgver = 0.4.26
+	pkgver = 0.4.27
 	pkgrel = 1
 	url = https://github.com/Libra1337/LynShen-CLI
 	arch = x86_64
@@ -13,9 +13,9 @@ pkgbase = lynshen-cli-bin
 	conflicts = lynshen-cli
 	options = !strip
 	options = !debug
-	source = third-party-notices-0.4.26.txt::https://github.com/Libra1337/LynShen-CLI/releases/download/v0.4.26/lynshen-third-party-notices.txt
+	source = third-party-notices-0.4.27.txt::https://github.com/Libra1337/LynShen-CLI/releases/download/v0.4.27/lynshen-third-party-notices.txt
 	sha256sums = 4831460dfd8a0e3bdccc4edae2ab0bbc6a4810325a8662bef32cd38d1cb5001c
-	source_x86_64 = lynshen-0.4.26::https://github.com/Libra1337/LynShen-CLI/releases/download/v0.4.26/lynshen-x86_64-unknown-linux-gnu
-	sha256sums_x86_64 = 423c4308379b57adbbedaed4e0e7e1f5426e80a2ba4ca8bebb4ef070cf5b8f17
+	source_x86_64 = lynshen-0.4.27::https://github.com/Libra1337/LynShen-CLI/releases/download/v0.4.27/lynshen-x86_64-unknown-linux-gnu
+	sha256sums_x86_64 = 2cbdde9a17bebbda8c2862b1d57c1cd580ea16dd489e0a5b8b7171708d052db9
 
 pkgname = lynshen-cli-bin
