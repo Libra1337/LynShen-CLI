@@ -645,6 +645,7 @@ impl OpenAiClient {
                 .collect::<HashSet<_>>();
 
             let mut tool_requests = Vec::new();
+            let mut offered: Option<Vec<String>> = None;
             for call in function_calls {
                 if self
                     .deadline
@@ -667,6 +668,11 @@ impl OpenAiClient {
                     .and_then(Value::as_str)
                     .unwrap_or("{}")
                     .to_string();
+                // `Bash`, `WebFetch`, `read_file`: another agent's name for
+                // an offered tool runs that tool.
+                let offered = offered.get_or_insert_with(|| self.offered_tool_names());
+                let (name, arguments) = crate::tool_alias::canonicalize(&name, &arguments, offered)
+                    .unwrap_or((name, arguments));
                 tool_requests.push(ToolCallRequest {
                     call_id,
                     name,
@@ -1086,6 +1092,15 @@ impl OpenAiClient {
         (system, mcp)
     }
 
+    /// The names of the tools this client offers the model.
+    fn offered_tool_names(&self) -> Vec<String> {
+        self.tool_definitions()
+            .iter()
+            .filter_map(|definition| definition.get("name").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect()
+    }
+
     pub(crate) fn tool_definitions(&self) -> Vec<Value> {
         if let Some(host) = self.host.as_ref().filter(|host| host.exclusive) {
             return host.tools.clone();
@@ -1226,11 +1241,14 @@ impl OpenAiClient {
             .host
             .as_ref()
             .is_some_and(|host| host.exclusive && !host.has_tool(&request.name));
-        let result = if exclusive {
+        let unknown = || {
             json_tool_result(
-                json!({ "error": format!("unknown tool: {}", request.name) }),
+                json!({ "error": crate::tool_alias::unknown_tool_message(&request.name, &self.offered_tool_names()) }),
                 true,
             )
+        };
+        let result = if exclusive {
+            unknown()
         } else if let Some(result) = self.run_goal_tool(&request.name, &request.arguments) {
             result
         } else if let Some(result) = self.run_subagent_tool(
@@ -1281,6 +1299,13 @@ impl OpenAiClient {
                     })
                 },
             );
+            if result.is_error
+                && serde_json::from_str::<Value>(&result.output).is_ok_and(|output| {
+                    output["error"] == format!("unknown tool: {}", request.name).as_str()
+                })
+            {
+                return unknown();
+            }
             if request.name == "read" {
                 let hashline_edit = self
                     .enabled_edit_tools
