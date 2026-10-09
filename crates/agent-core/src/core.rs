@@ -2399,6 +2399,7 @@ impl AgentCore {
         let (tx, rx) = mpsc::channel();
         self.interrupt_flag = Arc::new(AtomicBool::new(false));
         let interrupt_flag = Arc::clone(&self.interrupt_flag);
+        client.set_interrupt_flag(Arc::clone(&interrupt_flag));
         self.receiver = Some(rx);
         self.running = true;
 
@@ -2737,9 +2738,13 @@ impl AgentCore {
             if !current {
                 continue;
             }
-            if self.approved_tools.contains(&request.name)
-                || !self.approval_mode.get().requires_approval(&request.name)
-            {
+            let gate = self
+                .host
+                .as_ref()
+                .and_then(|host| host.gate_of(&request.name));
+            let allowlisted = gate != Some(crate::host::HostGate::Ask)
+                && self.approved_tools.contains(&request.name);
+            if allowlisted || !requires_approval(self.approval_mode.get(), gate, &request.name) {
                 let _ = request.response_tx.send(ApprovalDecision::allow_all());
                 continue;
             }
@@ -2935,8 +2940,21 @@ impl AgentCore {
         let mcp = self.mcp.clone();
         let hooks = self.hooks.clone();
         let tool_state = self.tool_state.clone();
+        let host = self.host.clone().filter(|host| host.has_tool(&action.name));
         thread::spawn(move || {
-            let result = if action.name.starts_with("mcp__") {
+            let result = if let Some(host) = host {
+                let (output, is_error) =
+                    (host.run_tool)(&action.name, &action.arguments, &AtomicBool::new(false));
+                crate::tools::ToolExecutionResult {
+                    model_output: crate::tools::project_model_output(
+                        &action.name,
+                        &output,
+                        &action.cwd,
+                    ),
+                    output,
+                    is_error,
+                }
+            } else if action.name.starts_with("mcp__") {
                 match mcp.run_tool(&action.name, &action.arguments) {
                     Some((output, is_error)) => crate::tools::ToolExecutionResult {
                         model_output: crate::tools::project_model_output(
@@ -3007,10 +3025,14 @@ impl AgentCore {
     pub fn set_approval_mode(&mut self, mode: ApprovalMode) -> Vec<AgentEvent> {
         self.approval_mode.set(mode);
         // Calls parked for a decision the new mode no longer needs run now.
+        let host = self.host.as_ref();
         let freed: Vec<String> = self
             .pending_approvals
             .iter()
-            .filter(|(_, pending)| !mode.requires_approval(&pending.name))
+            .filter(|(_, pending)| {
+                let gate = host.and_then(|host| host.gate_of(&pending.name));
+                !requires_approval(mode, gate, &pending.name)
+            })
             .map(|(call, _)| call.clone())
             .collect();
         for call in freed {
@@ -4967,6 +4989,15 @@ fn parse_hunk_id_list(list: &str) -> Result<Vec<String>, String> {
         return Err("--hunks requires at least one hunk id".to_string());
     }
     Ok(ids)
+}
+
+/// Whether a call to `name` needs a person under `mode`: a host tool by
+/// its `gate`, any other tool by its class.
+fn requires_approval(mode: ApprovalMode, gate: Option<crate::host::HostGate>, name: &str) -> bool {
+    match gate {
+        Some(gate) => mode.requires_approval_for_host(gate),
+        None => mode.requires_approval(name),
+    }
 }
 
 /// Validates and forwards an approval decision to the parked tool call.

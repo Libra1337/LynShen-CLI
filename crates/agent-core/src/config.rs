@@ -148,6 +148,16 @@ impl ApprovalMode {
         false
     }
 
+    /// `requires_approval` for a host tool gated as `gate`.
+    pub fn requires_approval_for_host(&self, gate: crate::host::HostGate) -> bool {
+        use crate::host::HostGate;
+        match gate {
+            HostGate::Run | HostGate::ReadOnly => false,
+            HostGate::Outward => self.is_strict(),
+            HostGate::Ask => true,
+        }
+    }
+
     /// Whether a shell-tool call should go through the safety classifier
     /// before falling back to a user decision. Only `auto` classifies.
     pub fn classifies_shell(&self) -> bool {
