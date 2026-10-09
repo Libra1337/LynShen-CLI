@@ -298,6 +298,49 @@ fn watching_sends_that_client_a_snapshot_of_the_session() {
 }
 
 #[test]
+fn the_task_board_is_in_the_snapshot_and_team_ops_reach_the_session() {
+    let _guard = setup();
+    let daemon = start_daemon();
+    let dir = temp_dir("daemon-team");
+    let mut first = Client::connect(&daemon);
+    let session = first.create_session(&dir);
+    let task = json!({ "title": "Write the parser" });
+    first.send(json!({ "op": "user_message", "session": session, "content": format!("CALL task_create {task}") }));
+    let frames = first.until(ready(&session));
+    assert!(
+        frames
+            .iter()
+            .any(|frame| frame["type"] == "task_board" && frame["session"] == session.as_str()),
+        "{frames:#?}"
+    );
+
+    // A client that attaches later gets the board with the session state.
+    let mut late = Client::connect(&daemon);
+    late.send(json!({ "op": "watch", "session": session }));
+    let frames =
+        late.until(|frame| frame["type"] == "transcript" && frame["session"] == session.as_str());
+    let board = frames
+        .iter()
+        .find(|frame| frame["type"] == "task_board")
+        .expect("task_board in the snapshot");
+    assert_eq!(board["tasks"][0]["id"], "t1");
+    assert_eq!(board["tasks"][0]["title"], "Write the parser");
+    assert_eq!(board["tasks"][0]["status"], "pending");
+
+    // The stop button reaches a background agent through the daemon.
+    let args = json!({ "task_name": "slow", "background": true, "message": "[sleep:1500] wait" });
+    first.send(json!({ "op": "user_message", "session": session, "content": format!("CALL spawn_agent {args}") }));
+    first.until(ready(&session));
+    first.send(json!({ "op": "close_agent", "session": session, "target": "slow" }));
+    let frames =
+        first.until(|frame| frame["type"] == "subagent_lifecycle" && frame["status"] == "closed");
+    let closed = frames.last().unwrap();
+    assert_eq!(closed["session"], session.as_str());
+    assert_eq!(closed["path"], "/root/slow");
+    assert_eq!(closed["background"], true);
+}
+
+#[test]
 fn the_title_model_names_a_session_and_leaves_a_hand_set_title_alone() {
     let _guard = setup();
     let daemon = start_daemon();

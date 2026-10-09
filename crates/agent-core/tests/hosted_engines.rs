@@ -785,3 +785,344 @@ fn a_plan_step_names_its_agent_and_the_agent_events_carry_the_step() {
     assert_eq!(role.as_deref(), Some("explorer"));
     assert_eq!(step.as_deref(), Some("Map the parser"));
 }
+
+fn rows(core: &AgentCore) -> Vec<serde_json::Value> {
+    let AgentEvent::AgentRuns(rows) = core.agent_runs_event() else {
+        unreachable!()
+    };
+    rows
+}
+
+fn row(core: &AgentCore, label: &str) -> serde_json::Value {
+    rows(core)
+        .into_iter()
+        .find(|row| row["label"] == label)
+        .unwrap_or_else(|| panic!("no agent {label}"))
+}
+
+fn finished(row: &serde_json::Value) -> bool {
+    row["state"] != "running" && row["state"] != "pending"
+}
+
+fn readies(events: &[AgentEvent]) -> usize {
+    events.iter().filter(|event| is_ready(event)).count()
+}
+
+/// Polls into `events` until `done` holds for them and the agent rows.
+fn pump_until(
+    core: &mut AgentCore,
+    events: &mut Vec<AgentEvent>,
+    done: impl Fn(&[AgentEvent], &[serde_json::Value]) -> bool,
+) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        events.extend(core.poll_events());
+        if done(events, &rows(core)) {
+            return;
+        }
+        assert!(Instant::now() < deadline, "timed out; events: {events:#?}");
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Polls for `millis`, collecting what happens.
+fn pump_for(core: &mut AgentCore, events: &mut Vec<AgentEvent>, millis: u64) {
+    let until = Instant::now() + Duration::from_millis(millis);
+    while Instant::now() < until {
+        events.extend(core.poll_events());
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn wire(events: Vec<AgentEvent>) -> Vec<serde_json::Value> {
+    events
+        .into_iter()
+        .map(lynshen_agent_core::protocol::event_json)
+        .collect()
+}
+
+#[test]
+fn a_background_agent_outlives_the_turn_and_its_result_wakes_the_main_agent_once() {
+    let _guard = setup();
+    let dir = temp_dir("team-background");
+    let mut core = open(&dir, ApprovalMode::FullAccess);
+
+    let args = serde_json::json!({ "task_name": "scout", "background": true, "message": "[sleep:1200] look around" });
+    let mut events = core.submit_user_message(format!("CALL spawn_agent {args}"));
+    pump_until(&mut core, &mut events, |events, _| readies(events) == 1);
+    // The turn ended; the agent works on.
+    let scout = row(&core, "scout");
+    assert_eq!(scout["background"], true);
+    assert!(!finished(&scout), "{scout}");
+
+    // Its result starts a main turn by itself.
+    pump_until(&mut core, &mut events, |events, _| readies(events) == 2);
+    assert_eq!(row(&core, "scout")["state"], "completed");
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::AgentMessage { from, to, .. } if from == "/root/scout" && to == "/root"
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::SubagentLifecycle { background: true, status, .. } if status == "completed"
+    )));
+    let reply = assistant_text(&events);
+    assert!(
+        reply.contains("<subagent_result path=\"/root/scout\" status=\"completed\">"),
+        "{reply}"
+    );
+    // Once: nothing else starts.
+    pump_for(&mut core, &mut events, 800);
+    assert_eq!(readies(&events), 2);
+    let starts = events
+        .iter()
+        .filter(|event| matches!(event, AgentEvent::AssistantStart))
+        .count();
+    assert_eq!(starts, 2);
+}
+
+#[test]
+fn the_close_agent_op_stops_a_background_agent_and_nothing_wakes() {
+    let _guard = setup();
+    let dir = temp_dir("team-close");
+    let mut core = open(&dir, ApprovalMode::FullAccess);
+
+    let args = serde_json::json!({ "task_name": "sleeper", "background": true, "message": "[sleep:1500] wait" });
+    core.submit_user_message(format!("CALL spawn_agent {args}"));
+    let mut events = Vec::new();
+    pump_until(&mut core, &mut events, |events, _| readies(events) == 1);
+    assert!(!finished(&row(&core, "sleeper")));
+
+    let op = serde_json::json!({ "op": "close_agent", "target": "sleeper" });
+    let (_, closed) = lynshen_agent_core::protocol::apply_op(&mut core, &op);
+    let closed = wire(closed);
+    assert!(
+        closed
+            .iter()
+            .any(|event| event["type"] == "subagent_lifecycle"
+                && event["path"] == "/root/sleeper"
+                && event["status"] == "closed"
+                && event["background"] == true),
+        "{closed:#?}"
+    );
+    let runs = closed
+        .iter()
+        .find(|event| event["type"] == "agent_runs")
+        .expect("agent_runs");
+    assert_eq!(runs["agents"][0]["state"], "closed");
+    assert_eq!(runs["agents"][0]["background"], true);
+
+    // Its model call ends later; a closed agent wakes nobody.
+    pump_for(&mut core, &mut events, 2200);
+    assert_eq!(readies(&events), 1);
+    assert_eq!(row(&core, "sleeper")["state"], "closed");
+
+    let op = serde_json::json!({ "op": "close_agent", "target": "nobody" });
+    let (_, unknown) = lynshen_agent_core::protocol::apply_op(&mut core, &op);
+    assert!(unknown.iter().any(
+        |event| matches!(event, AgentEvent::Error(message) if message.contains("agent not found"))
+    ));
+}
+
+#[test]
+fn resume_agent_runs_a_finished_agent_again_on_its_conversation() {
+    let _guard = setup();
+    let dir = temp_dir("team-resume");
+    let mut core = open(&dir, ApprovalMode::FullAccess);
+
+    let args = serde_json::json!({ "task_name": "helper", "background": true, "message": "[sleep:800] first task" });
+    core.submit_user_message(format!("CALL spawn_agent {args}"));
+    let mut events = Vec::new();
+    pump_until(&mut core, &mut events, |events, rows| {
+        readies(events) == 2 && rows.iter().all(finished)
+    });
+    assert_eq!(row(&core, "helper")["state"], "completed");
+
+    let args =
+        serde_json::json!({ "target": "helper", "message": "[sleep:800][history] second task" });
+    core.submit_user_message(format!("CALL resume_agent {args}"));
+    pump_until(&mut core, &mut events, |events, rows| {
+        readies(events) == 4 && rows.iter().all(finished)
+    });
+    let helper = row(&core, "helper");
+    assert_eq!(helper["state"], "completed");
+    // The second run saw the first one's conversation.
+    let result = helper["result"].as_str().unwrap();
+    assert!(result.starts_with("history: "), "{result}");
+    assert!(result.contains("first task"), "{result}");
+    assert!(result.contains("second task"), "{result}");
+    let AgentEvent::SubagentTranscript {
+        items: Some(items), ..
+    } = core.subagent_transcript_event("/root/helper")
+    else {
+        panic!("transcript")
+    };
+    assert!(items.iter().any(
+        |item| item["role"] == "user" && item["content"] == "[sleep:800][history] second task"
+    ));
+}
+
+#[test]
+fn the_board_and_the_worktree_registry_survive_an_engine_restart() {
+    let _guard = setup();
+    let dir = temp_dir("team-restart");
+    git(&dir, &["init", "-q"]);
+    fs::write(dir.join("README.md"), "hello\n").unwrap();
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-qm", "init"]);
+    let mut core = open(&dir, ApprovalMode::FullAccess);
+
+    let task = serde_json::json!({ "title": "Ship the feature", "role": "worker" });
+    core.submit_user_message(format!("CALL task_create {task}"));
+    let mut events = Vec::new();
+    pump_until(&mut core, &mut events, |events, _| readies(events) == 1);
+    let board = events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::TaskBoard(tasks) => Some(tasks.clone()),
+            _ => None,
+        })
+        .expect("task_board");
+    assert_eq!(board[0]["id"], "t1");
+    assert_eq!(board[0]["status"], "pending");
+
+    let args = serde_json::json!({ "task_name": "builder", "role": "worker", "message": "build" });
+    core.submit_user_message(format!("CALL spawn_agent {args}"));
+    pump_until(&mut core, &mut events, |events, rows| {
+        readies(events) == 2 && rows.iter().all(finished)
+    });
+    let workdir = std::path::PathBuf::from(row(&core, "builder")["workdir"].as_str().unwrap());
+    fs::write(workdir.join("feature.txt"), "done\n").unwrap();
+    pump_for(&mut core, &mut events, 100);
+    let session = core.session_id().to_string();
+    drop(core);
+
+    let mut core = open(&dir, ApprovalMode::FullAccess);
+    let (_, resumed) = core.handle_command(&format!("/resume {session}"));
+    let resumed = wire(resumed);
+    let board = resumed
+        .iter()
+        .find(|event| event["type"] == "task_board")
+        .expect("task_board on resume");
+    assert_eq!(board["tasks"][0]["title"], "Ship the feature");
+    let runs = resumed
+        .iter()
+        .find(|event| event["type"] == "agent_runs")
+        .expect("agent_runs on resume");
+    let builder = &runs["agents"][0];
+    assert_eq!(builder["id"], "/root/builder");
+    assert_eq!(builder["isolation"], "worktree");
+    assert_eq!(builder["role"], "worker");
+    assert!(finished(builder), "{builder}");
+    // A client that attaches later gets the board too.
+    assert!(core
+        .state_events()
+        .iter()
+        .any(|event| matches!(event, AgentEvent::TaskBoard(tasks) if tasks.len() == 1)));
+
+    let op = serde_json::json!({ "op": "merge_agent", "target": "builder", "action": "apply" });
+    let (_, merged) = lynshen_agent_core::protocol::apply_op(&mut core, &op);
+    let result = wire(merged)
+        .into_iter()
+        .find(|event| event["type"] == "merge_result")
+        .expect("merge_result");
+    assert_eq!(result["ok"], true, "{result}");
+    assert_eq!(
+        fs::read_to_string(dir.join("feature.txt")).unwrap(),
+        "done\n"
+    );
+    assert!(!workdir.exists());
+}
+
+#[test]
+fn best_of_n_attempts_run_in_worktrees_and_pick_attempt_keeps_one() {
+    let _guard = setup();
+    let dir = temp_dir("team-attempts");
+    git(&dir, &["init", "-q"]);
+    fs::write(dir.join("README.md"), "hello\n").unwrap();
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-qm", "init"]);
+    let mut core = open(&dir, ApprovalMode::FullAccess);
+
+    // Attempts need worktrees.
+    let args = serde_json::json!({ "task_name": "fix", "attempts": 2, "message": "m" });
+    core.submit_user_message(format!("CALL spawn_agent {args}"));
+    let mut events = Vec::new();
+    pump_until(&mut core, &mut events, |events, _| readies(events) == 1);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ToolOutput { name, is_error: true, output, .. }
+            if name == "spawn_agent" && output.contains("attempts needs isolation")
+    )));
+    assert!(rows(&core).is_empty());
+
+    let args = serde_json::json!({ "task_name": "fix", "role": "worker", "attempts": 2, "message": "fix it" });
+    core.submit_user_message(format!("CALL spawn_agent {args}"));
+    pump_until(&mut core, &mut events, |events, rows| {
+        readies(events) == 2 && rows.len() == 2 && rows.iter().all(finished)
+    });
+    let first = row(&core, "fix_a1");
+    let second = row(&core, "fix_a2");
+    assert_eq!(
+        (&first["attempt_group"], &first["attempt"]),
+        (&serde_json::json!("fix"), &serde_json::json!(1))
+    );
+    assert_eq!(second["attempt"], 2);
+    let first_dir = std::path::PathBuf::from(first["workdir"].as_str().unwrap());
+    let second_dir = std::path::PathBuf::from(second["workdir"].as_str().unwrap());
+    assert_ne!(first_dir, second_dir);
+    fs::write(first_dir.join("one.txt"), "1\n").unwrap();
+    fs::write(second_dir.join("two.txt"), "2\n").unwrap();
+
+    let op = serde_json::json!({ "op": "pick_attempt", "group": "fix", "target": "fix_a2" });
+    let (_, picked) = lynshen_agent_core::protocol::apply_op(&mut core, &op);
+    let merges: Vec<serde_json::Value> = wire(picked)
+        .into_iter()
+        .filter(|event| event["type"] == "merge_result")
+        .collect();
+    assert_eq!(merges.len(), 2, "{merges:#?}");
+    assert_eq!(merges[0]["target"], "/root/fix_a2");
+    assert_eq!(merges[0]["action"], "apply");
+    assert_eq!(merges[0]["ok"], true);
+    assert_eq!(merges[1]["target"], "/root/fix_a1");
+    assert_eq!(merges[1]["action"], "discard");
+    assert_eq!(merges[1]["ok"], true);
+    assert!(dir.join("two.txt").exists());
+    assert!(!dir.join("one.txt").exists());
+    assert!(!first_dir.exists() && !second_dir.exists());
+    assert_eq!(row(&core, "fix_a2")["state"], "merged");
+    assert_eq!(row(&core, "fix_a1")["state"], "discarded");
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn a_worktree_agents_shell_writes_only_its_worktree() {
+    let _guard = setup();
+    let dir = temp_dir("team-confined");
+    git(&dir, &["init", "-q"]);
+    fs::write(dir.join("README.md"), "hello\n").unwrap();
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-qm", "init"]);
+    // The default sandbox: workspace-write.
+    let mut core = open(&dir, ApprovalMode::FullAccess);
+
+    // The worktree is <dir>/.lynshen/agents/<name>: ../../.. is the project.
+    let args = serde_json::json!({
+        "task_name": "w",
+        "role": "worker",
+        "background": true,
+        "message": "RUN: printf in > inside.txt; printf out > ../../../escape.txt; printf x > ok.txt",
+    });
+    core.submit_user_message(format!("CALL spawn_agent {args}"));
+    let mut events = Vec::new();
+    pump_until(&mut core, &mut events, |events, rows| {
+        readies(events) == 2 && rows.iter().all(finished)
+    });
+    let workdir = std::path::PathBuf::from(row(&core, "w")["workdir"].as_str().unwrap());
+    assert_eq!(
+        fs::read_to_string(workdir.join("inside.txt")).unwrap(),
+        "in"
+    );
+    assert!(workdir.join("ok.txt").exists());
+    assert!(!dir.join("escape.txt").exists());
+}

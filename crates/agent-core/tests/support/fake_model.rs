@@ -59,7 +59,9 @@ pub fn temp_dir(label: &str) -> PathBuf {
 
 /// A scripted model: a user message `RUN: <command>` answers with one bash
 /// call; anything after a tool result or a deferred-action message answers
-/// with plain text naming what it saw.
+/// with plain text naming what it saw. In a subagent's task, `[sleep:N]`
+/// waits N ms before answering and a line `RUN: <command>` runs it;
+/// `[history]` answers with every user message of the request.
 fn start_fake_model() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
@@ -100,10 +102,8 @@ fn read_request_body(stream: &mut std::net::TcpStream) -> Value {
     serde_json::from_slice(&body).unwrap_or(Value::Null)
 }
 
-fn script(request: &Value) -> String {
-    let messages = request["messages"].as_array().cloned().unwrap_or_default();
-    let last = messages.last().cloned().unwrap_or(Value::Null);
-    let text = match &last["content"] {
+fn content_text(content: &Value) -> String {
+    match content {
         Value::String(text) => text.clone(),
         Value::Array(parts) => parts
             .iter()
@@ -111,7 +111,49 @@ fn script(request: &Value) -> String {
             .collect::<Vec<_>>()
             .join("\n"),
         _ => String::new(),
-    };
+    }
+}
+
+fn script(request: &Value) -> String {
+    let messages = request["messages"].as_array().cloned().unwrap_or_default();
+    let last = messages.last().cloned().unwrap_or(Value::Null);
+    let text = content_text(&last["content"]);
+    let task = text.starts_with("<subagent_task");
+    if task {
+        if let Some(ms) = text
+            .split("[sleep:")
+            .nth(1)
+            .and_then(|rest| rest.split(']').next())
+            .and_then(|ms| ms.parse::<u64>().ok())
+        {
+            thread::sleep(std::time::Duration::from_millis(ms));
+        }
+    }
+    if task && text.contains("[history]") {
+        let history = messages
+            .iter()
+            .filter(|message| message["role"] == "user")
+            .map(|message| content_text(&message["content"]))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        return sse(&[
+            json!({ "choices": [{ "index": 0, "delta": { "content": format!("history: {history}") }, "finish_reason": null }] }),
+            json!({ "choices": [{ "index": 0, "delta": {}, "finish_reason": "stop" }] }),
+        ]);
+    }
+    let task_command = task
+        .then(|| text.lines().find_map(|line| line.strip_prefix("RUN: ")))
+        .flatten();
+    if let (true, Some(command)) = (last["role"] == "user", task_command) {
+        let arguments = json!({ "command": command }).to_string();
+        return sse(&[
+            json!({ "choices": [{ "index": 0, "delta": { "tool_calls": [{
+                "index": 0, "id": "call_1", "type": "function",
+                "function": { "name": "bash", "arguments": arguments }
+            }] }, "finish_reason": null }] }),
+            json!({ "choices": [{ "index": 0, "delta": {}, "finish_reason": "tool_calls" }] }),
+        ]);
+    }
     if last["role"] == "user" {
         if let Some(call) = text.strip_prefix("CALL ") {
             let (name, arguments) = call.split_once(' ').unwrap_or((call, "{}"));
