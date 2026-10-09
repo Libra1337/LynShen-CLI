@@ -303,12 +303,12 @@ fn run_tool_inner(
         }
     };
 
-    // The sandbox's extra directories are readable by the file tools too.
+    // Where the sandbox lets this agent's commands write, the read tools may
+    // read: a screenshot or log a bash command just wrote to /tmp included.
     let sandbox = state.sandbox();
     let mut read_roots = extra_read_roots.to_vec();
     if let Some(sandbox) = &sandbox {
-        read_roots.extend(sandbox.readable_dirs.iter().cloned());
-        read_roots.extend(sandbox.writable_dirs.iter().cloned());
+        read_roots.extend(sandbox.tool_read_roots(cwd));
     }
     let extra_read_roots = read_roots.as_slice();
     let result = match name {
@@ -3655,9 +3655,10 @@ pub(crate) fn workspace_path(cwd: &Path, path: &str) -> Result<PathBuf, String> 
 }
 
 /// Workspace path policy for read-only file tools: the workspace plus any
-/// `extra_roots` (discovered skill directories, so a skill's relative
-/// references resolve). Returns the workspace error unchanged when the path
-/// is under neither.
+/// `extra_roots` (discovered skill directories, the sandbox's own readable
+/// and writable roots). Returns the workspace error unchanged when the path
+/// is under neither. Credentials stay unreadable even when a root contains
+/// them, as they are for a sandboxed command.
 pub(crate) fn readable_path(
     cwd: &Path,
     path: &str,
@@ -3668,6 +3669,15 @@ pub(crate) fn readable_path(
         Ok(()) => Ok(resolved),
         Err(workspace_error) => {
             let normalized = normalize_for_policy(&resolved);
+            if crate::sandbox::denied_reads()
+                .iter()
+                .any(|secret| normalized == *secret || normalized.starts_with(secret))
+            {
+                return Err(format!(
+                    "{} holds credentials and is not readable",
+                    resolved.display()
+                ));
+            }
             if extra_roots.iter().any(|root| {
                 root.canonicalize()
                     .map(|root| normalized == root || normalized.starts_with(&root))
@@ -5766,6 +5776,108 @@ mod tests {
             &owner,
         );
         assert!(own.get("error").is_none(), "{own}");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn a_sandboxed_agent_reads_what_its_commands_wrote_outside_the_workspace() {
+        use crate::sandbox::{SandboxMode, SandboxPolicy};
+        let dir = test_dir("sandbox-temp-read");
+        fs::create_dir_all(&dir).unwrap();
+        let shot = test_dir("sandbox-temp-shot");
+        fs::create_dir_all(&shot).unwrap();
+        fs::write(shot.join("screenshot.txt"), "image bytes").unwrap();
+        let file = shot.join("screenshot.txt").display().to_string();
+        let run = |tool: &str, args: Value, state: &ToolState| -> Value {
+            serde_json::from_str(
+                &run_tool_with_events(tool, &args.to_string(), &dir, &[], state, |_| Ok(())).output,
+            )
+            .unwrap()
+        };
+
+        // No sandbox: the file tools stay inside the workspace, as before.
+        let plain = ToolState::default();
+        let refused = run("read", json!({ "path": file }), &plain);
+        assert!(
+            refused["error"]
+                .as_str()
+                .unwrap()
+                .contains("escapes the workspace"),
+            "{refused}"
+        );
+
+        // workspace-write: temp is writable for commands, so the read tools
+        // can read a screenshot or log a command just wrote there.
+        let sandboxed = ToolState::default();
+        sandboxed.set_sandbox(Some(SandboxPolicy {
+            mode: SandboxMode::WorkspaceWrite,
+            writable_dirs: Vec::new(),
+            readable_dirs: Vec::new(),
+            network: true,
+            rules: Vec::new(),
+        }));
+        let read = run("read", json!({ "path": file }), &sandboxed);
+        assert!(read.get("error").is_none(), "{read}");
+        assert!(read["content"].as_str().unwrap().contains("image bytes"));
+        for (tool, args) in [
+            ("ls", json!({ "path": shot.display().to_string() })),
+            ("outline", json!({ "path": file })),
+            (
+                "ripgrep",
+                json!({ "path": shot.display().to_string(), "pattern": "image" }),
+            ),
+        ] {
+            let result = run(tool, args, &sandboxed);
+            assert!(result.get("error").is_none(), "{tool}: {result}");
+        }
+
+        // Writing there is still refused: only reads widen.
+        let write = run(
+            "write",
+            json!({ "path": shot.join("new.txt").display().to_string(), "content": "x" }),
+            &sandboxed,
+        );
+        assert!(
+            write["error"]
+                .as_str()
+                .unwrap()
+                .contains("escapes the workspace"),
+            "{write}"
+        );
+        assert!(!shot.join("new.txt").exists());
+
+        // read-only: no command writes anywhere, so nothing widens either.
+        let read_only = ToolState::default();
+        read_only.set_sandbox(Some(SandboxPolicy {
+            mode: SandboxMode::ReadOnly,
+            ..SandboxPolicy::default_for_platform()
+        }));
+        let refused = run("read", json!({ "path": file }), &read_only);
+        assert!(
+            refused["error"]
+                .as_str()
+                .unwrap()
+                .contains("escapes the workspace"),
+            "{refused}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&shot);
+    }
+
+    #[test]
+    fn read_roots_never_open_credentials() {
+        let dir = test_dir("read-roots-secret");
+        fs::create_dir_all(&dir).unwrap();
+        let secrets = crate::sandbox::denied_reads();
+        let Some(ssh) = secrets.iter().find(|path| path.ends_with(".ssh")) else {
+            return;
+        };
+        // Even with the home directory as a read root, ~/.ssh stays closed.
+        let roots = vec![ssh.parent().unwrap().to_path_buf()];
+        let error = readable_path(&dir, &ssh.join("id_rsa").display().to_string(), &roots)
+            .expect_err("credentials must not be readable");
+        assert!(error.contains("credentials"), "{error}");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
