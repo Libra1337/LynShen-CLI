@@ -68,7 +68,7 @@ pub fn search_definition() -> Value {
             "properties": {
                 "query": { "type": "string", "description": "Up to 400 characters." },
                 "max_results": { "type": "number", "description": "1-10, default 10." },
-                "freshness": { "type": "string", "enum": ["day", "week", "month", "year"], "description": "Only pages published within this period. Gateway engines only." }
+                "freshness": { "type": "string", "enum": ["day", "week", "month", "year"], "description": "Only pages published within this period." }
             },
             "required": ["query"]
         }

@@ -24,7 +24,7 @@ pub fn definition() -> Value {
     json!({
         "type": "function",
         "name": "web_fetch",
-        "description": "GET an http(s) URL and return its `status` and readable text (HTML converted, links as `text (url)`). Every response is a result: a 404 or 403 is the server's answer, not a failed call. A long body is truncated and saved in full to a file whose path is returned. Not a search engine.",
+        "description": "GET an http(s) URL and return its `status` and readable text (HTML converted, links as `text (url)`). Any status is a result; a 404 is an answer. A long body is truncated and saved in full to a file whose path is returned. Not a search engine.",
         "parameters": {
             "type": "object",
             "properties": {
