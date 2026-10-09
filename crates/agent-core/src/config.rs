@@ -318,7 +318,82 @@ pub struct Config {
     pub web_fetch_engine: String,
     /// Install new CLI releases in the background (release binaries only).
     pub auto_update: bool,
+    /// Subagent limits and policy (`agents` in config.json).
+    pub agents: AgentsConfig,
     path: PathBuf,
+}
+
+/// Who decides to start subagents (`agents.fanout`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Fanout {
+    /// spawn_agent is not offered.
+    Off,
+    /// Agents that may write start only for a step of an approved plan;
+    /// read-only roles are free.
+    Plan,
+    /// The model decides.
+    #[default]
+    Auto,
+}
+
+impl Fanout {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Plan => "plan",
+            Self::Auto => "auto",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value.trim() {
+            "off" => Ok(Self::Off),
+            "plan" => Ok(Self::Plan),
+            "auto" => Ok(Self::Auto),
+            other => Err(format!("unknown fanout '{other}': use off, plan or auto")),
+        }
+    }
+}
+
+/// `agents` in config.json: limits and policy for the subagents of a turn.
+/// Every key is optional; an absent object takes the defaults.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentsConfig {
+    /// Subagents running at once (pending or running).
+    pub max_live: usize,
+    /// Levels of nesting: 1 lets only the main agent spawn.
+    pub max_depth: u64,
+    /// Input + output tokens all subagents of one parent turn may use
+    /// together; 0 = unlimited.
+    pub turn_token_budget: u64,
+    pub fanout: Fanout,
+    /// Leftover subagent worktrees older than this are removed when a
+    /// session starts; 0 keeps them.
+    pub keep_worktrees_days: u64,
+}
+
+impl Default for AgentsConfig {
+    fn default() -> Self {
+        Self {
+            max_live: 4,
+            max_depth: 2,
+            turn_token_budget: 0,
+            fanout: Fanout::Auto,
+            keep_worktrees_days: 7,
+        }
+    }
+}
+
+impl AgentsConfig {
+    fn to_json(&self) -> Value {
+        json!({
+            "max_live": self.max_live,
+            "max_depth": self.max_depth,
+            "turn_token_budget": self.turn_token_budget,
+            "fanout": self.fanout.as_str(),
+            "keep_worktrees_days": self.keep_worktrees_days,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -481,6 +556,7 @@ impl Config {
                 web_search_engine: crate::web::DEFAULT_SEARCH_ENGINE.to_string(),
                 web_fetch_engine: crate::web::DEFAULT_FETCH_ENGINE.to_string(),
                 auto_update: true,
+                agents: AgentsConfig::default(),
                 path,
             };
             config.save()?;
@@ -627,6 +703,7 @@ impl Config {
                 crate::web::FETCH_ENGINES,
             )?,
             auto_update: read_bool(&value, "auto_update", true),
+            agents: read_agents(&value)?,
             path,
         };
         Ok(config)
@@ -681,6 +758,7 @@ impl Config {
             "web_search_engine": self.web_search_engine,
             "web_fetch_engine": self.web_fetch_engine,
             "auto_update": self.auto_update,
+            "agents": self.agents.to_json(),
         });
         // Keys this version does not know stay as they are: LynShen Desktop's
         // own settings, and a newer CLI's when an older one saves.
@@ -716,6 +794,9 @@ impl Config {
         self.subagent_models = read_subagent_models(&value);
         self.context_window_overrides = read_context_window_overrides(&value);
         self.lynshen_groups = read_lynshen_groups(&value);
+        if let Ok(agents) = read_agents(&value) {
+            self.agents = agents;
+        }
         Ok(())
     }
 
@@ -1157,6 +1238,36 @@ fn read_web_engine(
             ),
         )),
     }
+}
+
+/// `agents` in config.json. Absent keys take the defaults; an unknown
+/// `fanout` is a load error, like an unknown approval mode.
+fn read_agents(value: &Value) -> io::Result<AgentsConfig> {
+    let defaults = AgentsConfig::default();
+    let Some(agents) = value.get("agents").filter(|agents| agents.is_object()) else {
+        return Ok(defaults);
+    };
+    let fanout = match agents
+        .get("fanout")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|raw| !raw.is_empty())
+    {
+        None => defaults.fanout,
+        Some(raw) => Fanout::parse(raw).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid agents.fanout in config.json: {error}"),
+            )
+        })?,
+    };
+    Ok(AgentsConfig {
+        max_live: read_usize(agents, "max_live", defaults.max_live).max(1),
+        max_depth: read_u64(agents, "max_depth", defaults.max_depth).max(1),
+        turn_token_budget: read_u64(agents, "turn_token_budget", defaults.turn_token_budget),
+        fanout,
+        keep_worktrees_days: read_u64(agents, "keep_worktrees_days", defaults.keep_worktrees_days),
+    })
 }
 
 fn read_approval_mode(value: &Value) -> io::Result<ApprovalMode> {
@@ -2338,6 +2449,7 @@ mod tests {
             web_search_engine: crate::web::DEFAULT_SEARCH_ENGINE.to_string(),
             web_fetch_engine: crate::web::DEFAULT_FETCH_ENGINE.to_string(),
             auto_update: true,
+            agents: AgentsConfig::default(),
             lynshen_models: Vec::new(),
             lynshen_groups: BTreeMap::new(),
             monoize_providers: BTreeMap::new(),
@@ -2855,6 +2967,80 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert!(error.to_string().contains("web_fetch_engine"));
+    }
+
+    #[test]
+    fn agents_settings_default_when_absent_and_read_when_present() {
+        let path = PathBuf::from("config.json");
+        // Configs from before the agents object get the defaults.
+        let old = Config::from_value("{}", path.clone()).unwrap();
+        assert_eq!(old.agents, AgentsConfig::default());
+        assert_eq!(
+            old.agents,
+            AgentsConfig {
+                max_live: 4,
+                max_depth: 2,
+                turn_token_budget: 0,
+                fanout: Fanout::Auto,
+                keep_worktrees_days: 7,
+            }
+        );
+        let partial = Config::from_value(
+            r#"{"agents": {"max_live": 2, "fanout": "plan", "turn_token_budget": 400000}}"#,
+            path.clone(),
+        )
+        .unwrap();
+        assert_eq!(partial.agents.max_live, 2);
+        assert_eq!(partial.agents.fanout, Fanout::Plan);
+        assert_eq!(partial.agents.turn_token_budget, 400_000);
+        assert_eq!(partial.agents.max_depth, 2);
+        assert_eq!(partial.agents.keep_worktrees_days, 7);
+        // Zero limits would disable spawning silently; they are raised to 1.
+        let zero = Config::from_value(
+            r#"{"agents": {"max_live": 0, "max_depth": 0, "keep_worktrees_days": 0}}"#,
+            path.clone(),
+        )
+        .unwrap();
+        assert_eq!((zero.agents.max_live, zero.agents.max_depth), (1, 1));
+        assert_eq!(zero.agents.keep_worktrees_days, 0);
+        // Not an object: the defaults.
+        let odd = Config::from_value(r#"{"agents": "many"}"#, path.clone()).unwrap();
+        assert_eq!(odd.agents, AgentsConfig::default());
+        let error = Config::from_value(r#"{"agents": {"fanout": "sometimes"}}"#, path)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("agents.fanout"), "{error}");
+    }
+
+    #[test]
+    fn agents_settings_are_saved_and_reloaded_live() {
+        let dir = std::env::temp_dir().join(format!(
+            "lynshen-config-agents-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        let mut config = Config::from_value("{}", path.clone()).unwrap();
+        config.save().unwrap();
+        let saved: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            saved["agents"],
+            json!({
+                "max_live": 4,
+                "max_depth": 2,
+                "turn_token_budget": 0,
+                "fanout": "auto",
+                "keep_worktrees_days": 7
+            })
+        );
+        fs::write(&path, r#"{"agents": {"fanout": "off", "max_live": 6}}"#).unwrap();
+        config.reload_live_settings().unwrap();
+        assert_eq!(config.agents.fanout, Fanout::Off);
+        assert_eq!(config.agents.max_live, 6);
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
