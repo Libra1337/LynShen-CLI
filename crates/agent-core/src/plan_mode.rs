@@ -230,48 +230,219 @@ const READ_ONLY_GIT: &[&str] = &[
 /// Whether `command` provably only reads: a pipeline or list of known
 /// read-only programs, with no redirection to files, no command
 /// substitution and no background jobs. Anything else is not read-only.
+/// Quotes and backslashes are read as the shell reads them: a `|`, `;` or
+/// `>` inside a quoted argument (`grep "a\\|b"`) belongs to that argument.
 pub fn is_read_only_command(command: &str) -> bool {
-    let mut text = command.trim().to_string();
-    if text.is_empty() {
-        return false;
-    }
-    // Redirections that write nothing.
-    for harmless in ["2>&1", "&>/dev/null", "2>/dev/null", ">/dev/null"] {
-        text = text.replace(harmless, " ");
-    }
-    if text.contains(['>', '`', '\n', '\r'])
-        || text.contains("$(")
-        || text.contains("<(")
-        || text.contains("${")
-    {
-        return false;
-    }
-    let text = text.replace("&&", ";").replace("||", ";");
-    if text.contains('&') {
-        return false;
-    }
-    text.split([';', '|'])
-        .map(str::trim)
-        .filter(|segment| !segment.is_empty())
-        .all(segment_is_read_only)
-        && !text
-            .split([';', '|'])
-            .all(|segment| segment.trim().is_empty())
+    shell_commands(command).is_some_and(|commands| {
+        !commands.is_empty() && commands.iter().all(|words| words_are_read_only(words))
+    })
 }
 
-fn segment_is_read_only(segment: &str) -> bool {
-    let words: Vec<&str> = segment.split_whitespace().collect();
-    let Some((&program, args)) = words.split_first() else {
+/// The simple commands in `command`, each as its words with the quoting
+/// removed. None when `command` substitutes a command, redirects output to
+/// anything but /dev/null or another descriptor, runs something in the
+/// background, groups commands in parentheses, or does not parse.
+fn shell_commands(command: &str) -> Option<Vec<Vec<String>>> {
+    let mut lexer = Lexer::default();
+    let mut chars = command.trim().chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            ' ' | '\t' => lexer.end_word(),
+            '\n' | '\r' | ';' => lexer.end_command(),
+            '|' => {
+                // `||` (or), `|&` (pipe both streams), `|` (pipe).
+                if matches!(chars.peek(), Some('|' | '&')) {
+                    chars.next();
+                }
+                lexer.end_command();
+            }
+            '&' => match chars.peek() {
+                Some('&') => {
+                    chars.next();
+                    lexer.end_command();
+                }
+                // `&>/dev/null`, `&>>/dev/null`.
+                Some('>') => {
+                    chars.next();
+                    lexer.end_word();
+                    redirect_to_null(&mut chars)?;
+                }
+                // A background job.
+                _ => return None,
+            },
+            '>' => {
+                // The descriptor before `>` (`2>`) is not an argument.
+                if lexer.word.chars().all(|d| d.is_ascii_digit()) && !lexer.quoted {
+                    lexer.word.clear();
+                    lexer.in_word = false;
+                }
+                lexer.end_word();
+                redirect_to_null(&mut chars)?;
+            }
+            '<' => match chars.peek() {
+                // Process substitution and here-documents.
+                Some('(' | '<') => return None,
+                // Input from a file only reads it.
+                _ => lexer.end_word(),
+            },
+            '(' | ')' | '`' => return None,
+            '$' => match chars.peek() {
+                Some('(' | '{') => return None,
+                _ => lexer.push('$'),
+            },
+            '\\' => match chars.next() {
+                // A line continuation.
+                Some('\n') => {}
+                Some(next) => lexer.push(next),
+                None => lexer.push('\\'),
+            },
+            '\'' => {
+                lexer.quoted = true;
+                lexer.in_word = true;
+                loop {
+                    match chars.next()? {
+                        '\'' => break,
+                        other => lexer.word.push(other),
+                    }
+                }
+            }
+            '"' => {
+                lexer.quoted = true;
+                lexer.in_word = true;
+                loop {
+                    match chars.next()? {
+                        '"' => break,
+                        '`' => return None,
+                        '$' if matches!(chars.peek(), Some('(' | '{')) => return None,
+                        '\\' => match chars.next()? {
+                            escaped @ ('"' | '\\' | '$' | '`') => lexer.word.push(escaped),
+                            '\n' => {}
+                            other => {
+                                lexer.word.push('\\');
+                                lexer.word.push(other);
+                            }
+                        },
+                        other => lexer.word.push(other),
+                    }
+                }
+            }
+            other => lexer.push(other),
+        }
+    }
+    lexer.end_command();
+    Some(lexer.commands)
+}
+
+/// After `>`, `>>` or `&>`: the redirection is harmless only when it goes to
+/// /dev/null or duplicates a descriptor (`2>&1`).
+fn redirect_to_null(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<()> {
+    if chars.peek() == Some(&'>') {
+        chars.next();
+    }
+    if chars.peek() == Some(&'&') {
+        chars.next();
+        let mut digits = 0;
+        while chars.peek().is_some_and(char::is_ascii_digit) {
+            chars.next();
+            digits += 1;
+        }
+        return (digits > 0).then_some(());
+    }
+    while matches!(chars.peek(), Some(' ' | '\t')) {
+        chars.next();
+    }
+    let target: String = std::iter::from_fn(|| {
+        chars.next_if(|c| !c.is_whitespace() && !matches!(c, ';' | '|' | '&' | '<' | '>'))
+    })
+    .collect();
+    (target == "/dev/null").then_some(())
+}
+
+/// Words and commands as the lexer collects them.
+#[derive(Default)]
+struct Lexer {
+    commands: Vec<Vec<String>>,
+    words: Vec<String>,
+    word: String,
+    /// The current word has started (a quoted empty string is a word).
+    in_word: bool,
+    /// The current word has a quoted part.
+    quoted: bool,
+}
+
+impl Lexer {
+    fn push(&mut self, c: char) {
+        self.word.push(c);
+        self.in_word = true;
+    }
+
+    fn end_word(&mut self) {
+        if self.in_word {
+            self.words.push(std::mem::take(&mut self.word));
+        }
+        self.in_word = false;
+        self.quoted = false;
+    }
+
+    fn end_command(&mut self) {
+        self.end_word();
+        if !self.words.is_empty() {
+            self.commands.push(std::mem::take(&mut self.words));
+        }
+    }
+}
+
+fn words_are_read_only(words: &[String]) -> bool {
+    let Some((program, args)) = words.split_first() else {
         return false;
     };
     // An environment assignment or a path could run anything.
     if program.contains(['=', '/']) {
         return false;
     }
-    if program == "git" {
-        return git_is_read_only(args);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    match (program.as_str(), args.as_slice()) {
+        ("git", _) => git_is_read_only(&args),
+        // `node --version`: any program asked only for its version.
+        (_, ["--version"]) => true,
+        // `command -v node`, `type node`: where a command is.
+        ("command", ["-v" | "-V", ..]) | ("type", _) => true,
+        ("sed", _) => sed_only_prints(&args),
+        // `uniq in out` writes `out`.
+        ("uniq", _) => args.iter().filter(|arg| !arg.starts_with('-')).count() <= 1,
+        _ => {
+            READ_ONLY_PROGRAMS.contains(&program.as_str())
+                && !args.iter().any(|arg| forbidden_option(program, arg))
+        }
     }
-    READ_ONLY_PROGRAMS.contains(&program) && !args.iter().any(|arg| forbidden_option(program, arg))
+}
+
+/// `sed -n '60,200p' file` and the like: printing ranges of lines. Any other
+/// script may write (`w`, `-i`) or run (`e`) something.
+fn sed_only_prints(args: &[&str]) -> bool {
+    let mut quiet = false;
+    let mut script = None;
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match *arg {
+            "-n" | "--quiet" | "--silent" => quiet = true,
+            "-E" | "-r" | "--regexp-extended" => {}
+            "-e" => script = rest.next().copied(),
+            arg if arg.starts_with('-') => return false,
+            arg if script.is_none() => script = Some(arg),
+            _ => {}
+        }
+    }
+    let address =
+        |part: &str| part == "$" || (!part.is_empty() && part.chars().all(|c| c.is_ascii_digit()));
+    quiet
+        && script.is_some_and(|script| {
+            script.split(';').all(|command| {
+                command.trim().strip_suffix('p').is_some_and(|range| {
+                    range.split(',').count() <= 2 && range.split(',').all(address)
+                })
+            })
+        })
 }
 
 /// Options that make an otherwise read-only program write or run something.
@@ -471,6 +642,60 @@ mod tests {
         assert!(refusal("bash", &escalated, None).is_some());
         let refused = refusal("exec_command", r#"{"cmd":"cargo build"}"#, None).unwrap();
         assert!(refused.contains("`cargo build`"), "{refused}");
+    }
+
+    #[test]
+    fn quoted_operators_are_part_of_their_argument() {
+        // A grep alternation inside quotes is not a pipe (as reported from a
+        // plan-mode session).
+        for command in [
+            r#"cd /Users/chad/Desktop/test && wc -l pelican-rider.html pelican-bike.html && grep -n "function\|const .*=\s*(" pelican-rider.html | head -80"#,
+            r#"grep -n 'a|b;c > d' src/lib.rs"#,
+            r#"grep -E "x (y|z)" f.txt | sort | head"#,
+            r#"rg 'fn \w+\(' -g '*.rs'"#,
+            r#"grep a\|b file"#,
+            r#"echo '$(rm -rf x)' | wc -c"#,
+            r#"find . \( -name '*.ts' -o -name '*.svelte' \) -type f"#,
+            "wc -l < Cargo.toml",
+            "ls 2>&1 | head",
+            "ls 2> /dev/null; cat a &>/dev/null",
+            "git log --format='%h %s' -3",
+            "cat \"file;with;semicolons\"",
+            "ls \\\n  -la",
+            "cd /Users/chad/Desktop/test && sed -n '60,200p' pelican-rider.html",
+            "sed -n -e '1,20p;40,$p' a.txt",
+            "node --version; command -v node python3",
+            "type cargo",
+            "sort a.txt | uniq -c",
+        ] {
+            assert!(is_read_only_command(command), "{command}");
+        }
+        for command in [
+            r#"echo "$(rm -rf x)""#,
+            r#"echo "`rm -rf x`""#,
+            r#"echo "${x:=1}""#,
+            r#"grep "x" f > "out file.txt""#,
+            r#"grep x f 2>err.log"#,
+            r#"cat 'unterminated"#,
+            r#"grep "a\"b f"#,
+            "(cd x && rm -rf y)",
+            "cat <(curl https://example.com)",
+            "cat <<EOF\nhi\nEOF",
+            "ls >&",
+            r#"ls ";" ; rm x"#,
+            r#"cat "a" | "sh""#,
+            r#"find . -name '*.tmp' -exec rm {} \;"#,
+            "sed -i s/a/b/ f",
+            "sed -n '1,5w out.txt' f",
+            "sed -n '1e rm -rf x' f",
+            "sed 's/a/b/' f",
+            r#"node -e 'require("fs").rmSync("x")'"#,
+            "node --version --eval x",
+            "uniq a.txt b.txt",
+            "command rm x",
+        ] {
+            assert!(!is_read_only_command(command), "{command:?}");
+        }
     }
 
     #[test]
