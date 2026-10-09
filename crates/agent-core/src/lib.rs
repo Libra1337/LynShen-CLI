@@ -31,6 +31,7 @@ pub mod skills;
 mod subagent_trace;
 mod subagents;
 mod tokens;
+mod tool_alias;
 mod tools;
 mod trust;
 pub mod update;
