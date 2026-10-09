@@ -370,6 +370,9 @@ impl SandboxPolicy {
     /// bwrap arguments: the whole file system read-only, writable roots
     /// bound read-write, protected paths re-bound read-only on top,
     /// credentials hidden and, without network, a new network namespace.
+    /// A protected path may not exist (a read-only directory not created
+    /// yet, a worktree's pruned git directory): bwrap fails every command on
+    /// a `--ro-bind` it cannot find, so those binds are `--ro-bind-try`.
     pub fn bwrap_args(&self, cwd: &Path) -> Vec<String> {
         self.bwrap_args_for(cwd, &[], cwd)
     }
@@ -387,7 +390,11 @@ impl SandboxPolicy {
             args.extend(["--bind".to_string(), path(writable), path(writable)]);
         }
         for protected in self.protected_paths(root) {
-            args.extend(["--ro-bind".to_string(), path(&protected), path(&protected)]);
+            args.extend([
+                "--ro-bind-try".to_string(),
+                path(&protected),
+                path(&protected),
+            ]);
         }
         if !denied.is_empty() {
             for dir in denied
@@ -400,7 +407,11 @@ impl SandboxPolicy {
             let root = real(root);
             args.extend(["--bind".to_string(), path(&root), path(&root)]);
             for protected in self.protected_paths(&root) {
-                args.extend(["--ro-bind".to_string(), path(&protected), path(&protected)]);
+                args.extend([
+                    "--ro-bind-try".to_string(),
+                    path(&protected),
+                    path(&protected),
+                ]);
             }
         }
         for secret in denied_reads().into_iter().filter(|secret| secret.exists()) {
@@ -787,11 +798,26 @@ mod tests {
             .find(&format!("--bind {0} {0}", dir.display()))
             .unwrap();
         let protect = args
-            .find(&format!("--ro-bind {0} {0}", dir.join(".git").display()))
+            .find(&format!(
+                "--ro-bind-try {0} {0}",
+                dir.join(".git").display()
+            ))
             .unwrap();
         assert!(bind < protect, "{args}");
         assert!(args.starts_with("--ro-bind / /"));
         assert!(args.contains("--unshare-net"));
+        // A protected path that does not exist is skipped, not an error that
+        // would fail every command.
+        let mut missing = offline.clone();
+        missing.readable_dirs = vec![dir.join("not-created-yet")];
+        let args = missing.bwrap_args(&dir).join(" ");
+        assert!(
+            args.contains(&format!(
+                "--ro-bind-try {0} {0}",
+                dir.join("not-created-yet").display()
+            )),
+            "{args}"
+        );
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
