@@ -1300,8 +1300,13 @@ impl OpenAiClient {
             return json_tool_result(json!({ "error": error }), true);
         }
         if let Some(root) = &self.write_root {
+            // A worktree subagent's calls are checked as they will run: a
+            // parent path is mapped into its worktree first.
+            let arguments =
+                tools::map_confined_arguments(&request.name, &request.arguments, &self.tool_state)
+                    .unwrap_or_else(|| request.arguments.clone());
             if let Some(violation) =
-                tools::write_target_escapes_root(&request.name, &request.arguments, cwd, root)
+                tools::write_target_escapes_root(&request.name, &arguments, cwd, root)
             {
                 return json_tool_result(
                     json!({

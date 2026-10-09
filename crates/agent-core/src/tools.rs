@@ -292,7 +292,7 @@ fn run_tool_inner(
     mut emit: impl FnMut(ToolExecutionEvent) -> Result<(), String>,
 ) -> ToolExecutionResult {
     let parsed = serde_json::from_str::<Value>(arguments);
-    let args = match parsed {
+    let mut args = match parsed {
         Ok(args) => args,
         Err(error) => {
             return tool_result(
@@ -302,6 +302,9 @@ fn run_tool_inner(
             )
         }
     };
+    // A subagent in its own worktree reads and writes the parent's paths
+    // where they sit in the worktree.
+    map_confined_paths(name, &mut args, state);
 
     // Where the sandbox lets this agent's commands write, the read tools may
     // read: a screenshot or log a bash command just wrote to /tmp included.
@@ -3742,6 +3745,97 @@ fn deepest_canonical_ancestor(path: &Path) -> (PathBuf, PathBuf) {
     (path.to_path_buf(), PathBuf::new())
 }
 
+/// The path arguments of each file tool, as single strings and as arrays.
+fn path_argument_keys(name: &str) -> (&'static [&'static str], &'static [&'static str]) {
+    match name {
+        "read" | "ls" | "ripgrep" | "outline" | "write" | "str_replace" | "edit"
+        | "hashline_edit" => (&["path"], &[]),
+        crate::images::TOOL_NAME => (&["path"], &["images"]),
+        "checkpoint" => (&[], &["paths"]),
+        _ => (&[], &[]),
+    }
+}
+
+/// Rewrites a file tool's path arguments for a subagent confined to its own
+/// worktree, in place. Returns whether anything changed.
+pub(crate) fn map_confined_paths(name: &str, args: &mut Value, state: &ToolState) -> bool {
+    let Some(confine) = state.confine.as_ref() else {
+        return false;
+    };
+    let (root, project) = (confine.0.as_path(), confine.1.as_path());
+    let (strings, arrays) = path_argument_keys(name);
+    let Some(map) = args.as_object_mut() else {
+        return false;
+    };
+    let mut changed = false;
+    for key in strings {
+        let Some(path) = map.get(*key).and_then(Value::as_str) else {
+            continue;
+        };
+        if let Some(mapped) = map_project_path(path, root, project) {
+            map.insert((*key).to_string(), json!(mapped.display().to_string()));
+            changed = true;
+        }
+    }
+    for key in arrays {
+        let Some(values) = map.get(*key).and_then(Value::as_array).cloned() else {
+            continue;
+        };
+        let mut array_changed = false;
+        let mapped = values
+            .iter()
+            .map(|value| match value.as_str() {
+                Some(path) => match map_project_path(path, root, project) {
+                    Some(mapped) => {
+                        array_changed = true;
+                        json!(mapped.display().to_string())
+                    }
+                    None => value.clone(),
+                },
+                None => value.clone(),
+            })
+            .collect::<Vec<_>>();
+        if array_changed {
+            map.insert((*key).to_string(), json!(mapped));
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// `map_confined_paths` on a tool call's raw arguments; None when nothing
+/// changed. Used by the write-isolation gate, which runs before the tool.
+pub(crate) fn map_confined_arguments(
+    name: &str,
+    arguments: &str,
+    state: &ToolState,
+) -> Option<String> {
+    let mut args = serde_json::from_str::<Value>(arguments).ok()?;
+    map_confined_paths(name, &mut args, state).then(|| args.to_string())
+}
+
+/// A subagent's worktree holds the parent repository's tree, so the same
+/// file sits at the same relative path in both. Its task names the parent's
+/// paths and the model repeats them, so an absolute path under the parent's
+/// root is read and written at that relative path inside the worktree
+/// instead of being refused. Paths under `.lynshen/agents` (this workspace
+/// or a sibling's) are left exactly as they are, as is anything outside the
+/// parent's root.
+fn map_project_path(path: &str, root: &Path, project: &Path) -> Option<PathBuf> {
+    let candidate = expand_tilde(path);
+    if !candidate.is_absolute() {
+        return None;
+    }
+    let relative = normalize_for_policy(&candidate)
+        .strip_prefix(normalize_for_policy(project))
+        .ok()?
+        .to_path_buf();
+    if relative.starts_with(Path::new(".lynshen").join("agents")) {
+        return None;
+    }
+    Some(root.join(relative))
+}
+
 /// Checks whether a mutating tool call targets a path outside `root` (used to
 /// confine subagent writes to their isolated workspace). Returns a description
 /// of the violation, or None when the call is allowed. Read-only tools and
@@ -5878,6 +5972,88 @@ mod tests {
             .expect_err("credentials must not be readable");
         assert!(error.contains("credentials"), "{error}");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_worktree_subagent_works_on_the_parents_paths_in_its_worktree() {
+        let project = test_dir("confined-paths");
+        let worktree = project.join(".lynshen/agents/task-1");
+        fs::create_dir_all(worktree.join("src")).unwrap();
+        fs::create_dir_all(project.join(".lynshen/agents/sibling")).unwrap();
+        fs::write(worktree.join("src/text.py"), "print(1)\n").unwrap();
+        fs::write(project.join(".lynshen/agents/sibling/notes.md"), "theirs").unwrap();
+        let state = ToolState::default().confined_to(worktree.clone(), project.clone());
+        let run = |tool: &str, args: Value| -> Value {
+            serde_json::from_str(
+                &run_tool_with_events(tool, &args.to_string(), &worktree, &[], &state, |_| Ok(()))
+                    .output,
+            )
+            .unwrap()
+        };
+
+        // The task named the parent's path; the same file in the worktree is
+        // what the agent gets.
+        let parent_file = project.join("src/text.py").display().to_string();
+        let read = run("read", json!({ "path": parent_file }));
+        assert!(read.get("error").is_none(), "{read}");
+        assert!(read["content"].as_str().unwrap().contains("print(1)"));
+        assert_eq!(
+            read["path"].as_str().unwrap(),
+            worktree.join("src/text.py").display().to_string()
+        );
+        let list = run(
+            "ls",
+            json!({ "path": project.join("src").display().to_string() }),
+        );
+        assert_eq!(list["entries"][0], "text.py", "{list}");
+
+        // Writes land in the worktree too, and the write-isolation gate sees
+        // the mapped path, so it lets the call through.
+        let arguments = json!({ "path": parent_file, "content": "print(2)\n" }).to_string();
+        let mapped = map_confined_arguments("write", &arguments, &state).expect("mapped");
+        assert!(
+            write_target_escapes_root("write", &mapped, &worktree, &worktree).is_none(),
+            "{mapped}"
+        );
+        assert!(write_target_escapes_root("write", &arguments, &worktree, &worktree).is_some());
+        let write = run(
+            "write",
+            json!({ "path": parent_file, "content": "print(2)\n" }),
+        );
+        assert!(write.get("error").is_none(), "{write}");
+        assert_eq!(
+            fs::read_to_string(worktree.join("src/text.py")).unwrap(),
+            "print(2)\n"
+        );
+        assert!(!project.join("src/text.py").exists());
+
+        // The other direction: .lynshen/agents is never mapped, so a sibling
+        // agent's workspace stays out of reach and a path already inside the
+        // worktree is used as it is.
+        let sibling = project
+            .join(".lynshen/agents/sibling/notes.md")
+            .display()
+            .to_string();
+        assert_eq!(map_project_path(&sibling, &worktree, &project), None);
+        let refused = run("read", json!({ "path": sibling }));
+        assert!(
+            refused["error"]
+                .as_str()
+                .unwrap()
+                .contains("escapes the workspace"),
+            "{refused}"
+        );
+        let own = worktree.join("src/text.py").display().to_string();
+        assert_eq!(map_project_path(&own, &worktree, &project), None);
+        // A path outside the parent's root is left alone as well.
+        assert_eq!(map_project_path("/etc/hosts", &worktree, &project), None);
+        assert_eq!(map_project_path("src/text.py", &worktree, &project), None);
+        // The parent root itself is the worktree root.
+        assert_eq!(
+            map_project_path(&project.display().to_string(), &worktree, &project),
+            Some(worktree.clone())
+        );
+        let _ = fs::remove_dir_all(&project);
     }
 
     #[test]
