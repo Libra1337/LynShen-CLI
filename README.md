@@ -111,7 +111,7 @@ lynshen
 | `auto` | 直接改 | 安全模型判断为安全的直接运行，其余询问 |
 | `full-access` | 直接改 | 直接运行，不询问 |
 
-还有一个 `plan` 模式，只允许只读操作，智能体最后交一份计划。桌面端的计划模式用的就是它。
+还有一个 `plan` 模式，只允许只读操作，智能体最后交一份计划。桌面端的计划模式用的就是它。在终端界面里，`Shift+Tab` 也能切到 `plan`；计划出来后，可以批准并选 `auto-edit`、`manual` 或 `auto` 开始执行，也可以直接输入要改的地方，让它重新出一版。按 Esc 先放着，之后用 `/plan` 再调出来。
 
 在 macOS（Seatbelt）和 Linux（bubblewrap）上，shell 命令在沙箱里运行。默认模式 `workspace-write` 只允许写工作目录、你配置的目录、临时目录和包缓存目录，其中 `.git` 只读。`~/.ssh`、`~/.aws`、`~/.lynshen/auth.json` 等路径在沙箱里不可读。需要离开沙箱的命令（例如写工作目录以外的文件）按审批模式处理。默认规则下，`git add` 和 `git commit` 可以直接离开沙箱，`git push` 总是先问你。Windows 目前没有沙箱，默认是 `full-access`。详见 [docs/sandbox.md](docs/sandbox.md)。
 

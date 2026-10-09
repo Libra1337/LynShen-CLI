@@ -971,7 +971,10 @@ impl<R: TuiRuntime> TuiApp<R> {
             }
             KeyCode::Enter => {
                 let closes = self.state.picker_view.as_ref().is_some_and(|picker| {
-                    matches!(picker.mode, PickerMode::Login | PickerMode::LoginPaste)
+                    matches!(
+                        picker.mode,
+                        PickerMode::Login | PickerMode::LoginPaste | PickerMode::Plan
+                    )
                 });
                 let Some(command) = self
                     .state
@@ -1087,6 +1090,17 @@ impl<R: TuiRuntime> TuiApp<R> {
                 {
                     if let Some(picker) = self.state.picker_view.as_mut() {
                         picker.begin_key_prompt();
+                    }
+                    return false;
+                }
+                if self
+                    .state
+                    .picker_view
+                    .as_ref()
+                    .is_some_and(PickerState::selected_wants_feedback)
+                {
+                    if let Some(picker) = self.state.picker_view.as_mut() {
+                        picker.begin_feedback_prompt();
                     }
                     return false;
                 }

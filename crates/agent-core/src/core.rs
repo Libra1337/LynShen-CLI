@@ -911,6 +911,7 @@ impl AgentCore {
                 Ok((call_id, allow, always, hunks)) => self.approve(&call_id, allow, always, hunks),
                 Err(error) => vec![AgentEvent::Error(error)],
             },
+            "/plan" => self.plan_command_events(args.trim()),
             "/permissions" => self.permissions_command_events(args.trim()),
             "/sandbox" => self.sandbox_command_events(args.trim()),
             "/effort" => self.effort_command_events(args.trim()),
@@ -1637,6 +1638,8 @@ impl AgentCore {
                         reason,
                         delay_ms,
                     } => {
+                        // The retried request streams the plan call again.
+                        self.plan_draft = None;
                         events.push(AgentEvent::Retrying {
                             attempt,
                             max_attempts,
@@ -1868,6 +1871,9 @@ impl AgentCore {
         events.extend(self.poll_action_outcomes());
         self.mcp.refresh_changed();
         for message in self.mcp.drain_messages() {
+            events.push(AgentEvent::Info(message));
+        }
+        for message in self.tool_state.take_notices() {
             events.push(AgentEvent::Info(message));
         }
         if self.mcp.take_dirty() {
@@ -3161,7 +3167,7 @@ impl AgentCore {
         match ApprovalMode::parse(arg) {
             Ok(mode) => self.set_approval_mode(mode),
             Err(error) => vec![AgentEvent::Error(format!(
-                "usage: /permissions [manual|auto-edit|auto|full-access] ({error})"
+                "usage: /permissions [manual|plan|auto-edit|auto|full-access] ({error})"
             ))],
         }
     }
@@ -3528,6 +3534,58 @@ impl AgentCore {
         }
         events.extend(self.save_session_event());
         events
+    }
+
+    /// `/plan <id> approve [mode] [notes]` or `/plan <id> revise <feedback>`:
+    /// the text twin of the `approve_plan` op, for the TUI. Bare `/plan`
+    /// shows the latest plan again while it waits for the user.
+    fn plan_command_events(&mut self, args: &str) -> Vec<AgentEvent> {
+        const USAGE: &str =
+            "usage: /plan <plan-id> approve [mode] [notes] | /plan <plan-id> revise <feedback>";
+        if args.is_empty() {
+            let latest =
+                self.session
+                    .branch()
+                    .into_iter()
+                    .rev()
+                    .find_map(|entry| match &entry.kind {
+                        EntryKind::ProposedPlan { id, .. } => Some(id.clone()),
+                        _ => None,
+                    });
+            return match latest.and_then(|id| self.find_plan(&id).map(|plan| (id, plan))) {
+                Some((id, (title, markdown, status))) if status == "pending" => {
+                    vec![AgentEvent::ProposedPlan {
+                        id,
+                        title,
+                        markdown,
+                        status,
+                    }]
+                }
+                _ => vec![AgentEvent::Info(
+                    "no plan is waiting for approval".to_string(),
+                )],
+            };
+        }
+        let (id, rest) = args.split_once(char::is_whitespace).unwrap_or((args, ""));
+        let (decision, rest) = rest
+            .trim()
+            .split_once(char::is_whitespace)
+            .unwrap_or((rest.trim(), ""));
+        match (id, decision) {
+            ("", _) => vec![AgentEvent::Error(USAGE.to_string())],
+            (id, "approve") => {
+                let (first, notes) = rest
+                    .trim()
+                    .split_once(char::is_whitespace)
+                    .unwrap_or((rest.trim(), ""));
+                match ApprovalMode::parse(first) {
+                    Ok(mode) => self.approve_plan(id, true, Some(mode), notes),
+                    Err(_) => self.approve_plan(id, true, None, rest),
+                }
+            }
+            (id, "revise") => self.approve_plan(id, false, None, rest),
+            _ => vec![AgentEvent::Error(USAGE.to_string())],
+        }
     }
 
     fn handle_update_plan(&mut self, args: &Value) -> (ToolGoalResponse, Option<AgentEvent>) {
@@ -5299,6 +5357,29 @@ mod approval_decision_tests {
         assert_eq!(push("", "\\"), None);
         // Another call starts over.
         assert_eq!(push("call_2", "{\"title\":\"B"), event("call_2", "B", ""));
+    }
+
+    #[test]
+    fn a_retried_request_starts_the_plan_draft_over() {
+        // poll_events clears the draft on Retrying; the retried stream sends
+        // the same call's arguments again from the start.
+        let stream = ["{\"title\":\"Snake\",", "\"plan\":\"## Goal\"}"];
+        let mut draft = Some(PlanDraft::default());
+        draft.as_mut().unwrap().push("call_1", stream[0]);
+        draft = None;
+        let mut last = None;
+        for delta in stream {
+            last = draft
+                .get_or_insert_with(PlanDraft::default)
+                .push("call_1", delta);
+        }
+        let draft = draft.unwrap();
+        assert_eq!(draft.arguments, stream.concat());
+        assert!(matches!(
+            last,
+            Some(AgentEvent::PlanDraft { title, append, .. })
+                if title == "Snake" && append == "## Goal"
+        ));
     }
     use std::sync::mpsc::TryRecvError;
 
