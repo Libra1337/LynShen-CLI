@@ -595,6 +595,10 @@ impl Hub {
             if lock(&hub.busy).is_empty() {
                 hub.broadcast(&json!({ "type": "daemon_restarting" }));
                 thread::sleep(std::time::Duration::from_millis(300));
+                // exit runs no destructors: the sessions' locks go first, or
+                // the next daemon cannot reopen them where it cannot tell this
+                // one is gone (Windows).
+                lynshen_agent_core::release_session_locks();
                 std::process::exit(0);
             }
             thread::sleep(std::time::Duration::from_secs(1));

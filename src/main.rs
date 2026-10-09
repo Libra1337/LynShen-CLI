@@ -81,6 +81,7 @@ fn end_tool_processes_on_signal() {
             let mut signal = 0;
             if libc::sigwait(&set, &mut signal) == 0 {
                 lynshen_agent_core::terminate_tool_processes();
+                lynshen_agent_core::release_session_locks();
                 std::process::exit(128 + signal);
             }
         });

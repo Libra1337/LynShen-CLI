@@ -1343,6 +1343,7 @@ impl SessionLock {
             {
                 Ok(mut file) => {
                     let _ = writeln!(file, "{}", json!({ "pid": std::process::id() }));
+                    held_locks().insert(path.clone());
                     return Ok(Self { path });
                 }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
@@ -1379,14 +1380,36 @@ const LOCK_WAIT: Duration = Duration::from_secs(2);
 
 impl Drop for SessionLock {
     fn drop(&mut self) {
+        held_locks().remove(&self.path);
         let _ = fs::remove_file(&self.path);
     }
 }
 
+/// The lock files this process holds, so an exit that skips destructors
+/// (`std::process::exit`) can still remove them first.
+fn held_locks() -> std::sync::MutexGuard<'static, HashSet<PathBuf>> {
+    static HELD: std::sync::OnceLock<std::sync::Mutex<HashSet<PathBuf>>> =
+        std::sync::OnceLock::new();
+    HELD.get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+}
+
+/// Removes every session lock this process holds. Call it right before
+/// `std::process::exit`, which runs no destructors: a lock left behind keeps
+/// the session closed to the next process wherever its holder cannot be
+/// checked.
+pub fn release_session_locks() {
+    for path in held_locks().drain() {
+        let _ = fs::remove_file(path);
+    }
+}
+
 /// Best-effort liveness probe for a lock-holder pid. On Unix a signal-0 kill
-/// tells whether the pid exists (EPERM: it does, owned by someone else);
-/// elsewhere the holder is assumed alive (the user is told which file to
-/// delete if the lock is actually stale).
+/// tells whether the pid exists (EPERM: it does, owned by someone else). On
+/// Windows the process must still be running and be a lynshen program: pids
+/// come back quickly there, and a daemon that exited during an app update
+/// left its locks behind (every old session then refused to open).
 fn process_is_alive(pid: u64) -> bool {
     #[cfg(unix)]
     {
@@ -1399,10 +1422,60 @@ fn process_is_alive(pid: u64) -> bool {
         }
         io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        windows_lynshen_process_alive(pid)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = pid;
         true
+    }
+}
+
+#[cfg(windows)]
+fn windows_lynshen_process_alive(pid: u64) -> bool {
+    use std::ffi::c_void;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut c_void;
+        fn GetExitCodeProcess(process: *mut c_void, code: *mut u32) -> i32;
+        fn QueryFullProcessImageNameW(
+            process: *mut c_void,
+            flags: u32,
+            name: *mut u16,
+            size: *mut u32,
+        ) -> i32;
+        fn CloseHandle(handle: *mut c_void) -> i32;
+    }
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const STILL_ACTIVE: u32 = 259;
+    const ERROR_ACCESS_DENIED: i32 = 5;
+    let Ok(pid) = u32::try_from(pid) else {
+        return false;
+    };
+    // SAFETY: plain Win32 calls on a handle opened and closed here.
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if process.is_null() {
+            // Access denied: it exists, owned by someone else.
+            return io::Error::last_os_error().raw_os_error() == Some(ERROR_ACCESS_DENIED);
+        }
+        let mut code = 0u32;
+        let running = GetExitCodeProcess(process, &mut code) == 0 || code == STILL_ACTIVE;
+        let mut name = [0u16; 1024];
+        let mut len = name.len() as u32;
+        let image = (QueryFullProcessImageNameW(process, 0, name.as_mut_ptr(), &mut len) != 0)
+            .then(|| String::from_utf16_lossy(&name[..len as usize]));
+        CloseHandle(process);
+        // A reused pid running something else does not hold a session.
+        running
+            && image.is_none_or(|image| {
+                Path::new(&image)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.to_ascii_lowercase().starts_with("lynshen"))
+            })
     }
 }
 
@@ -2085,6 +2158,20 @@ mod tests {
         assert!(SessionLock::acquire(&profile, &cwd, "s3").is_ok());
         release.join().unwrap();
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn held_locks_are_known_until_dropped() {
+        // release_session_locks removes what this registry lists before an
+        // exit that skips destructors.
+        let root = temp_profile("held-locks");
+        let (profile, cwd) = (root.join("profile"), root.join("cwd"));
+        let lock = SessionLock::acquire(&profile, &cwd, "s4").unwrap();
+        let path = sessions_dir(&profile, &cwd).join("s4.lock");
+        assert!(held_locks().contains(&path));
+        drop(lock);
+        assert!(!held_locks().contains(&path) && !path.exists());
         let _ = fs::remove_dir_all(root);
     }
 

@@ -43,7 +43,7 @@ pub use event::{
     McpToolView, ModelOptionView, PlanItem, SessionListItemView, TranscriptItem, TreeNodeView,
 };
 pub use hunks::HunkView;
-pub use session::SessionSummary;
+pub use session::{release_session_locks, SessionSummary};
 pub use tools::{git_diff, terminate_tool_processes};
 
 /// The LynShen gateway URL and an access token good for at least two more
