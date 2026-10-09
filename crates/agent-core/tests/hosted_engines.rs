@@ -285,15 +285,23 @@ fn another_agents_tool_name_runs_the_tool_it_means() {
     let mut core = open(&dir, ApprovalMode::FullAccess);
     // Claude Code's Bash: the name and its milliseconds timeout.
     core.submit_user_message(
-        r#"CALL Bash {"command":"touch made-by-Bash","description":"x","timeout":120000}"#.to_string(),
+        r#"CALL Bash {"command":"touch made-by-Bash","description":"x","timeout":120000}"#
+            .to_string(),
     );
     let events = pump(&mut core, is_ready);
-    assert!(dir.join("made-by-Bash").exists(), "{}", assistant_text(&events));
+    assert!(
+        dir.join("made-by-Bash").exists(),
+        "{}",
+        assistant_text(&events)
+    );
     // A name that means nothing offered: the error lists the tools.
     core.submit_user_message(r#"CALL Glob {"pattern":"*"}"#.to_string());
     let events = pump(&mut core, is_ready);
     let text = assistant_text(&events);
-    assert!(text.contains("unknown tool `Glob`") && text.contains("bash"), "{text}");
+    assert!(
+        text.contains("unknown tool `Glob`") && text.contains("bash"),
+        "{text}"
+    );
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
