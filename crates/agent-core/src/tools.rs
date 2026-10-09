@@ -403,6 +403,14 @@ fn read_file(args: &Value, cwd: &Path, extra_read_roots: &[PathBuf], state: &Too
             return json!({ "path": path.display().to_string(), "error": error.to_string() })
         }
     };
+    if metadata.is_dir() {
+        // "Is a directory (os error 21)" says nothing about what to do.
+        return json!({
+            "path": path.display().to_string(),
+            "kind": "directory",
+            "error": "this is a directory, not a file: list it with ls, or search it with ripgrep",
+        });
+    }
     if let Some(mime) = image_mime(&path) {
         if metadata.len() > MAX_IMAGE_READ_BYTES {
             return json!({
@@ -441,7 +449,7 @@ fn read_file(args: &Value, cwd: &Path, extra_read_roots: &[PathBuf], state: &Too
             "path": path.display().to_string(),
             "kind": "binary",
             "bytes": bytes.len(),
-            "error": "file is not supported text encoding"
+            "error": "this file is not text in a supported encoding (UTF-8, UTF-16 or Latin-1); inspect it with a shell command such as file, strings or xxd",
         });
     };
 
@@ -481,6 +489,12 @@ fn read_file(args: &Value, cwd: &Path, extra_read_roots: &[PathBuf], state: &Too
         "content": content,
         "hashlines": hashlines,
     });
+    if lines_read == 0 && offset > 1 {
+        // An empty read with no word about why sends the model round again.
+        value["note"] = json!(format!(
+            "offset {offset} is past the end of the file, which has {line_number} lines"
+        ));
+    }
     if limit.is_none() && metadata.len() > LARGE_TEXT_READ_SOFT_BYTES {
         add_soft_hint(
             &mut value,
@@ -5305,6 +5319,41 @@ mod tests {
             "{bad}"
         );
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn read_says_what_a_path_is_when_it_cannot_return_text() {
+        let dir = test_dir("read-kinds");
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        fs::write(dir.join("binary.bin"), [0u8, 159, 146, 150, 0, 1, 2]).unwrap();
+        fs::write(dir.join("three.txt"), "a\nb\nc\n").unwrap();
+        let run = |args: Value| -> Value {
+            serde_json::from_str(&run_tool("read", &args.to_string(), &dir)).unwrap()
+        };
+
+        let directory = run(json!({ "path": "sub" }));
+        let error = directory["error"].as_str().unwrap();
+        assert!(error.contains("directory, not a file"), "{error}");
+        assert!(error.contains("ls"), "{error}");
+
+        let binary = run(json!({ "path": "binary.bin" }));
+        let error = binary["error"].as_str().unwrap();
+        assert!(error.contains("not text"), "{error}");
+        assert_eq!(binary["kind"], "binary");
+
+        // An offset past the end returns nothing; it now says so.
+        let past = run(json!({ "path": "three.txt", "offset": 9 }));
+        assert!(past.get("error").is_none(), "{past}");
+        assert_eq!(past["lines_read"], 0);
+        assert!(
+            past["note"]
+                .as_str()
+                .unwrap()
+                .contains("past the end of the file"),
+            "{past}"
+        );
+        assert!(run(json!({ "path": "three.txt" })).get("note").is_none());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
