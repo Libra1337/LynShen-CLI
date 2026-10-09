@@ -1742,6 +1742,26 @@ impl Adapter for Codex {
                 }
                 vec![self.turn_start(input)]
             }
+            // A waiting message taken back before it runs (serve-protocol
+            // `unqueue`): the one at `index` when its text is `text`, else
+            // the first with that text.
+            "unqueue" => {
+                let wanted = op["text"].as_str();
+                let index = op["index"].as_u64().map_or(usize::MAX, |i| i as usize);
+                let at = match wanted {
+                    None => (index < self.waiting.len()).then_some(index),
+                    Some(wanted) => self
+                        .waiting
+                        .get(index)
+                        .filter(|(text, _)| text == wanted)
+                        .map(|_| index)
+                        .or_else(|| self.waiting.iter().position(|(text, _)| text == wanted)),
+                };
+                if let Some(at) = at {
+                    self.waiting.remove(at);
+                }
+                return Ok(Output::events(vec![self.pending_event()]));
+            }
             "steer" => {
                 let (Some(thread), Some(turn)) = (self.thread.clone(), self.active_turn.clone())
                 else {
@@ -2248,6 +2268,17 @@ mod tests {
             queued.events[0],
             json!({ "type": "pending_messages", "messages": ["also this"] })
         );
+        // Taken back, it never reaches Codex; queued again, it can steer in.
+        let taken = c
+            .encode(&json!({ "op": "unqueue", "index": 0, "text": "also this" }))
+            .unwrap();
+        assert!(taken.frames.is_empty());
+        assert_eq!(
+            taken.events[0],
+            json!({ "type": "pending_messages", "messages": [] })
+        );
+        c.encode(&json!({ "op": "user_message", "content": "also this" }))
+            .unwrap();
         let steer = c.encode(&json!({ "op": "steer" })).unwrap();
         let frames = sent(&steer.frames);
         assert_eq!(frames[0]["method"], "turn/steer");

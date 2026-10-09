@@ -813,6 +813,68 @@ fn a_steered_message_joins_the_running_turn_without_stopping_its_tool() {
     assert_eq!(turns, 1, "one turn, not a restart");
 }
 
+#[test]
+fn a_queued_message_taken_back_never_runs() {
+    let _guard = setup();
+    let dir = temp_dir("unqueue");
+    let mut core = open(&dir, ApprovalMode::FullAccess);
+    let slow = if cfg!(windows) {
+        "RUN: Start-Sleep -Milliseconds 600; Set-Content done.txt ok".to_string()
+    } else {
+        "RUN: sleep 0.6 && printf ok > done.txt".to_string()
+    };
+    core.submit_user_message(slow);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut events = Vec::new();
+    while Instant::now() < deadline
+        && !events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::ToolStart { .. }))
+    {
+        events.extend(core.poll_events());
+        thread::sleep(Duration::from_millis(5));
+    }
+    core.submit_user_message("first queued".to_string());
+    core.submit_user_message("second queued".to_string());
+    // The client saw the second one at index 1; a stale index still finds it
+    // by its text.
+    let taken = core.unqueue(0, Some("second queued"));
+    assert!(taken.iter().any(
+        |e| matches!(e, AgentEvent::PendingMessages(m) if m == &["first queued".to_string()])
+    ));
+    // Text that is no longer queued changes nothing.
+    assert!(core.unqueue(0, Some("gone")).iter().any(
+        |e| matches!(e, AgentEvent::PendingMessages(m) if m == &["first queued".to_string()])
+    ));
+    // The turn, then the one queued message as a turn of its own, until
+    // that turn is ready.
+    let done = |events: &[AgentEvent]| {
+        events
+            .iter()
+            .position(|e| matches!(e, AgentEvent::UserMessage(m) if m == "first queued"))
+            .is_some_and(|at| {
+                events[at..]
+                    .iter()
+                    .any(|e| matches!(e, AgentEvent::Status(s) if s == "ready"))
+            })
+    };
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline && !done(&events) {
+        events.extend(core.poll_events());
+        thread::sleep(Duration::from_millis(5));
+    }
+    let users: Vec<&String> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::UserMessage(m) => Some(m),
+            _ => None,
+        })
+        .collect();
+    assert!(users.iter().any(|m| *m == "first queued"), "{users:?}");
+    assert!(!users.iter().any(|m| *m == "second queued"), "{users:?}");
+    assert!(!assistant_text(&events).contains("second queued"));
+}
+
 fn git(dir: &Path, args: &[&str]) {
     let output = std::process::Command::new("git")
         .arg("-C")

@@ -696,6 +696,30 @@ impl AgentCore {
         self.queued.iter().map(|(text, _)| text.clone()).collect()
     }
 
+    /// Takes a queued message back before it runs: the one at `index`, when
+    /// its text is `text` (the queue may have moved on since the client saw
+    /// it), else the first one with that text. The updated queue comes back
+    /// either way, so the client shows what is really waiting.
+    pub fn unqueue(&mut self, index: usize, text: Option<&str>) -> Vec<AgentEvent> {
+        let at = match text {
+            None => (index < self.queued.len()).then_some(index),
+            Some(text) => self
+                .queued
+                .get(index)
+                .filter(|(queued, _)| queued == text)
+                .map(|_| index)
+                .or_else(|| self.queued.iter().position(|(queued, _)| queued == text)),
+        };
+        if let Some(at) = at {
+            self.queued.remove(at);
+        }
+        let mut events = vec![AgentEvent::PendingMessages(self.pending_texts())];
+        if !self.running {
+            events.push(self.model_status_event());
+        }
+        events
+    }
+
     /// Sends the next queued message into the running turn: the model reads
     /// it before its next request (after the current tool calls finish), and
     /// running tools and subagents keep going. A message with images, or one
