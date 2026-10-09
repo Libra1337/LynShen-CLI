@@ -871,7 +871,9 @@ fn compaction_events_set_progress_notices_and_context_meter() {
     assert_eq!(app.state.activity.estimated_output_tokens, 42);
 
     app.apply_events(vec![
-        AgentEvent::CompactionEnd,
+        AgentEvent::CompactionEnd {
+            summary: "summary".to_string(),
+        },
         AgentEvent::ContextUsage {
             tokens: 25_000,
             tokenizer: "gpt-5".to_string(),

@@ -855,7 +855,9 @@ impl SessionStore {
             EntryKind::PinnedSkill { .. } => None,
             EntryKind::GoalContext { .. } => None,
             EntryKind::ProposedPlan { .. } => None,
-            EntryKind::Compaction { .. } => None,
+            EntryKind::Compaction { summary, .. } => Some(TranscriptItem::Compaction {
+                summary: summary.clone(),
+            }),
         })
     }
 
@@ -2312,6 +2314,14 @@ mod tests {
             .contains("ROLLED UP SUMMARY"));
         assert!(items.len() < before_items);
         assert!(session.context_tokens("gpt-5") < before_tokens);
+
+        // The transcript still shows every turn, and where the summary took over.
+        let shown = session.transcript_items();
+        assert_eq!(shown.len(), 7);
+        assert!(matches!(
+            shown.last(),
+            Some(TranscriptItem::Compaction { summary }) if summary == "ROLLED UP SUMMARY"
+        ));
     }
 
     #[test]

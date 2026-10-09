@@ -359,7 +359,8 @@ Every line is `{"type": <name>, ...}`. All types emitted by the engine:
 | `team_budget` | `used`, `limit` | Input + output tokens the subagents used in the current budget window, against `agents.turn_token_budget`. A window opens with each main turn except one the engine starts for a background result, which continues it. Sent at the first spawn of a window and each time `used` reaches another tenth of `limit`; never without a budget. |
 | `usage` | `input_tokens`, `cached_input_tokens`, `output_tokens`, `reasoning_tokens` | Real API usage for the completed turn. |
 | `context_usage` | `tokens`, `tokenizer`, `cost` | Tokenizer-counted context size; `cost` is cumulative USD (0 when unpriced). |
-| `compaction_start` / `compaction_end` | — | Context compaction began/finished. |
+| `compaction_start` | — | Context compaction began. |
+| `compaction_end` | `summary` | Context compaction finished; the older conversation now reads as `summary`. Other engines send no `summary`. |
 | `compaction_progress` | `output_tokens` | Compaction summary tokens produced so far. |
 | `compaction_failed` | `error` | Compaction failed; the session continues uncompacted. |
 | `model_view` | `models: [{model, active, context_window, max_output_tokens, reasoning_efforts}]`, `active_effort` | Model picker data (`/model`). |
@@ -368,7 +369,7 @@ Every line is `{"type": <name>, ...}`. All types emitted by the engine:
 | `checkpoint_view` | `items: [{id, label, detail}]` | Checkpoint picker data. |
 | `goal` | `goal: {objective, status, token_budget, tokens_used, time_used_seconds, created_at, updated_at} \| null` | Goal state; `null` clears it. |
 | `plan` | `plan: [{step, status, agent, files}]` | Goal/plan step list. `agent` (string or `null`) is the subagent doing the step, as the model named it (path or task name); `files` the files it is expected to write. |
-| `transcript` | `items: [{role, ...}]` | Rendered conversation (`/transcript`); roles: `user`, `assistant`, `tool` (`name`, `output`), `branch` (`label`). |
+| `transcript` | `items: [{role, ...}]` | Rendered conversation (`/transcript`); roles: `user`, `assistant`, `tool` (`name`, `output`), `branch` (`label`), `compaction` (`summary`: where the older conversation was folded). |
 | `info` | `message` | Informational line (hook output, notices, update available). |
 | `error` | `message` | Error line. Also used for malformed commands and unknown ops. |
 | `status` | `message` | Turn status string: `ready`, `streaming`, `queued: N`, `steering`, `interrupted`, `compacting`, `approval mode: ...`, `trusted ...`, etc. `ready` marks the end of a turn. |

@@ -265,7 +265,9 @@ pub fn event_json(event: AgentEvent) -> Value {
         AgentEvent::CompactionProgress { output_tokens } => {
             json!({ "type": "compaction_progress", "output_tokens": output_tokens })
         }
-        AgentEvent::CompactionEnd => json!({ "type": "compaction_end" }),
+        AgentEvent::CompactionEnd { summary } => {
+            json!({ "type": "compaction_end", "summary": summary })
+        }
         AgentEvent::CompactionFailed(error) => {
             json!({ "type": "compaction_failed", "error": error })
         }
@@ -558,6 +560,7 @@ pub fn event_json(event: AgentEvent) -> Value {
                 crate::TranscriptItem::Assistant(content) => json!({ "role": "assistant", "content": content }),
                 crate::TranscriptItem::Tool { name, output } => json!({ "role": "tool", "name": name, "output": output }),
                 crate::TranscriptItem::Branch(label) => json!({ "role": "branch", "label": label }),
+                crate::TranscriptItem::Compaction { summary } => json!({ "role": "compaction", "summary": summary }),
                 crate::TranscriptItem::Plan { id, title, content, status } => json!({
                     "role": "plan", "id": id, "title": title, "content": content, "status": status,
                 }),

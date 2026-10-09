@@ -339,7 +339,7 @@ impl TuiState {
                     self.activity.set_compaction_output_tokens(output_tokens);
                     true
                 }
-                AgentEvent::CompactionEnd => {
+                AgentEvent::CompactionEnd { .. } => {
                     self.chat
                         .push(ChatLine::System("Context compacted.".to_string()));
                     self.mark_history_dirty();
@@ -869,6 +869,9 @@ impl TuiState {
                     running: false,
                 },
                 TranscriptItem::Branch(label) => ChatLine::System(label),
+                TranscriptItem::Compaction { .. } => {
+                    ChatLine::System("Context compacted.".to_string())
+                }
                 TranscriptItem::Plan {
                     title,
                     content,

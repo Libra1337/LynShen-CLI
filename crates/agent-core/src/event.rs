@@ -114,6 +114,10 @@ pub enum TranscriptItem {
         output: String,
     },
     Branch(String),
+    /// The conversation before this point was folded into `summary`.
+    Compaction {
+        summary: String,
+    },
     /// A plan proposed in plan mode, with its latest status.
     Plan {
         id: String,
@@ -157,7 +161,10 @@ pub enum AgentEvent {
     CompactionProgress {
         output_tokens: u64,
     },
-    CompactionEnd,
+    /// The older conversation now reads as `summary`.
+    CompactionEnd {
+        summary: String,
+    },
     CompactionFailed(String),
     ContextUsage {
         tokens: u64,

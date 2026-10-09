@@ -714,7 +714,7 @@ fn record_headless_event(event: &AgentEvent, stats: &mut HeadlessStats) {
         AgentEvent::Connecting => "connecting",
         AgentEvent::CompactionStart => "compaction_start",
         AgentEvent::CompactionProgress { .. } => "compaction_progress",
-        AgentEvent::CompactionEnd => "compaction_end",
+        AgentEvent::CompactionEnd { .. } => "compaction_end",
         AgentEvent::CompactionFailed(_) => "compaction_failed",
         AgentEvent::ContextUsage {
             tokens,

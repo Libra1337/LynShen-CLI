@@ -1642,9 +1642,10 @@ impl AgentCore {
                         summary,
                         replaced_through,
                     } => {
-                        self.session.apply_compaction(summary, replaced_through);
+                        self.session
+                            .apply_compaction(summary.clone(), replaced_through);
                         events.extend(self.save_session_event());
-                        events.push(AgentEvent::CompactionEnd);
+                        events.push(AgentEvent::CompactionEnd { summary });
                         events.push(self.context_usage_event());
                     }
                     WorkerEvent::CompactionFailed(error) => {
