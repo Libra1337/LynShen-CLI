@@ -26,7 +26,7 @@ cargo build --release
 
 Requirements: a configured provider/API key (the same setup `lynshen` uses
 interactively). The runner invokes `lynshen --headless --approval-mode
-full-auto` so file writes are unattended; every task runs in a fresh temp
+full-access` so file writes are unattended; every task runs in a fresh temp
 directory, never in your repo. Failed work directories are kept for
 inspection (the agent's JSONL event log is at `.eval-agent.jsonl` inside),
 passing ones are deleted.

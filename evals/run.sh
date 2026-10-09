@@ -11,14 +11,25 @@ REPO_ROOT="$(cd "$EVALS_DIR/.." && pwd)"
 #   AGENT_CMD='codex exec --full-auto' ./evals/run.sh
 if [ -z "${AGENT_CMD:-}" ]; then
     if [ -x "$REPO_ROOT/target/release/lynshen" ]; then
-        AGENT_CMD="$REPO_ROOT/target/release/lynshen --headless --approval-mode full-auto"
+        AGENT_CMD="$REPO_ROOT/target/release/lynshen --headless --approval-mode full-access"
     elif [ -x "$REPO_ROOT/target/debug/lynshen" ]; then
-        AGENT_CMD="$REPO_ROOT/target/debug/lynshen --headless --approval-mode full-auto"
+        AGENT_CMD="$REPO_ROOT/target/debug/lynshen --headless --approval-mode full-access"
     else
-        AGENT_CMD="lynshen --headless --approval-mode full-auto"
+        AGENT_CMD="lynshen --headless --approval-mode full-access"
     fi
 fi
 TIMEOUT_SECS="${TIMEOUT_SECS:-300}"
+
+# `timeout` (coreutils) is missing on macOS: perl's alarm does the same.
+run_limited() {
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$@"
+    else
+        secs=$1
+        shift
+        perl -e 'alarm shift; exec @ARGV' "$secs" "$@"
+    fi
+}
 
 only_task="${1:-}"
 pass=0
@@ -39,7 +50,7 @@ for task_dir in "$EVALS_DIR"/tasks/*/; do
 
     echo "== $task (workdir: $workdir)"
     # shellcheck disable=SC2086 — AGENT_CMD is intentionally word-split.
-    (cd "$workdir" && timeout "$TIMEOUT_SECS" $AGENT_CMD "$prompt" >"$log" 2>&1)
+    (cd "$workdir" && run_limited "$TIMEOUT_SECS" $AGENT_CMD "$prompt" >"$log" 2>&1)
     agent_status=$?
     if [ "$agent_status" -eq 124 ]; then
         echo "   agent timed out after ${TIMEOUT_SECS}s"
