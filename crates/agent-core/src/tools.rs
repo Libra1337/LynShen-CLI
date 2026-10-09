@@ -330,12 +330,7 @@ fn run_tool_inner(
             }
             value
         }
-        "write_stdin" => match optional_u64(&args, "session_id") {
-            Ok(Some(session_id)) if !state.owns_shell(session_id) => {
-                json!({ "session_id": session_id, "error": format!("no running shell session {session_id}: a bash command that finishes returns its full output in its own result; write_stdin is only for a session_id that a still-running bash command returned") })
-            }
-            _ => write_stdin(&args),
-        },
+        "write_stdin" => write_stdin(&args, state),
         "apply_patch" => apply_patch(&args, cwd, sandbox.as_ref(), &mut emit),
         "ls" => list_dir(&args, cwd, extra_read_roots),
         "ripgrep" => ripgrep(&args, cwd, extra_read_roots),
@@ -1345,7 +1340,7 @@ fn command_workdir(args: &Value, cwd: &Path) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-fn write_stdin(args: &Value) -> Value {
+fn write_stdin(args: &Value, state: &ToolState) -> Value {
     let session_id = match optional_u64(args, "session_id") {
         Ok(Some(session_id)) => session_id,
         Ok(None) => return json!({ "error": "missing session_id" }),
@@ -1361,7 +1356,15 @@ fn write_stdin(args: &Value) -> Value {
         Ok(yield_time) => Duration::from_millis(yield_time.unwrap_or(1000)),
         Err(error) => return json!({ "session_id": session_id, "error": error }),
     };
-    match poll_or_write_session(session_id, text, yield_time) {
+    // Not one of this engine's sessions: it may still be a command that ran
+    // in this process and finished, whose result is repeated rather than
+    // reported as a missing session.
+    let result = if state.owns_shell(session_id) {
+        poll_or_write_session(session_id, text, yield_time)
+    } else {
+        finished_or_unknown(session_id, !text.is_empty())
+    };
+    match result {
         Ok(value) => value,
         Err(error) => json!({ "session_id": session_id, "error": error }),
     }
@@ -1728,10 +1731,17 @@ fn finished_or_unknown(session_id: u64, wrote_input: bool) -> Result<Value, Stri
             });
             Ok(result)
         }
-        None => Err(format!(
-            "shell session {session_id} is not running (it finished earlier or never existed); start the command again with bash if needed"
-        )),
+        None => Err(unknown_session_error(session_id)),
     }
+}
+
+/// What to say about a session_id this process has no result for: a bash
+/// command that finishes already carries its whole output, so there is
+/// nothing to poll for.
+fn unknown_session_error(session_id: u64) -> String {
+    format!(
+        "no running shell session {session_id}: a bash command returns its whole output in its own result, and write_stdin is only for a session_id that a still-running bash command returned. Run the command again with bash if you need it."
+    )
 }
 
 fn shell_sessions() -> &'static Mutex<HashMap<u64, ShellSession>> {
@@ -5832,6 +5842,59 @@ mod tests {
         );
         assert!(!informed.contains("error"), "{informed}");
         assert_eq!(fs::read_to_string(dir.join("notes.txt")).unwrap(), "new");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_finished_sessions_result_is_repeated_to_any_engine() {
+        let dir = test_dir("shell-finished-foreign");
+        fs::create_dir_all(&dir).unwrap();
+        let owner = ToolState::default();
+        let call = |name: &str, args: Value, state: &ToolState| -> Value {
+            serde_json::from_str(
+                &run_tool_with_events(name, &args.to_string(), &dir, &[], state, |_| Ok(())).output,
+            )
+            .unwrap()
+        };
+        let started = call(
+            "bash",
+            json!({ "command": "sleep 0.3; echo finished-here", "timeout": 10, "yield_time_ms": 1 }),
+            &owner,
+        );
+        let session_id = started["session_id"].as_u64().expect("a session");
+        let done = call(
+            "write_stdin",
+            json!({ "session_id": session_id, "text": "", "yield_time_ms": 3000 }),
+            &owner,
+        );
+        assert_eq!(done["exit_code"], 0, "{done}");
+
+        // Another engine in this process polls the same id: the command's
+        // own result, not "no running shell session".
+        let other = ToolState::default();
+        let repeated = call(
+            "write_stdin",
+            json!({ "session_id": session_id, "text": "", "yield_time_ms": 10 }),
+            &other,
+        );
+        assert!(repeated.get("error").is_none(), "{repeated}");
+        assert!(repeated["stdout"]
+            .as_str()
+            .unwrap()
+            .contains("finished-here"));
+        assert_eq!(repeated["running"], false);
+
+        // An id this process never issued stays an error, and says why
+        // nothing is there to poll.
+        let unknown = call(
+            "write_stdin",
+            json!({ "session_id": session_id + 10_000, "text": "" }),
+            &other,
+        );
+        let error = unknown["error"].as_str().unwrap();
+        assert!(error.contains("no running shell session"), "{error}");
+        assert!(error.contains("returns its whole output"), "{error}");
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
