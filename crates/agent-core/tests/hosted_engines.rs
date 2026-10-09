@@ -20,16 +20,18 @@ use std::{
 
 /// Polls the engine until `done` matches an event (or times out), returning
 /// every event seen.
+/// Polls until an event satisfies `done`, keeping the whole batch it came in:
+/// a poll appends the subagents' lifecycle events after the turn's `ready`,
+/// and a fast subagent's land in that same batch.
 fn pump(core: &mut AgentCore, done: impl Fn(&AgentEvent) -> bool) -> Vec<AgentEvent> {
     let deadline = Instant::now() + Duration::from_secs(20);
     let mut seen = Vec::new();
     while Instant::now() < deadline {
-        for event in core.poll_events() {
-            let finished = done(&event);
-            seen.push(event);
-            if finished {
-                return seen;
-            }
+        let batch = core.poll_events();
+        let finished = batch.iter().any(&done);
+        seen.extend(batch);
+        if finished {
+            return seen;
         }
         thread::sleep(Duration::from_millis(10));
     }
