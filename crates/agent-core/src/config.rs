@@ -326,9 +326,12 @@ pub struct Config {
     /// Sandbox for shell commands (`sandbox`, `sandbox_network`,
     /// `sandbox_directories`, `command_rules` in config.json).
     pub sandbox: crate::sandbox::SandboxPolicy,
-    /// Engine behind `web_search`, served by the LynShen gateway: one of
-    /// `crate::web::SEARCH_ENGINES`.
+    /// Engine behind `web_search`: `model` (the default) or `gateway`; see
+    /// `crate::web`.
     pub web_search_engine: String,
+    /// Model `web_search` asks on the gateway (`web_search_model`). Empty:
+    /// search from this machine only.
+    pub web_search_model: String,
     /// Engine behind `web_fetch`: `local` fetches from this machine, the
     /// others go through the LynShen gateway (`crate::web::FETCH_ENGINES`).
     pub web_fetch_engine: String,
@@ -585,6 +588,7 @@ impl Config {
                 mcp_servers: Vec::new(),
                 sandbox: crate::sandbox::SandboxPolicy::default_for_platform(),
                 web_search_engine: crate::web::DEFAULT_SEARCH_ENGINE.to_string(),
+                web_search_model: crate::web::DEFAULT_SEARCH_MODEL.to_string(),
                 web_fetch_engine: crate::web::DEFAULT_FETCH_ENGINE.to_string(),
                 auto_update: true,
                 agents: AgentsConfig::default(),
@@ -721,12 +725,18 @@ impl Config {
             extra_skills_source: read_optional_string(&value, "extra_skills_source"),
             mcp_servers: read_mcp_servers(&value),
             sandbox: read_sandbox(&value)?,
-            web_search_engine: local_unless_gateway(read_web_engine(
+            web_search_engine: known_search_engine(read_web_engine(
                 &value,
                 "web_search_engine",
                 crate::web::DEFAULT_SEARCH_ENGINE,
                 crate::web::SEARCH_ENGINES,
             )?),
+            // Empty is a choice here: no model, this machine's search only.
+            web_search_model: value
+                .get("web_search_model")
+                .and_then(Value::as_str)
+                .map_or(crate::web::DEFAULT_SEARCH_MODEL, str::trim)
+                .to_string(),
             web_fetch_engine: read_web_engine(
                 &value,
                 "web_fetch_engine",
@@ -787,6 +797,7 @@ impl Config {
             ),
             "command_rules": crate::sandbox::rules_to_json(&self.sandbox.rules),
             "web_search_engine": self.web_search_engine,
+            "web_search_model": self.web_search_model,
             "web_fetch_engine": self.web_fetch_engine,
             "auto_update": self.auto_update,
             "agents": self.agents.to_json(),
@@ -1247,11 +1258,11 @@ fn read_sandbox(value: &Value) -> io::Result<crate::sandbox::SandboxPolicy> {
 
 /// A web engine name from config.json. Absent or empty takes the default;
 /// an unknown name is a hard load error.
-/// Only `gateway` picks the LynShen gateway for web_search. The vendor names
-/// (`auto`, `parallel`, `brave`) were the gateway's own engines and older
-/// releases wrote the default `auto` into every config.json, so they are read
-/// as `local`: a file nobody edited must not keep a route that needs a login.
-fn local_unless_gateway(engine: String) -> String {
+/// Only `gateway` picks the LynShen gateway's search. Every other name is
+/// one an earlier version wrote as its default into every config.json
+/// (`auto`, `parallel`, `brave`, then `local`), so it reads as this version's
+/// default, which still searches from this machine when no model can.
+fn known_search_engine(engine: String) -> String {
     if engine == "gateway" {
         engine
     } else {
@@ -2505,6 +2516,7 @@ mod tests {
             mcp_servers: Vec::new(),
             sandbox: crate::sandbox::SandboxPolicy::default_for_platform(),
             web_search_engine: crate::web::DEFAULT_SEARCH_ENGINE.to_string(),
+            web_search_model: crate::web::DEFAULT_SEARCH_MODEL.to_string(),
             web_fetch_engine: crate::web::DEFAULT_FETCH_ENGINE.to_string(),
             auto_update: true,
             agents: AgentsConfig::default(),
@@ -3000,12 +3012,34 @@ mod tests {
     }
 
     #[test]
-    fn only_an_explicit_gateway_keeps_the_gateway_search() {
-        // The names older releases wrote by default read as local search.
-        for engine in ["auto", "parallel", "brave", "local"] {
-            assert_eq!(local_unless_gateway(engine.to_string()), "local");
+    fn a_search_engine_nobody_chose_becomes_the_default() {
+        // The names older releases wrote by default read as this one's.
+        for engine in ["auto", "parallel", "brave", "local", "native", "model"] {
+            assert_eq!(known_search_engine(engine.to_string()), "model");
         }
-        assert_eq!(local_unless_gateway("gateway".to_string()), "gateway");
+        assert_eq!(known_search_engine("gateway".to_string()), "gateway");
+    }
+
+    #[test]
+    fn web_search_model_defaults_and_can_be_turned_off() {
+        let dir = std::env::temp_dir().join(format!("lynshen-search-model-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        let read = |text: &str| Config::from_value(text, path.clone()).unwrap();
+        assert_eq!(
+            read("{}").web_search_model,
+            crate::web::DEFAULT_SEARCH_MODEL
+        );
+        assert_eq!(
+            read(r#"{"web_search_model":" claude-sonnet-5-5 "}"#).web_search_model,
+            "claude-sonnet-5-5"
+        );
+        let off = read(r#"{"web_search_model":""}"#);
+        assert_eq!(off.web_search_model, "");
+        off.save().unwrap();
+        let saved: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["web_search_model"], "");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
