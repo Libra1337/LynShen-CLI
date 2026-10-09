@@ -630,7 +630,10 @@ fn hashline_edit_file(args: &Value, cwd: &Path, state: &ToolState) -> Value {
 
     let output = match apply_hashline_edits_preview(&original, raw_edits) {
         Ok(output) => output,
-        Err(error) => return json!({ "path": path.display().to_string(), "error": error }),
+        Err(error) => {
+            let error = explain_bad_ref(&error, raw_edits, &original);
+            return json!({ "path": path.display().to_string(), "error": error });
+        }
     };
 
     let _ = create_checkpoint(cwd, "auto-hashline-edit", std::slice::from_ref(&path));
@@ -732,16 +735,8 @@ fn parse_hashline_edits(raw_edits: &[Value]) -> Result<Vec<HashlineEdit>, String
             ));
         }
 
-        let pos = edit
-            .get("pos")
-            .and_then(Value::as_str)
-            .map(parse_hashline_anchor)
-            .transpose()?;
-        let end = edit
-            .get("end")
-            .and_then(Value::as_str)
-            .map(parse_hashline_anchor)
-            .transpose()?;
+        let pos = parse_anchor_argument(edit, "pos")?;
+        let end = parse_anchor_argument(edit, "end")?;
         let lines = parse_hashline_lines(edit.get("lines"))?;
 
         if op == "replace" && pos.is_none() {
@@ -799,6 +794,30 @@ fn parse_hashline_lines(value: Option<&Value>) -> Result<Vec<String>, String> {
     Ok(lines)
 }
 
+/// `pos`/`end` as the model wrote it: the LINE#HASH string copied from
+/// read(), or a bare line number sent as a JSON number instead of a string
+/// (which used to be dropped and reported as a missing anchor).
+fn parse_anchor_argument(edit: &Value, key: &str) -> Result<Option<HashlineAnchor>, String> {
+    match edit.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) => parse_hashline_anchor(text).map(Some),
+        Some(Value::Number(number)) => match number.as_u64() {
+            Some(line) if line >= 1 => Ok(Some(HashlineAnchor {
+                line: line as usize,
+                hash: String::new(),
+            })),
+            _ => Err(bad_ref_message(&number.to_string())),
+        },
+        Some(other) => Err(bad_ref_message(&other.to_string())),
+    }
+}
+
+fn bad_ref_message(ref_text: &str) -> String {
+    format!(
+        "[E_BAD_REF] Invalid line reference {ref_text:?}. Expected LINE#HASH, e.g. \"12#AB\" copied from read()."
+    )
+}
+
 fn parse_hashline_anchor(ref_text: &str) -> Result<HashlineAnchor, String> {
     let core = ref_text
         .trim_start_matches(|ch: char| ch.is_whitespace() || ch == '>' || ch == '+' || ch == '-')
@@ -807,11 +826,14 @@ fn parse_hashline_anchor(ref_text: &str) -> Result<HashlineAnchor, String> {
         // A bare line number: models often drop the hash they copied.
         let line = core.split(':').next().unwrap_or_default().trim();
         return match line.parse::<usize>() {
-            Ok(0) => Err(format!("[E_BAD_REF] Line number must be >= 1 in {ref_text:?}.")),
-            Ok(line) => Ok(HashlineAnchor { line, hash: String::new() }),
-            Err(_) => Err(format!(
-                "[E_BAD_REF] Invalid line reference {ref_text:?}. Expected LINE#HASH, e.g. \"12#AB\" copied from read()."
+            Ok(0) => Err(format!(
+                "[E_BAD_REF] Line number must be >= 1 in {ref_text:?}."
             )),
+            Ok(line) => Ok(HashlineAnchor {
+                line,
+                hash: String::new(),
+            }),
+            Err(_) => Err(bad_ref_message(ref_text)),
         };
     };
     let line = core[..hash_pos].trim().parse::<usize>().map_err(|_| {
@@ -1027,31 +1049,90 @@ fn resolve_hashline_prepend(
 }
 
 fn format_hashline_mismatch(mismatches: &[(usize, String, String)], lines: &[String]) -> String {
-    let mut retry_lines = HashSet::new();
-    for (line, _, _) in mismatches {
-        let start = line.saturating_sub(2).max(1);
-        let end = (*line + 2).min(lines.len());
-        for retry in start..=end {
-            retry_lines.insert(retry);
-        }
-    }
-    let mut sorted = retry_lines.into_iter().collect::<Vec<_>>();
-    sorted.sort_unstable();
+    let around = mismatches
+        .iter()
+        .map(|(line, _, _)| *line)
+        .collect::<Vec<_>>();
     let mut out = vec![format!(
         "[E_STALE_ANCHOR] {} stale anchor{}. Retry with the >>> LINE#HASH lines below.",
         mismatches.len(),
         if mismatches.len() == 1 { "" } else { "s" }
     )];
-    for line in sorted {
-        let content = &lines[line - 1];
-        out.push(format!(
-            ">>> {}#{}:{}",
-            line,
-            compute_line_hash(line, content),
-            content
-        ));
-    }
+    out.extend(retry_anchor_lines(&around, lines));
     out.join("\n")
+}
+
+/// The `>>> LINE#HASH:content` lines for each line in `around` and its two
+/// neighbours: what to copy into the next call.
+fn retry_anchor_lines(around: &[usize], lines: &[String]) -> Vec<String> {
+    let mut wanted = HashSet::new();
+    for line in around {
+        let start = line.saturating_sub(2).max(1);
+        let end = (*line + 2).min(lines.len());
+        for retry in start..=end {
+            wanted.insert(retry);
+        }
+    }
+    let mut sorted = wanted.into_iter().collect::<Vec<_>>();
+    sorted.sort_unstable();
+    sorted
+        .into_iter()
+        .map(|line| {
+            let content = &lines[line - 1];
+            format!(
+                ">>> {}#{}:{}",
+                line,
+                compute_line_hash(line, content),
+                content
+            )
+        })
+        .collect()
+}
+
+/// A rejected anchor is easier to correct with the file's own anchors in
+/// hand. When the reference named a line that exists, that line and its
+/// neighbours are appended as a retry block, as for a stale anchor;
+/// otherwise the error says what an anchor looks like and where it comes
+/// from (a placeholder such as `${fetch lines}` reaches here).
+fn explain_bad_ref(error: &str, raw_edits: &[Value], original: &str) -> String {
+    if !error.starts_with("[E_BAD_REF]") {
+        return error.to_string();
+    }
+    let line_index = LineIndex::new(original);
+    let visible = if line_index.has_terminal_newline {
+        line_index.lines.len().saturating_sub(1)
+    } else {
+        line_index.lines.len()
+    };
+    let named: Vec<usize> = raw_edits
+        .iter()
+        .flat_map(|edit| ["pos", "end"].map(|key| edit.get(key).cloned()))
+        .flatten()
+        .filter_map(|value| leading_line_number(&value))
+        .filter(|line| (1..=visible).contains(line))
+        .collect();
+    if named.is_empty() {
+        return format!(
+            "{error} Copy the anchor from the hashlines of a read() of this file; a placeholder or a line of your own text is not an anchor."
+        );
+    }
+    let mut out = vec![format!("{error} Retry with the >>> LINE#HASH lines below.")];
+    out.extend(retry_anchor_lines(&named, &line_index.lines));
+    out.join("\n")
+}
+
+/// The line number a `pos`/`end` value starts with, however it was written.
+fn leading_line_number(value: &Value) -> Option<usize> {
+    if let Some(number) = value.as_u64() {
+        return usize::try_from(number).ok();
+    }
+    let text = value.as_str()?;
+    let digits: String = text
+        .trim_start_matches(|ch: char| ch.is_whitespace() || ch == '>' || ch == '+' || ch == '-')
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse().ok()
 }
 
 fn is_hashline_display_prefix(line: &str) -> bool {
@@ -5224,6 +5305,93 @@ mod tests {
             "{bad}"
         );
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_bad_anchor_comes_back_with_the_files_current_anchors() {
+        let dir = test_dir("hashline-bad-ref");
+        let path = dir.join("sample.py");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(&path, "one\ntwo\nthree\nfour\nfive\n").unwrap();
+        let state = ToolState::default();
+        let run = |args: Value| {
+            serde_json::from_str::<Value>(
+                &run_tool_with_events(
+                    "hashline_edit",
+                    &args.to_string(),
+                    &dir,
+                    &[],
+                    &state,
+                    |_| Ok(()),
+                )
+                .output,
+            )
+            .unwrap()
+        };
+        let _ = run_tool_with_events(
+            "read",
+            &json!({ "path": path }).to_string(),
+            &dir,
+            &[],
+            &state,
+            |_| Ok(()),
+        );
+
+        // A line number with a broken hash: the line's real anchor and its
+        // neighbours come back, so the next call can work.
+        let bad = run(json!({
+            "path": path,
+            "edits": [{ "op": "replace", "pos": "3#", "lines": ["THREE"] }]
+        }));
+        let error = bad["error"].as_str().unwrap();
+        assert!(error.starts_with("[E_BAD_REF]"), "{error}");
+        assert!(error.contains(">>> 3#"), "{error}");
+        assert!(error.contains(":three"), "{error}");
+        assert!(
+            error.contains(">>> 1#") && error.contains(">>> 5#"),
+            "{error}"
+        );
+        // The anchor it offers is the one the next call needs.
+        let anchor = error
+            .lines()
+            .find_map(|line| line.strip_prefix(">>> "))
+            .and_then(|line| line.split(':').next())
+            .unwrap()
+            .to_string();
+        let retry = run(json!({
+            "path": path,
+            "edits": [{ "op": "replace", "pos": anchor, "lines": ["ONE"] }]
+        }));
+        assert!(retry.get("error").is_none(), "{retry}");
+
+        // A placeholder names no line: say what an anchor is and where it
+        // comes from instead of printing the file.
+        let placeholder = run(json!({
+            "path": path,
+            "edits": [{ "op": "replace", "pos": "${fetch lines}", "lines": ["x"] }]
+        }));
+        let error = placeholder["error"].as_str().unwrap();
+        assert!(error.contains("Expected LINE#HASH"), "{error}");
+        assert!(error.contains("read()"), "{error}");
+        assert!(!error.contains(">>>"), "{error}");
+
+        // A line number sent as a JSON number is a bare line reference, not
+        // a missing anchor.
+        let numeric = run(json!({
+            "path": path,
+            "edits": [{ "op": "replace", "pos": 2, "lines": ["TWO"] }]
+        }));
+        assert!(numeric.get("error").is_none(), "{numeric}");
+        assert!(fs::read_to_string(&path).unwrap().contains("TWO"));
+        let zero = run(json!({
+            "path": path,
+            "edits": [{ "op": "replace", "pos": 0, "lines": ["x"] }]
+        }));
+        assert!(
+            zero["error"].as_str().unwrap().contains("E_BAD_REF"),
+            "{zero}"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
