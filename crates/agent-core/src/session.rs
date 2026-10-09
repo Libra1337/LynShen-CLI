@@ -111,6 +111,9 @@ pub struct SessionStore {
     resume_summary: Option<String>,
     resume_summary_status: Option<ThreadGoalStatus>,
     resume_summary_updated_at: Option<u64>,
+    /// The agent team's state (task board, worktrees to merge), owned by
+    /// `subagents::SubagentManager::team_json`.
+    team: Option<Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -241,6 +244,17 @@ impl SessionStore {
 
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    /// The agent team's saved state, if any.
+    pub fn team(&self) -> Option<&Value> {
+        self.team.as_ref()
+    }
+
+    /// Records the agent team's state; written with the next save. Not a
+    /// conversation change, so `updated_at` stays.
+    pub fn set_team(&mut self, team: Value) {
+        self.team = Some(team);
     }
 
     pub fn goal(&self) -> Option<&ThreadGoal> {
@@ -1027,7 +1041,8 @@ impl SessionStore {
             "resume_summary": self.resume_summary,
             "resume_status": self.resume_summary_status.map(ThreadGoalStatus::as_str),
             "resume_summary_updated_at": self.resume_summary_updated_at,
-            "goal": self.goal.as_ref().map(goal_to_json)
+            "goal": self.goal.as_ref().map(goal_to_json),
+            "team": self.team
         })
     }
 
@@ -1125,6 +1140,7 @@ impl SessionStore {
             resume_summary_updated_at: value
                 .get("resume_summary_updated_at")
                 .and_then(Value::as_u64),
+            team: value.get("team").filter(|team| !team.is_null()).cloned(),
         };
         if store.branch_heads.is_empty() {
             store.rebuild_branch_heads();
@@ -1197,6 +1213,9 @@ impl SessionStore {
         }
         if value.get("goal").is_some() {
             self.goal = value.get("goal").and_then(goal_from_json);
+        }
+        if let Some(team) = value.get("team") {
+            self.team = Some(team.clone()).filter(|team| !team.is_null());
         }
         self.resume_summary = value
             .get("resume_summary")
@@ -2665,6 +2684,34 @@ mod tests {
             .any(|line| line.contains("\"type\":\"entry\"")));
         assert_eq!(loaded.branch().len(), 2);
         assert_eq!(loaded.transcript_items().len(), 2);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn the_team_state_is_saved_and_the_latest_one_reloads() {
+        let root = test_dir("session-team");
+        let profile = root.join("profile");
+        let cwd = root.join("repo");
+        fs::create_dir_all(&cwd).unwrap();
+        let mut session = SessionStore::new();
+        let session_id = session.session_id().to_string();
+        let updated_at = session.updated_at();
+        session.set_team(json!({ "board": { "next": 1, "tasks": [{ "id": "t1" }] } }));
+        assert_eq!(session.updated_at(), updated_at);
+        session.save_for_cwd(&profile, &cwd).unwrap();
+        session.append(EntryKind::User {
+            content: "go".to_string(),
+        });
+        session.set_team(json!({ "board": { "next": 2, "tasks": [] } }));
+        session.save_for_cwd(&profile, &cwd).unwrap();
+        let loaded = SessionStore::load_for_cwd(&profile, &cwd, &session_id).unwrap();
+        assert_eq!(loaded.team().unwrap()["board"]["next"], 2);
+        // A snapshot record keeps it too.
+        assert_eq!(
+            SessionStore::from_json(&session.to_json()).unwrap().team(),
+            session.team()
+        );
+        assert!(SessionStore::new().team().is_none());
         let _ = fs::remove_dir_all(root);
     }
 

@@ -131,10 +131,12 @@ impl ApprovalMode {
             return *self != Self::FullAccess;
         }
         // generate_image writes files into the workspace like `write`, and
-        // merge_agent (apply) brings a subagent's changes into it.
+        // merge_agent (apply) and pick_attempt bring a subagent's changes
+        // into it.
         if is_edit_tool(tool_name)
             || tool_name == crate::images::TOOL_NAME
             || tool_name == "merge_agent"
+            || tool_name == "pick_attempt"
         {
             return self.is_strict();
         }
@@ -374,6 +376,11 @@ pub struct AgentsConfig {
     /// Leftover subagent worktrees older than this are removed when a
     /// session starts; 0 keeps them.
     pub keep_worktrees_days: u64,
+    /// A background subagent that finishes while the main agent is idle
+    /// starts a main turn with its result.
+    pub wake_on_result: bool,
+    /// A completed `worker` task of the board gets a `reviewer` subagent.
+    pub review_on_complete: bool,
 }
 
 impl Default for AgentsConfig {
@@ -384,6 +391,8 @@ impl Default for AgentsConfig {
             turn_token_budget: 0,
             fanout: Fanout::Auto,
             keep_worktrees_days: 7,
+            wake_on_result: true,
+            review_on_complete: false,
         }
     }
 }
@@ -396,6 +405,8 @@ impl AgentsConfig {
             "turn_token_budget": self.turn_token_budget,
             "fanout": self.fanout.as_str(),
             "keep_worktrees_days": self.keep_worktrees_days,
+            "wake_on_result": self.wake_on_result,
+            "review_on_complete": self.review_on_complete,
         })
     }
 }
@@ -1271,6 +1282,8 @@ fn read_agents(value: &Value) -> io::Result<AgentsConfig> {
         turn_token_budget: read_u64(agents, "turn_token_budget", defaults.turn_token_budget),
         fanout,
         keep_worktrees_days: read_u64(agents, "keep_worktrees_days", defaults.keep_worktrees_days),
+        wake_on_result: read_bool(agents, "wake_on_result", defaults.wake_on_result),
+        review_on_complete: read_bool(agents, "review_on_complete", defaults.review_on_complete),
     })
 }
 
@@ -2987,10 +3000,12 @@ mod tests {
                 turn_token_budget: 0,
                 fanout: Fanout::Auto,
                 keep_worktrees_days: 7,
+                wake_on_result: true,
+                review_on_complete: false,
             }
         );
         let partial = Config::from_value(
-            r#"{"agents": {"max_live": 2, "fanout": "plan", "turn_token_budget": 400000}}"#,
+            r#"{"agents": {"max_live": 2, "fanout": "plan", "turn_token_budget": 400000, "wake_on_result": false, "review_on_complete": true}}"#,
             path.clone(),
         )
         .unwrap();
@@ -2999,6 +3014,8 @@ mod tests {
         assert_eq!(partial.agents.turn_token_budget, 400_000);
         assert_eq!(partial.agents.max_depth, 2);
         assert_eq!(partial.agents.keep_worktrees_days, 7);
+        assert!(!partial.agents.wake_on_result);
+        assert!(partial.agents.review_on_complete);
         // Zero limits would disable spawning silently; they are raised to 1.
         let zero = Config::from_value(
             r#"{"agents": {"max_live": 0, "max_depth": 0, "keep_worktrees_days": 0}}"#,
@@ -3037,7 +3054,9 @@ mod tests {
                 "max_depth": 2,
                 "turn_token_budget": 0,
                 "fanout": "auto",
-                "keep_worktrees_days": 7
+                "keep_worktrees_days": 7,
+                "wake_on_result": true,
+                "review_on_complete": false
             })
         );
         fs::write(&path, r#"{"agents": {"fanout": "off", "max_live": 6}}"#).unwrap();

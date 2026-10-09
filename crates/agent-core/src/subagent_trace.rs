@@ -223,6 +223,12 @@ impl SubagentTrace {
         self.push(Item::Note(cut(text, MAX_TOOL_FIELD_BYTES)));
     }
 
+    /// The agent runs again (`resume_agent`) on a new message.
+    pub(crate) fn resume(&mut self, text: &str) {
+        self.note(text);
+        self.set_activity("Starting".to_string());
+    }
+
     /// The agent ended: running tool calls are no longer running.
     pub(crate) fn finish(&mut self, activity: &str) {
         for item in &mut self.items {
