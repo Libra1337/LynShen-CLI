@@ -69,6 +69,8 @@ fn open(
         Some(id) => resume_session(hub, &mut core, id),
     };
     result?;
+    let session = core.session_id().to_string();
+    let mut host = None;
     if let Some(agent) = agent.and_then(|id| hub.agents.get(id)) {
         if let Ok(mode) = ApprovalMode::parse(&agent.approval_mode) {
             core.set_approval_mode(mode);
@@ -77,12 +79,22 @@ fn open(
         let policy = agent.policy()?;
         policy.check_available()?;
         core.set_sandbox(Some(policy));
-        let session = core.session_id().to_string();
-        core.set_host_extensions(crate::agent_tools::extensions(
+        host = Some(crate::agent_tools::extensions(
             Arc::clone(hub),
             agent.id,
-            session,
+            session.clone(),
         ));
+    }
+    // The dispatcher keeps its closed set of routing tools.
+    let messages = (agent != Some(crate::dispatch::AGENT))
+        .then(|| crate::session_messages::extensions(Arc::clone(hub), session))
+        .flatten();
+    let host = match (host, messages) {
+        (Some(agent), Some(messages)) => Some(agent.with(messages)),
+        (agent, messages) => agent.or(messages),
+    };
+    if let Some(host) = host {
+        core.set_host_extensions(host);
     }
     // After an agent's sandbox, which replaces the default one.
     core.add_writable_dirs(&dirs);

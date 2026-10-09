@@ -11,6 +11,9 @@ use std::sync::{atomic::AtomicBool, Arc};
 /// stopped; a tool that waits should give up then.
 pub type HostToolRunner = Arc<dyn Fn(&str, &str, &AtomicBool) -> (String, bool) + Send + Sync>;
 
+/// The approval card's line for a host tool call: `(name, JSON arguments)`.
+pub type HostToolSummary = Arc<dyn Fn(&str, &str) -> String + Send + Sync>;
+
 /// How the approval layer treats a host tool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostGate {
@@ -41,7 +44,7 @@ pub struct HostExtensions {
     /// How each of `tools` is gated, by name.
     pub gate: Arc<dyn Fn(&str) -> HostGate + Send + Sync>,
     /// The line an approval card shows for a gated call `(name, arguments)`.
-    pub summary: Arc<dyn Fn(&str, &str) -> String + Send + Sync>,
+    pub summary: HostToolSummary,
 }
 
 impl HostExtensions {

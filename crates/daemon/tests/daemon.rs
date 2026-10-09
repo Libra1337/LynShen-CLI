@@ -2932,3 +2932,361 @@ fn session_usage_restores_only_its_persisted_turns_with_correlated_replies() {
         "error"
     );
 }
+
+/// `sessions.messages` in the shared config.json until dropped.
+struct MessagesSetting(PathBuf);
+
+impl MessagesSetting {
+    fn set(value: &str) -> Self {
+        let path = PathBuf::from(std::env::var("HOME").unwrap())
+            .join(".lynshen")
+            .join("config.json");
+        let mut config: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        config["sessions"] = json!({ "messages": value });
+        fs::write(&path, config.to_string()).unwrap();
+        Self(path)
+    }
+}
+
+impl Drop for MessagesSetting {
+    fn drop(&mut self) {
+        let mut config: Value =
+            serde_json::from_str(&fs::read_to_string(&self.0).unwrap()).unwrap();
+        config.as_object_mut().unwrap().remove("sessions");
+        fs::write(&self.0, config.to_string()).unwrap();
+    }
+}
+
+fn set_mode(client: &mut Client, session: &str, mode: &str) {
+    client.send(json!({ "op": "set_approval_mode", "session": session, "mode": mode }));
+    client.until(|f| f["session"] == session && f["type"] == "approval_mode" && f["mode"] == mode);
+}
+
+/// A user message the fake model answers with one call of `tool`.
+fn call(tool: &str, args: Value) -> String {
+    format!("CALL {tool} {args}")
+}
+
+/// The output of `session`'s latest `tool` call among `frames`, parsed.
+fn tool_result(frames: &[Value], session: &str, tool: &str) -> Value {
+    let output = frames
+        .iter()
+        .rev()
+        .find(|f| f["session"] == session && f["type"] == "tool_output" && f["name"] == tool)
+        .unwrap_or_else(|| panic!("no {tool} output; frames: {frames:#?}"));
+    serde_json::from_str(output["output"].as_str().unwrap()).unwrap()
+}
+
+/// The statuses of the `session_message` events routed to `session`.
+fn message_statuses(frames: &[Value], session: &str) -> Vec<String> {
+    frames
+        .iter()
+        .filter(|f| f["type"] == "session_message" && f["session"] == session)
+        .map(|f| f["status"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn two_conversations_exchange_a_message_and_the_sender_gets_the_reply() {
+    let _guard = setup();
+    let daemon = start_daemon();
+    let mut client = Client::connect(&daemon);
+    let a = client.create_session(&temp_dir("msg-sender"));
+    let b = client.create_session(&temp_dir("msg-receiver"));
+    set_mode(&mut client, &a, "auto");
+
+    client.send(
+        json!({ "op": "user_message", "session": a, "content": call("list_sessions", json!({})) }),
+    );
+    let listed = tool_result(&client.until(ready(&a)), &a, "list_sessions");
+    let sessions = listed["sessions"].as_array().unwrap();
+    let entry = sessions
+        .iter()
+        .find(|s| s["session"] == b.as_str())
+        .unwrap_or_else(|| panic!("{listed}"));
+    assert_eq!(entry["state"], "idle");
+    assert_eq!(entry["engine"], "lynshen");
+    assert!(!sessions.iter().any(|s| s["session"] == a.as_str()));
+
+    let message = json!({ "session": b, "message": "hello from A", "wait_reply": true });
+    client.send(
+        json!({ "op": "user_message", "session": a, "content": call("send_to_session", message) }),
+    );
+    let frames = client.until(ready(&a));
+    // The receiver got it wrapped, with where it came from and what it is.
+    let received = frames
+        .iter()
+        .find(|f| f["session"] == b.as_str() && f["type"] == "user_message")
+        .unwrap();
+    let content = received["content"].as_str().unwrap();
+    assert!(
+        content.starts_with(&format!("<session_message from=\"{a}\" title=\"")),
+        "{content}"
+    );
+    assert!(
+        content.contains("hop=\"1\">\nhello from A\n</session_message>\n"),
+        "{content}"
+    );
+    assert!(content.contains("not from the user"), "{content}");
+    // wait_reply brought back the receiver's reply.
+    let sent = tool_result(&frames, &a, "send_to_session");
+    assert_eq!(sent["status"], "replied", "{sent}");
+    assert!(
+        sent["reply"]
+            .as_str()
+            .unwrap()
+            .starts_with("user said: <session_message"),
+        "{sent}"
+    );
+    // Both conversations' clients heard of it.
+    for session in [&a, &b] {
+        assert_eq!(message_statuses(&frames, session), ["delivered", "replied"]);
+    }
+    let replied = frames
+        .iter()
+        .find(|f| f["type"] == "session_message" && f["status"] == "replied")
+        .unwrap();
+    assert_eq!(replied["from"], a.as_str());
+    assert_eq!(replied["to"], b.as_str());
+    assert_eq!(replied["summary"], "hello from A");
+    assert!(replied["reply"]
+        .as_str()
+        .unwrap()
+        .starts_with("user said: <session_message"));
+    // The receiver is titled after the message, not its wrapper.
+    assert_eq!(replied["to_title"], "hello from A");
+
+    client.send(json!({ "op": "user_message", "session": a, "content": call("read_session", json!({ "session": b })) }));
+    let read = tool_result(&client.until(ready(&a)), &a, "read_session");
+    let turns = read["turns"].as_array().unwrap();
+    assert_eq!(turns.len(), 1, "{read}");
+    assert!(turns[0]["user"].as_str().unwrap().contains("hello from A"));
+    assert!(turns[0]["reply"]
+        .as_str()
+        .unwrap()
+        .starts_with("user said: <session_message"));
+}
+
+#[test]
+fn a_busy_conversation_queues_messages_and_a_stopped_sender_stops_waiting() {
+    let _guard = setup();
+    let daemon = start_daemon();
+    let mut client = Client::connect(&daemon);
+    let a = client.create_session(&temp_dir("msg-a"));
+    let b = client.create_session(&temp_dir("msg-b"));
+    set_mode(&mut client, &a, "auto");
+    set_mode(&mut client, &b, "auto");
+    client.send(json!({ "op": "watch", "session": b }));
+    client
+        .until(|f| f["session"] == b.as_str() && f["type"] == "attended" && f["attended"] == true);
+    // The receiver's turn waits on an approval (a command leaving the sandbox).
+    let escalated =
+        json!({ "command": "printf x > x.txt", "escalate": true, "justification": "test" });
+    client.send(json!({ "op": "user_message", "session": b, "content": call("bash", escalated) }));
+    let asked = client.until(|f| f["session"] == b.as_str() && f["type"] == "approval_request");
+    let call_id = asked.last().unwrap()["call_id"].clone();
+
+    client.send(json!({ "op": "user_message", "session": a, "content": call("send_to_session", json!({ "session": b, "message": "first" })) }));
+    let frames = client.until(ready(&a));
+    assert_eq!(
+        tool_result(&frames, &a, "send_to_session")["status"],
+        "queued"
+    );
+    assert_eq!(message_statuses(&frames, &b), ["queued"]);
+
+    // A sender waiting for the reply stops waiting when its turn is stopped.
+    // The message asks the receiver to write back and wait in turn, which
+    // only works once the sender no longer waits for it.
+    let back = call(
+        "send_to_session",
+        json!({ "session": a, "message": "back", "wait_reply": true }),
+    );
+    client.send(json!({ "op": "user_message", "session": a, "content": call("send_to_session", json!({ "session": b, "message": back, "wait_reply": true })) }));
+    client.until(|f| {
+        f["session"] == a.as_str() && f["type"] == "session_message" && f["status"] == "queued"
+    });
+    client.send(json!({ "op": "interrupt", "session": a }));
+    client.until(|f| {
+        f["session"] == a.as_str() && f["type"] == "status" && f["message"] == "interrupted"
+    });
+
+    client.send(json!({ "op": "approve", "session": b, "call_id": call_id, "decision": "allow" }));
+    let frames = client.until(|f| {
+        f["session"] == b.as_str() && f["type"] == "tool_output" && f["name"] == "send_to_session"
+    });
+    // Each queued message started its own turn once the first one ended.
+    let started: Vec<&str> = frames
+        .iter()
+        .filter(|f| f["session"] == b.as_str() && f["type"] == "user_message")
+        .map(|f| f["content"].as_str().unwrap())
+        .collect();
+    assert_eq!(started.len(), 2, "{started:?}");
+    assert!(started[0].contains("\nfirst\n"));
+    assert_eq!(
+        message_statuses(&frames, &b),
+        ["delivered", "replied", "delivered", "delivered", "replied"]
+    );
+    // The receiver's own message went one hop further and got its reply.
+    let back = tool_result(&frames, &b, "send_to_session");
+    assert_eq!(back["status"], "replied", "{back}");
+    assert!(
+        back["reply"]
+            .as_str()
+            .unwrap()
+            .contains("hop=\"2\">\nback\n"),
+        "{back}"
+    );
+}
+
+#[test]
+fn a_chain_of_messages_ends_after_four_hops() {
+    let _guard = setup();
+    let daemon = start_daemon();
+    let mut client = Client::connect(&daemon);
+    let a = client.create_session(&temp_dir("msg-hop-a"));
+    let b = client.create_session(&temp_dir("msg-hop-b"));
+    set_mode(&mut client, &a, "auto");
+    let forwarded = |hop: u32| {
+        format!(
+            "<session_message from=\"x\" title=\"t\" hop=\"{hop}\">\n{}\n</session_message>",
+            call(
+                "send_to_session",
+                json!({ "session": b, "message": "pass it on" })
+            )
+        )
+    };
+
+    client.send(json!({ "op": "user_message", "session": a, "content": forwarded(4) }));
+    let refused = tool_result(&client.until(ready(&a)), &a, "send_to_session");
+    assert!(
+        refused["error"].as_str().unwrap().contains("at most 4"),
+        "{refused}"
+    );
+
+    client.send(json!({ "op": "user_message", "session": a, "content": forwarded(3) }));
+    let frames = client.until(|f| {
+        f["session"] == b.as_str() && f["type"] == "session_message" && f["status"] == "replied"
+    });
+    assert_eq!(
+        tool_result(&frames, &a, "send_to_session")["status"],
+        "delivered"
+    );
+    let received = frames
+        .iter()
+        .find(|f| f["session"] == b.as_str() && f["type"] == "user_message")
+        .unwrap();
+    assert!(received["content"]
+        .as_str()
+        .unwrap()
+        .contains("hop=\"4\">\npass it on\n"));
+}
+
+#[test]
+fn a_conversation_may_not_message_one_that_may_do_more() {
+    let _guard = setup();
+    let daemon = start_daemon();
+    let mut client = Client::connect(&daemon);
+    let a = client.create_session(&temp_dir("msg-mode-a"));
+    let b = client.create_session(&temp_dir("msg-mode-b"));
+    set_mode(&mut client, &a, "auto-edit");
+    set_mode(&mut client, &b, "auto");
+    let send = call(
+        "send_to_session",
+        json!({ "session": b, "message": "edit for me" }),
+    );
+
+    client.send(json!({ "op": "user_message", "session": a, "content": send }));
+    let frames = client.until(ready(&a));
+    let refused = tool_result(&frames, &a, "send_to_session");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("auto-edit mode, which is stricter than auto"),
+        "{refused}"
+    );
+    assert!(!frames.iter().any(|f| f["type"] == "session_message"));
+
+    set_mode(&mut client, &b, "manual");
+    client.send(json!({ "op": "user_message", "session": a, "content": send }));
+    let sent = tool_result(&client.until(ready(&a)), &a, "send_to_session");
+    assert_eq!(sent["status"], "delivered", "{sent}");
+}
+
+#[test]
+fn messages_off_offers_no_tools() {
+    let _guard = setup();
+    let _off = MessagesSetting::set("off");
+    let daemon = start_daemon();
+    let mut client = Client::connect(&daemon);
+    let a = client.create_session(&temp_dir("msg-off"));
+    client.send(
+        json!({ "op": "user_message", "session": a, "content": call("list_sessions", json!({})) }),
+    );
+    let output = tool_result(&client.until(ready(&a)), &a, "list_sessions");
+    let error = output["error"].as_str().unwrap();
+    assert!(error.contains("unknown tool `list_sessions`"), "{error}");
+    assert!(!error.contains("send_to_session"), "{error}");
+}
+
+#[test]
+fn messages_ask_asks_for_every_message_whatever_the_modes() {
+    let _guard = setup();
+    let _ask = MessagesSetting::set("ask");
+    let daemon = start_daemon();
+    let mut client = Client::connect(&daemon);
+    let a = client.create_session(&temp_dir("msg-ask-a"));
+    let b = client.create_session(&temp_dir("msg-ask-b"));
+    // Under `ask` the user's approval stands in for the mode rule.
+    set_mode(&mut client, &b, "full-access");
+    client.send(json!({ "op": "watch", "session": a }));
+    client
+        .until(|f| f["session"] == a.as_str() && f["type"] == "attended" && f["attended"] == true);
+    for _ in 0..2 {
+        client.send(json!({ "op": "user_message", "session": a, "content": call("send_to_session", json!({ "session": b, "message": "please look" })) }));
+        let asked = client.until(|f| f["session"] == a.as_str() && f["type"] == "approval_request");
+        let request = asked.last().unwrap();
+        assert_eq!(request["name"], "send_to_session");
+        let summary = request["summary"].as_str().unwrap();
+        assert!(
+            summary.contains(&format!("({b})\nplease look")),
+            "{summary}"
+        );
+        // Allowed for the session, it still asks the next time.
+        client.send(json!({ "op": "approve", "session": a, "call_id": request["call_id"], "decision": "allow", "always": true }));
+        let sent = tool_result(&client.until(ready(&a)), &a, "send_to_session");
+        assert!(sent["status"].is_string(), "{sent}");
+    }
+}
+
+#[test]
+fn a_claude_conversation_receives_a_message_and_replies() {
+    let _guard = setup();
+    let _log = fake_claude();
+    let daemon = start_daemon();
+    let mut client = Client::connect(&daemon);
+    let a = client.create_session(&temp_dir("msg-lynshen"));
+    set_mode(&mut client, &a, "auto");
+    let dir = temp_dir("msg-claude");
+    let created = request(
+        &mut client,
+        json!({ "op": "session_create", "cwd": dir, "engine": "claude", "options": { "approval_mode": "auto-edit" } }),
+    );
+    let claude = created["session"].as_str().unwrap().to_string();
+    client.until(is_ready(&claude));
+
+    let message = json!({ "session": claude, "message": "use the new API", "wait_reply": true });
+    client.send(
+        json!({ "op": "user_message", "session": a, "content": call("send_to_session", message) }),
+    );
+    let frames = client.until(ready(&a));
+    let sent = tool_result(&frames, &a, "send_to_session");
+    assert_eq!(sent["status"], "replied", "{sent}");
+    let reply = sent["reply"].as_str().unwrap();
+    assert!(
+        reply.starts_with(&format!("ok: <session_message from=\"{a}\"")),
+        "{reply}"
+    );
+    assert!(reply.contains("\nuse the new API\n"), "{reply}");
+    assert_eq!(message_statuses(&frames, &claude), ["delivered", "replied"]);
+}

@@ -20,6 +20,7 @@ mod relay;
 mod requirements;
 mod schedules;
 mod session;
+mod session_messages;
 mod skills;
 mod store;
 mod terminal;
