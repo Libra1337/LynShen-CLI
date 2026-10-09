@@ -3164,9 +3164,24 @@ fn a_chain_of_messages_ends_after_four_hops() {
     );
 
     client.send(json!({ "op": "user_message", "session": a, "content": forwarded(3) }));
-    let frames = client.until(|f| {
-        f["session"] == b.as_str() && f["type"] == "session_message" && f["status"] == "replied"
-    });
+    // B's reply and A's tool result come on two sessions' streams, in either
+    // order: wait for both.
+    let mut frames = Vec::new();
+    let (mut replied, mut sent) = (false, false);
+    while !(replied && sent) {
+        let more = client.until(|f| {
+            (f["session"] == b.as_str()
+                && f["type"] == "session_message"
+                && f["status"] == "replied")
+                || (f["session"] == a.as_str()
+                    && f["type"] == "tool_output"
+                    && f["name"] == "send_to_session")
+        });
+        let last = more.last().unwrap();
+        replied |= last["type"] == "session_message";
+        sent |= last["type"] == "tool_output";
+        frames.extend(more);
+    }
     assert_eq!(
         tool_result(&frames, &a, "send_to_session")["status"],
         "delivered"
