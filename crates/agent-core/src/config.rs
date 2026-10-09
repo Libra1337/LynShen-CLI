@@ -1259,9 +1259,9 @@ fn read_sandbox(value: &Value) -> io::Result<crate::sandbox::SandboxPolicy> {
 /// A web engine name from config.json. Absent or empty takes the default;
 /// an unknown name is a hard load error.
 /// Only `gateway` picks the LynShen gateway's search. Every other name is
-/// one an earlier version wrote as its default into every config.json
-/// (`auto`, `parallel`, `brave`, then `local`), so it reads as this version's
-/// default, which still searches from this machine when no model can.
+/// one an earlier build wrote as its default into config.json (`parallel`,
+/// `brave`, `local`, `model`), so it reads as this version's default `auto`,
+/// which still searches from this machine when no model can.
 fn known_search_engine(engine: String) -> String {
     if engine == "gateway" {
         engine
@@ -3013,9 +3013,10 @@ mod tests {
 
     #[test]
     fn a_search_engine_nobody_chose_becomes_the_default() {
-        // The names older releases wrote by default read as this one's.
+        // The names older builds wrote by default read as this one's, which
+        // every released version accepts.
         for engine in ["auto", "parallel", "brave", "local", "native", "model"] {
-            assert_eq!(known_search_engine(engine.to_string()), "model");
+            assert_eq!(known_search_engine(engine.to_string()), "auto");
         }
         assert_eq!(known_search_engine("gateway".to_string()), "gateway");
     }

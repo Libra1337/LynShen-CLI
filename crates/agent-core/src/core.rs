@@ -5154,7 +5154,9 @@ fn route_headers(config: &Config) -> HashMap<String, Vec<(String, String)>> {
 /// One request to the conversation-title model (`Config::title`) on the
 /// user's configured provider: no tools, returns the reply text.
 pub fn title_completion(system: &str, user: &str) -> Result<String, String> {
-    let config = Config::load_or_create().map_err(|error| error.to_string())?;
+    // Only read: the daemon names conversations all the time, and a save
+    // here would rewrite config.json under Desktop and older engines.
+    let config = Config::load_existing().map_err(|error| error.to_string())?;
     let auth = if config.provider == "lynshen" {
         oauth::ensure_session(&config.lynshen_api_url, config.encrypt_secrets)?
     } else {

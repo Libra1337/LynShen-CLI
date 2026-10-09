@@ -17,21 +17,19 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::time::Duration;
 
-/// `model` (the default) searches through `web_search_model`, falling back
+/// `auto` (the default) searches through `web_search_model`, falling back
 /// to this machine; `gateway` goes through the LynShen gateway's search. The
-/// other names are what earlier versions wrote, read as the default.
+/// other names are ones earlier builds wrote, read as `auto`.
 pub const SEARCH_ENGINES: &[&str] = &[
-    MODEL_ENGINE,
-    "gateway",
-    "local",
-    "native",
-    "auto",
-    "parallel",
-    "brave",
+    "auto", "gateway", "local", "model", "native", "parallel", "brave",
 ];
 pub const FETCH_ENGINES: &[&str] = &["local", "jina", "firecrawl", "parallel"];
-pub const DEFAULT_SEARCH_ENGINE: &str = MODEL_ENGINE;
-pub const MODEL_ENGINE: &str = "model";
+/// Every released version accepts `auto` (0.4.23 and earlier reject any name
+/// but `auto`, `parallel` and `brave`), so a config.json this version saves
+/// still loads in an older engine left running across an update.
+pub const DEFAULT_SEARCH_ENGINE: &str = "auto";
+/// How a result says the search model answered it.
+const MODEL_ENGINE: &str = "model";
 pub const DEFAULT_FETCH_ENGINE: &str = "local";
 /// `web_search_model`: a Claude model the gateway serves with Anthropic's
 /// `web_search` tool. The smallest one: it only searches and reports.
