@@ -264,52 +264,6 @@ pub fn definitions() -> Vec<Value> {
     ])
 }
 
-/// Static tool names for the system prompt's "Available tools" line. Mirrors
-/// the fixed entries in `definitions()` in the same order, with edit tools
-/// filtered to the enabled set; the subagent tools are only listed when they
-/// would actually be offered. Dynamic tools added per turn in
-/// `OpenAiClient::tool_definitions` (MCP, goal/plan) are not part
-/// of this list.
-pub fn prompt_tool_names(
-    edit_tools: &[String],
-    subagents: bool,
-    web_search: bool,
-    images: bool,
-) -> Vec<&'static str> {
-    let mut names = vec!["read"];
-    for name in crate::config::EDIT_TOOL_NAMES {
-        if edit_tools.iter().any(|tool| tool == name) {
-            names.push(name);
-        }
-    }
-    names.extend([
-        "bash",
-        "exec_command",
-        "write_stdin",
-        "ls",
-        "ripgrep",
-        "outline",
-        "checkpoint",
-        "web_fetch",
-    ]);
-    if web_search {
-        names.push("web_search");
-    }
-    if images {
-        names.push(crate::images::TOOL_NAME);
-    }
-    if subagents {
-        names.extend([
-            "spawn_agent",
-            "wait_agent",
-            "list_agents",
-            "send_message",
-            "close_agent",
-        ]);
-    }
-    names
-}
-
 fn with_function_tool_defaults(mut definitions: Vec<Value>) -> Vec<Value> {
     for definition in &mut definitions {
         if definition.get("type").and_then(Value::as_str) == Some("function") {
@@ -4509,59 +4463,6 @@ mod tests {
         assert!(tools
             .iter()
             .all(|tool| tool.get("strict") == Some(&json!(false))));
-    }
-
-    #[test]
-    fn prompt_tool_names_match_filtered_definitions() {
-        // Mirror of the static filter OpenAiClient::tool_definitions applies:
-        // definitions() minus disabled edit tools, before the conditional
-        // subagent/dynamic additions.
-        let edit_tools = crate::config::default_edit_tools();
-        let definitions = definitions();
-        let expected = definitions
-            .iter()
-            .filter_map(|tool| tool.get("name").and_then(Value::as_str))
-            .filter(|name| {
-                crate::config::canonical_edit_tool_name(name)
-                    .is_none_or(|canonical| edit_tools.iter().any(|tool| tool == canonical))
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(prompt_tool_names(&edit_tools, false, true, true), expected);
-        let without = prompt_tool_names(&edit_tools, false, false, false);
-        assert!(!without.contains(&"web_search"));
-        assert!(!without.contains(&"generate_image"));
-
-        let all = vec![
-            "str_replace".to_string(),
-            "hashline_edit".to_string(),
-            "write".to_string(),
-            "apply_patch".to_string(),
-        ];
-        let names = prompt_tool_names(&all, true, false, true);
-        assert_eq!(
-            names,
-            [
-                "read",
-                "str_replace",
-                "hashline_edit",
-                "write",
-                "apply_patch",
-                "bash",
-                "exec_command",
-                "write_stdin",
-                "ls",
-                "ripgrep",
-                "outline",
-                "checkpoint",
-                "web_fetch",
-                "generate_image",
-                "spawn_agent",
-                "wait_agent",
-                "list_agents",
-                "send_message",
-                "close_agent",
-            ]
-        );
     }
 
     #[test]

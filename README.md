@@ -152,7 +152,7 @@ lynshen daemon pair              # 打印一次性配对链接，5 分钟内在�
 | --- | --- |
 | `config.json` | 设置：服务商、模型、审批模式、沙箱、MCP 服务器等 |
 | `auth.json` | API key 和登录凭据。默认明文，`config.json` 里设 `"encrypt_secrets": true` 后加密，见 [docs/secrets.md](docs/secrets.md) |
-| `prompt.txt` | 系统提示词，可以自己改 |
+| `prompt.txt` | 系统提示词，可以自己改。没改过的文件在升级后会换成新的默认提示词，改过的保持不变 |
 | `sessions/` | 保存的会话，按项目分开 |
 | `skills/` | 安装的技能 |
 | `commands/` | 自定义斜杠命令 |

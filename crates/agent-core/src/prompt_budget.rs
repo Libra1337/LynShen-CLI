@@ -59,25 +59,17 @@ fn system_prompt(chat: bool) -> String {
     } else {
         DEFAULT_SYSTEM_PROMPT
     };
-    let edit_tools = default_edit_tools();
-    let mut prompt = build_system_prompt(
+    build_system_prompt(
         base,
         &PromptContext {
             date: "2026-10-09".to_string(),
             cwd: cwd(),
-            tools: crate::tools::prompt_tool_names(&edit_tools, true, true, true),
-            edit_tools,
-            project_instructions: Vec::new(),
-            skills: Vec::new(),
+            edit_tools: default_edit_tools(),
             chat,
+            sandbox: default_sandbox().prompt(),
+            ..PromptContext::default()
         },
-    );
-    let note = default_sandbox().prompt(&cwd());
-    if !note.is_empty() {
-        prompt.push_str("\n\n");
-        prompt.push_str(&note);
-    }
-    prompt
+    )
 }
 
 fn default_client(system_prompt: String) -> OpenAiClient {

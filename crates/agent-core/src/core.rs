@@ -2066,44 +2066,29 @@ impl AgentCore {
             self.provider_api_key(),
             &model_headers,
         );
-        let images_enabled = images.is_ok();
         self.tool_state.set_images(images);
-        let prompt_tools = crate::tools::prompt_tool_names(
-            &self.config.edit_tools,
-            true,
-            signed_in,
-            images_enabled,
-        );
-        let mut system_prompt = build_system_prompt(
+        let system_prompt = build_system_prompt(
             &base_prompt,
             &PromptContext {
                 date: current_utc_date(),
                 cwd: self.cwd.clone(),
-                tools: prompt_tools,
                 edit_tools: self.config.edit_tools.clone(),
                 project_instructions,
                 skills,
                 chat: self.chat,
+                sandbox: self
+                    .tool_state
+                    .sandbox()
+                    .map(|sandbox| sandbox.prompt())
+                    .unwrap_or_default(),
+                plan_mode: self.approval_mode.get() == ApprovalMode::Plan,
+                host: self
+                    .host
+                    .as_ref()
+                    .map(|host| (host.prompt)())
+                    .unwrap_or_default(),
             },
         );
-        if let Some(sandbox) = self.tool_state.sandbox() {
-            let note = sandbox.prompt(&self.cwd);
-            if !note.is_empty() {
-                system_prompt.push_str("\n\n");
-                system_prompt.push_str(&note);
-            }
-        }
-        if let Some(host) = &self.host {
-            let extra = (host.prompt)();
-            if !extra.trim().is_empty() {
-                system_prompt.push_str("\n\n");
-                system_prompt.push_str(extra.trim_end());
-            }
-        }
-        if self.approval_mode.get() == ApprovalMode::Plan && !self.chat {
-            system_prompt.push_str("\n\n");
-            system_prompt.push_str(crate::plan_mode::PROMPT_ADDENDUM);
-        }
 
         // Desktop edits subagent_models in config.json while engines run. An
         // unreadable file keeps the list this engine already has.

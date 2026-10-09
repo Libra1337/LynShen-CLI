@@ -6,7 +6,21 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const LEGACY_DEFAULT_SYSTEM_PROMPT: &str = r#"You are LynShen, a focused coding agent.
+pub const DEFAULT_SYSTEM_PROMPT: &str = r#"You are LynShen, a coding agent working in the user's project.
+
+- Finish the task end to end: read the relevant code, make the change, verify it, and report. Do not stop after exploring, at a partial change or at a failed tool call, unless the user asked only for a plan or an answer. In an empty project, create what the task needs (manifest, sources, tests).
+- Make the smallest change that fixes the root cause. Follow the project's existing code style, UI and wording. Do not add unrequested features, abstractions or silent fallbacks, and do not touch unrelated code.
+- Verify with the narrowest check that proves the change, such as a focused test, build or linter. If it fails, fix the cause and run it again. If you cannot verify, say so.
+- Do not invent facts about APIs, commands or the code: check them, or say you are unsure.
+- If the request is ambiguous in a way the code cannot settle, ask one short question. Otherwise state your assumption and go ahead.
+- Be concise. End with what changed, how you verified it, and any risks or open points."#;
+
+/// Built-in prompts of earlier versions. A prompt.txt that still holds one of
+/// them was never edited, so it moves to the current default; an edited one
+/// is the user's and stays.
+const PREVIOUS_DEFAULT_SYSTEM_PROMPTS: [&str; 2] = [
+    // The first built-in prompt.
+    r#"You are LynShen, a focused coding agent.
 
 Work with care before speed. Understand the task and the existing code before making changes. If the request is ambiguous or a key detail cannot be inferred safely, say so and ask a concise question. If there are multiple reasonable approaches, surface the tradeoff briefly.
 
@@ -22,9 +36,9 @@ Verify before claiming completion. Use the smallest meaningful checks for the ch
 
 For user-facing work, preserve the existing product language and design system. Build coherent, useful interfaces without fake data, decorative filler, or new visual styles unless requested.
 
-Communicate directly and concisely. Report behavior-level changes, important risks, verification results, and any remaining gaps."#;
-
-pub const DEFAULT_SYSTEM_PROMPT: &str = r#"You are LynShen, a focused coding agent.
+Communicate directly and concisely. Report behavior-level changes, important risks, verification results, and any remaining gaps."#,
+    // Its successor, the default up to 0.4.19.
+    r#"You are LynShen, a focused coding agent.
 
 Work with care before speed. Understand the task and the existing code before making changes. If the request is ambiguous or a key detail cannot be inferred safely, say so and ask a concise question. If there are multiple reasonable approaches, surface the tradeoff briefly.
 
@@ -46,7 +60,8 @@ Finish gate: do not end an implementation task after only listing or reading fil
 
 For user-facing work, preserve the existing product language and design system. Build coherent, useful interfaces without fake data, decorative filler, or new visual styles unless requested.
 
-Communicate directly and concisely. Report behavior-level changes, important risks, verification results, and any remaining gaps."#;
+Communicate directly and concisely. Report behavior-level changes, important risks, verification results, and any remaining gaps."#,
+];
 const PROMPT_FILE_NAME: &str = "prompt.txt";
 const DEFAULT_RETRY_ATTEMPTS: usize = 5;
 const DEFAULT_CONNECT_TIMEOUT_SECONDS: u64 = 30;
@@ -1967,10 +1982,18 @@ fn system_prompt_path() -> io::Result<PathBuf> {
 }
 
 fn ensure_system_prompt_file() -> io::Result<()> {
-    let path = system_prompt_path()?;
+    ensure_system_prompt_file_at(&system_prompt_path()?)
+}
+
+/// Writes the default prompt when the file is missing or still holds an
+/// earlier default; a prompt the user edited is left alone.
+fn ensure_system_prompt_file_at(path: &Path) -> io::Result<()> {
     if path.exists() {
-        let content = fs::read_to_string(&path)?;
-        if content.trim() == LEGACY_DEFAULT_SYSTEM_PROMPT.trim() {
+        let content = fs::read_to_string(path)?.replace("\r\n", "\n");
+        let unedited = PREVIOUS_DEFAULT_SYSTEM_PROMPTS
+            .iter()
+            .any(|previous| content.trim() == previous.trim());
+        if unedited {
             fs::write(path, format!("{DEFAULT_SYSTEM_PROMPT}\n"))?;
         }
         return Ok(());
@@ -2509,6 +2532,50 @@ mod tests {
             config.lynshen_groups,
             BTreeMap::from([("claude-opus-5-5".to_string(), "g1".to_string())])
         );
+    }
+
+    #[test]
+    fn prompt_file_moves_from_every_earlier_default_and_keeps_edits() {
+        let dir = std::env::temp_dir().join(format!(
+            "lynshen-prompt-file-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = dir.join("profile").join("prompt.txt");
+        let current = format!("{DEFAULT_SYSTEM_PROMPT}\n");
+
+        ensure_system_prompt_file_at(&path).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), current);
+
+        assert!(!PREVIOUS_DEFAULT_SYSTEM_PROMPTS.contains(&DEFAULT_SYSTEM_PROMPT));
+        for previous in PREVIOUS_DEFAULT_SYSTEM_PROMPTS {
+            for unedited in [
+                format!("{previous}\n"),
+                previous.to_string(),
+                previous.replace('\n', "\r\n"),
+            ] {
+                fs::write(&path, &unedited).unwrap();
+                ensure_system_prompt_file_at(&path).unwrap();
+                assert_eq!(fs::read_to_string(&path).unwrap(), current);
+            }
+        }
+
+        let edited = [
+            format!(
+                "{}\nAlways answer in French.\n",
+                PREVIOUS_DEFAULT_SYSTEM_PROMPTS[1]
+            ),
+            "My own prompt.\n".to_string(),
+        ];
+        for edited in edited {
+            fs::write(&path, &edited).unwrap();
+            ensure_system_prompt_file_at(&path).unwrap();
+            assert_eq!(fs::read_to_string(&path).unwrap(), edited);
+        }
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
