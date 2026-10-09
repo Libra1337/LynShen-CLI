@@ -7,6 +7,8 @@ use serde_json::{json, Value};
 use std::io::Read;
 use std::time::Duration;
 
+/// The smallest read cap a call may set (see `run`).
+const MIN_FETCH_BYTES: u64 = 32 * 1024;
 const MAX_FETCH_BYTES: u64 = 2 * 1024 * 1024;
 const ERROR_BODY_SNIPPET_BYTES: usize = 2048;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -22,7 +24,7 @@ pub fn definition() -> Value {
             "type": "object",
             "properties": {
                 "url": { "type": "string" },
-                "max_bytes": { "type": "number", "description": "Read cap below the 2 MB default." },
+                "max_bytes": { "type": "number", "description": "Read cap, 32 KB up to the 2 MB default." },
                 "raw": { "type": "boolean", "description": "Skip the HTML-to-text conversion." }
             },
             "required": ["url"]
@@ -37,13 +39,20 @@ pub fn run(args: &Value) -> Value {
     if let Err(error) = validate_url(url) {
         return json!({ "url": url, "error": error });
     }
-    let max_bytes = args
-        .get("max_bytes")
-        .and_then(Value::as_u64)
-        .map(|value| value.clamp(1, MAX_FETCH_BYTES))
-        .unwrap_or(MAX_FETCH_BYTES);
+    let max_bytes = read_cap(args);
     let raw = args.get("raw").and_then(Value::as_bool).unwrap_or_default();
     fetch(url, max_bytes, raw)
+}
+
+/// The bytes to read: the call's `max_bytes` within 32 KB and 2 MB. A cap of
+/// a few hundred bytes (models asked for 300 in 111 of 162 fetches) reads
+/// only a page's <head> or a JSON prefix, and the model fetches the same page
+/// again and again.
+fn read_cap(args: &Value) -> u64 {
+    args.get("max_bytes")
+        .and_then(Value::as_u64)
+        .map(|value| value.clamp(MIN_FETCH_BYTES, MAX_FETCH_BYTES))
+        .unwrap_or(MAX_FETCH_BYTES)
 }
 
 fn fetch(url: &str, max_bytes: u64, raw: bool) -> Value {
@@ -544,6 +553,17 @@ mod tests {
         assert_eq!(result["content_type"], "text/html");
         assert_eq!(result["text"], "T\n\nhi");
         assert_eq!(result["bytes"], body.len());
+    }
+
+    #[test]
+    fn a_tiny_read_cap_is_raised_to_32_kb() {
+        assert_eq!(read_cap(&json!({ "max_bytes": 300 })), 32 * 1024);
+        assert_eq!(read_cap(&json!({ "max_bytes": 100_000 })), 100_000);
+        assert_eq!(
+            read_cap(&json!({ "max_bytes": 5_000_000 })),
+            MAX_FETCH_BYTES
+        );
+        assert_eq!(read_cap(&json!({})), MAX_FETCH_BYTES);
     }
 
     #[test]
