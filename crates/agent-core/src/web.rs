@@ -302,6 +302,14 @@ fn local_search(args: &Value, fetcher: &dyn PageFetcher) -> Value {
                     failures.push(format!("{}: {}", source.engine, empty_page_reason(&page)));
                     continue;
                 }
+                // An engine the network redirects elsewhere answers a page of
+                // its own: results shaped right and about something else. Such
+                // a page names none of the query's words, so the next engine
+                // gets its turn rather than the model getting nonsense.
+                if !results_match_query(&query, &results) {
+                    failures.push(format!("{}: answered about something else", source.engine));
+                    continue;
+                }
                 crate::log_info!(
                     "web_search",
                     "searched",
@@ -335,6 +343,34 @@ fn local_search(args: &Value, fetcher: &dyn PageFetcher) -> Value {
         "query": query,
         "error": format!("no search engine answered ({}). Check the network or the HTTP_PROXY settings, or fetch a known URL with web_fetch.", failures.join("; ")),
     })
+}
+
+/// Whether results are about the query: taken together they name more than
+/// half of its words (longer than two characters, so "the" or "in" prove
+/// nothing). A page the network answers in place of the engine is about its
+/// own subject and names one word of the query at most — often the broadest
+/// one ("rust" for "rust ureq crate"). A query of only short or non-Latin
+/// words cannot be checked this way and counts as matching.
+fn results_match_query(query: &str, results: &[SearchResult]) -> bool {
+    let words: Vec<String> = query
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| word.chars().count() > 2 && word.is_ascii())
+        .map(str::to_ascii_lowercase)
+        .collect();
+    if words.is_empty() {
+        return true;
+    }
+    let text = results
+        .iter()
+        .map(|result| format!("{} {} {}", result.title, result.url, result.snippet))
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    let found = words
+        .iter()
+        .filter(|word| text.contains(word.as_str()))
+        .count();
+    found * 2 > words.len()
 }
 
 /// Why a page carried no results, as far as it says itself.
@@ -849,6 +885,87 @@ mod tests {
         assert_eq!(result["engine"], "bing");
         assert_eq!(fetcher.asked.borrow().len(), 1);
         assert!(result.get("note").is_none(), "{result}");
+    }
+
+    #[test]
+    fn an_engine_answering_about_something_else_does_not_count() {
+        // What this machine's exit gives for any query: a page of results
+        // shaped right and about nothing asked for.
+        const UNRELATED: &str = r#"<html><body><ol id="b_results">
+        <li class="b_algo"><h2><a href="https://huatu.com/">华图在线</a></h2><p>公务员考试培训</p></li>
+        </ol></body></html>"#;
+        let fetcher = FakeFetcher {
+            pages: vec![
+                ("www.bing.com", Ok(UNRELATED.to_string())),
+                ("cn.bing.com", Ok(UNRELATED.to_string())),
+                ("html.duckduckgo.com", Ok(DDG_PAGE.to_string())),
+            ],
+            asked: Default::default(),
+        };
+        let result = local_search(&json!({ "query": "example" }), &fetcher);
+        assert_eq!(result["engine"], "duckduckgo", "{result}");
+        assert_eq!(fetcher.asked.borrow().len(), 3);
+
+        // Every engine answering about something else is a failure, not a
+        // page of results the model would take for an answer.
+        let fetcher = FakeFetcher {
+            pages: vec![
+                ("www.bing.com", Ok(UNRELATED.to_string())),
+                ("cn.bing.com", Ok(UNRELATED.to_string())),
+                ("html.duckduckgo.com", Ok(UNRELATED.to_string())),
+            ],
+            asked: Default::default(),
+        };
+        let result = local_search(&json!({ "query": "ureq rust crate" }), &fetcher);
+        let error = result["error"].as_str().unwrap_or_default();
+        assert!(error.contains("something else"), "{result}");
+        assert!(result.get("results").is_none(), "{result}");
+
+        // What this machine really answers for "rust ureq crate": the Rust
+        // home page and tutorials. One word of three is not the query.
+        const BROAD: &str = r#"<html><body><ol id="b_results">
+        <li class="b_algo"><h2><a href="https://rust-lang.org/">Rust Programming Language</a></h2><p>Rust is blazingly fast.</p></li>
+        <li class="b_algo"><h2><a href="https://www.runoob.com/rust/">Rust 教程</a></h2><p>Rust 语言由 Mozilla 开发</p></li>
+        </ol></body></html>"#;
+        let fetcher = FakeFetcher {
+            pages: vec![
+                ("www.bing.com", Ok(BROAD.to_string())),
+                ("cn.bing.com", Ok(BROAD.to_string())),
+                ("html.duckduckgo.com", Ok(BROAD.to_string())),
+            ],
+            asked: Default::default(),
+        };
+        let result = local_search(&json!({ "query": "rust ureq crate" }), &fetcher);
+        assert!(
+            result["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("something else"),
+            "{result}"
+        );
+        // The same page for a query it does answer is a result.
+        let fetcher = FakeFetcher {
+            pages: vec![("www.bing.com", Ok(BROAD.to_string()))],
+            asked: Default::default(),
+        };
+        assert_eq!(
+            local_search(&json!({ "query": "rust language" }), &fetcher)["engine"],
+            "bing"
+        );
+    }
+
+    #[test]
+    fn a_query_the_results_cannot_be_checked_against_is_taken_as_it_is() {
+        // Only short or non-Latin words: nothing to compare, so the engine's
+        // answer stands.
+        let fetcher = FakeFetcher {
+            pages: vec![("www.bing.com", Ok(BING_PAGE.to_string()))],
+            asked: Default::default(),
+        };
+        assert_eq!(
+            local_search(&json!({ "query": "围棋 AI" }), &fetcher)["engine"],
+            "bing"
+        );
     }
 
     #[test]
