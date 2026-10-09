@@ -45,6 +45,25 @@ before `git push`.
 File tools (`write`, `edit`, `apply_patch`, …) check writes against the same
 rules in-process, and can read and write the configured directories.
 
+## Worktree subagents
+
+A subagent that works in its own git worktree (`isolation: "worktree"`, the
+`worker` role; see `docs/serve-protocol.md` → "Agent team") is confined to it:
+
+- Its commands start in the worktree; a `workdir` outside it is refused.
+- In the sandbox, the worktree, temp and package-cache directories are its
+  only writable places. The project around the worktree and the configured
+  read-write directories are read-only for it, even where they lie in temp.
+  The worktree's `.git` file and its real git directory stay read-only.
+- Leaving the sandbox (`escalate: true`) always asks you, whatever the
+  approval mode, unless an `allow` command rule matches (`git commit` by
+  default).
+- Its file tools write only inside the worktree.
+
+With the sandbox off (`full-access`, Windows) only the first and last points
+hold: a command started in the worktree can still write elsewhere by an
+absolute path.
+
 ## Settings
 
 In `~/.lynshen/config.json`:

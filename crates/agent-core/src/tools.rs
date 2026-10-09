@@ -317,7 +317,11 @@ fn run_tool_inner(
         "hashline_edit" => hashline_edit_file(&args, cwd, state),
         "write" => write_file(&args, cwd, state),
         "bash" | "execute" | "exec_command" | "shell_command" => {
-            let value = bash(&args, cwd, sandbox.as_ref(), &mut emit);
+            let confine = state
+                .confine
+                .as_ref()
+                .map(|confine| (confine.0.as_path(), confine.1.as_path()));
+            let value = bash(&args, cwd, sandbox.as_ref(), confine, &mut emit);
             if let Some(session_id) = value.get("session_id").and_then(Value::as_u64) {
                 state.own_shell(session_id);
             }
@@ -1246,10 +1250,13 @@ fn post_edit_anchor_block(content: &str, first: usize, last: usize) -> Option<St
 
 /// Runs a shell command. With a sandbox it runs inside it, unless the call
 /// carries `escalate: true` (the approval gate has already let it through).
+/// A confined agent's `(worktree, project)`: the command starts inside the
+/// worktree, and in the sandbox writes only there.
 fn bash(
     args: &Value,
     cwd: &Path,
     sandbox: Option<&crate::sandbox::SandboxPolicy>,
+    confine: Option<(&Path, &Path)>,
     emit: &mut impl FnMut(ToolExecutionEvent) -> Result<(), String>,
 ) -> Value {
     let Some(command) = args
@@ -1263,6 +1270,14 @@ fn bash(
         Ok(workdir) => workdir,
         Err(error) => return json!({ "command": command, "error": error }),
     };
+    if let Some((root, _)) = confine {
+        if !normalize_lexically(&workdir).starts_with(normalize_lexically(root)) {
+            return json!({
+                "command": command,
+                "error": format!("workdir {} is outside your worktree {}; run commands there", workdir.display(), root.display())
+            });
+        }
+    }
     let timeout = match optional_u64(args, "timeout") {
         Ok(timeout) => Duration::from_secs(timeout.unwrap_or(DEFAULT_BASH_TIMEOUT_SECS).max(1)),
         Err(error) => return json!({ "command": command, "error": error }),
@@ -1274,11 +1289,15 @@ fn bash(
 
     let (program, shell_args) = shell_command(command);
     let escalated = args.get("escalate").and_then(Value::as_bool) == Some(true);
-    let (program, shell_args) = match sandbox.filter(|_| !escalated) {
-        Some(sandbox) => match sandbox.wrap(program, &shell_args, &workdir) {
-            Ok(wrapped) => wrapped,
-            Err(error) => return json!({ "command": command, "error": error }),
-        },
+    let wrapped = sandbox.filter(|_| !escalated).map(|sandbox| match confine {
+        Some((root, project)) => {
+            sandbox.wrap_confined(program, &shell_args, root, project, &workdir)
+        }
+        None => sandbox.wrap(program, &shell_args, &workdir),
+    });
+    let (program, shell_args) = match wrapped {
+        Some(Ok(wrapped)) => wrapped,
+        Some(Err(error)) => return json!({ "command": command, "error": error }),
         None => (
             program.to_string(),
             shell_args.iter().map(|arg| arg.to_string()).collect(),
@@ -2537,6 +2556,9 @@ fn unread_or_stale_error(state: &ToolState, path: &Path, not_read: &str) -> Opti
 pub struct ToolState {
     inner: Arc<Mutex<ToolStateInner>>,
     reads: Arc<Mutex<HashMap<String, u64>>>,
+    /// A worktree subagent's (worktree, project): its shell commands start
+    /// inside the worktree and write nowhere else (see `wrap_confined`).
+    confine: Option<Arc<(PathBuf, PathBuf)>>,
 }
 
 enum ReadCheck {
@@ -2586,11 +2608,27 @@ impl ToolState {
         }
     }
 
+    /// The sandbox this agent runs in. A confined agent's has no extra
+    /// read-write directories: only its worktree (and temp and package
+    /// caches) are writable.
     pub fn sandbox(&self) -> Option<crate::sandbox::SandboxPolicy> {
-        self.inner
+        let sandbox = self
+            .inner
             .lock()
             .ok()
-            .and_then(|inner| inner.sandbox.clone())
+            .and_then(|inner| inner.sandbox.clone());
+        match (sandbox, &self.confine) {
+            (Some(sandbox), Some(_)) => Some(crate::sandbox::SandboxPolicy {
+                writable_dirs: Vec::new(),
+                ..sandbox
+            }),
+            (sandbox, _) => sandbox,
+        }
+    }
+
+    /// The worktree a confined agent works in.
+    pub(crate) fn confine_root(&self) -> Option<&Path> {
+        self.confine.as_ref().map(|confine| confine.0.as_path())
     }
 
     pub fn set_web(&self, web: Option<crate::web::WebTools>) {
@@ -2629,6 +2667,17 @@ impl ToolState {
         Self {
             inner: self.inner.clone(),
             reads: Arc::default(),
+            confine: self.confine.clone(),
+        }
+    }
+
+    /// `for_subagent` for an agent in its own worktree `root` of `project`:
+    /// its shell is confined to the worktree.
+    pub(crate) fn confined_to(&self, root: PathBuf, project: PathBuf) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            reads: Arc::default(),
+            confine: Some(Arc::new((root, project))),
         }
     }
 
@@ -5765,6 +5814,52 @@ mod tests {
             .unwrap()
             .contains("read-only"));
         assert!(!dir.join("src/b.txt").exists());
+    }
+
+    #[test]
+    fn a_confined_agents_commands_start_in_its_worktree() {
+        let project = test_dir("confined");
+        let worktree = project.join(".lynshen/agents/w");
+        fs::create_dir_all(worktree.join("sub")).unwrap();
+        let state = ToolState::default().confined_to(worktree.clone(), project.clone());
+        let run = |args: Value| -> Value {
+            serde_json::from_str(
+                &run_tool_with_events(
+                    "bash",
+                    &args.to_string(),
+                    &worktree,
+                    &[],
+                    &state,
+                    |_| Ok(()),
+                )
+                .output,
+            )
+            .unwrap()
+        };
+        let outside =
+            run(json!({ "command": "echo hi", "workdir": project.display().to_string() }));
+        assert!(
+            outside["error"]
+                .as_str()
+                .unwrap()
+                .contains("outside your worktree"),
+            "{outside}"
+        );
+        let escaped = run(json!({ "command": "echo hi", "workdir": "../.." }));
+        assert!(escaped["error"].as_str().is_some(), "{escaped}");
+        let inside = run(json!({ "command": "echo hi", "workdir": "sub" }));
+        assert!(inside.get("error").is_none(), "{inside}");
+        // Its sandbox has no read-write directories of the parent's.
+        state.set_sandbox(Some(crate::sandbox::SandboxPolicy {
+            writable_dirs: vec![project.clone()],
+            ..crate::sandbox::SandboxPolicy::default_for_platform()
+        }));
+        assert!(state.sandbox().unwrap().writable_dirs.is_empty());
+        assert_eq!(
+            state.for_subagent().confine_root(),
+            Some(worktree.as_path())
+        );
+        let _ = fs::remove_dir_all(project);
     }
 
     fn test_dir(name: &str) -> PathBuf {

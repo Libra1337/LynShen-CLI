@@ -215,6 +215,39 @@ impl SandboxPolicy {
         args: &[&str],
         cwd: &Path,
     ) -> Result<(String, Vec<String>), String> {
+        self.wrap_with(program, args, cwd, &[], cwd)
+    }
+
+    /// `wrap` for an agent confined to `root`, a subagent's worktree inside
+    /// `project`, started from `cwd` (inside `root`): `root`, temp and
+    /// package-cache directories are writable; `project` (around `root`)
+    /// and the read-write directories are read-only, even where they lie in
+    /// temp.
+    pub fn wrap_confined(
+        &self,
+        program: &str,
+        args: &[&str],
+        root: &Path,
+        project: &Path,
+        cwd: &Path,
+    ) -> Result<(String, Vec<String>), String> {
+        let mut denied = vec![project.to_path_buf()];
+        denied.extend(self.writable_dirs.iter().cloned());
+        let confined = SandboxPolicy {
+            writable_dirs: Vec::new(),
+            ..self.clone()
+        };
+        confined.wrap_with(program, args, root, &denied, cwd)
+    }
+
+    fn wrap_with(
+        &self,
+        program: &str,
+        args: &[&str],
+        root: &Path,
+        denied: &[PathBuf],
+        cwd: &Path,
+    ) -> Result<(String, Vec<String>), String> {
         let plain = || {
             (
                 program.to_string(),
@@ -227,7 +260,7 @@ impl SandboxPolicy {
         if cfg!(target_os = "macos") {
             let mut wrapped = vec![
                 "-p".to_string(),
-                self.seatbelt_profile(cwd),
+                self.seatbelt_profile_for(root, denied),
                 "--".to_string(),
                 program.to_string(),
             ];
@@ -235,7 +268,7 @@ impl SandboxPolicy {
             Ok(("/usr/bin/sandbox-exec".to_string(), wrapped))
         } else if cfg!(target_os = "linux") {
             let bwrap = find_bwrap().ok_or_else(bwrap_missing)?;
-            let mut wrapped = self.bwrap_args(cwd);
+            let mut wrapped = self.bwrap_args_for(root, denied, cwd);
             wrapped.push("--".to_string());
             wrapped.push(program.to_string());
             wrapped.extend(args.iter().map(|arg| arg.to_string()));
@@ -267,6 +300,13 @@ impl SandboxPolicy {
     /// writable roots (or into protected paths), reading credentials and,
     /// without network, outbound connections.
     pub fn seatbelt_profile(&self, cwd: &Path) -> String {
+        self.seatbelt_profile_for(cwd, &[])
+    }
+
+    /// With `denied` directories (a confined agent), writes to them are
+    /// denied, then `cwd` (which may lie in one) is opened again with its
+    /// protected paths closed: the last matching rule wins.
+    fn seatbelt_profile_for(&self, cwd: &Path, denied: &[PathBuf]) -> String {
         let mut profile =
             String::from("(version 1)\n(allow default)\n(deny file-write*\n  (require-all\n");
         for root in self.writable_roots(cwd) {
@@ -288,6 +328,24 @@ impl SandboxPolicy {
                 sbpl_string(&path)
             ));
         }
+        if !denied.is_empty() {
+            for dir in denied {
+                profile.push_str(&format!(
+                    "(deny file-write* (subpath {}))\n",
+                    sbpl_string(&real(dir))
+                ));
+            }
+            profile.push_str(&format!(
+                "(allow file-write* (subpath {}))\n",
+                sbpl_string(&real(cwd))
+            ));
+            for path in self.protected_paths(cwd) {
+                profile.push_str(&format!(
+                    "(deny file-write* (subpath {}))\n",
+                    sbpl_string(&path)
+                ));
+            }
+        }
         if !self.network {
             profile.push_str("(deny network-outbound (remote ip))\n");
         }
@@ -298,16 +356,37 @@ impl SandboxPolicy {
     /// bound read-write, protected paths re-bound read-only on top,
     /// credentials hidden and, without network, a new network namespace.
     pub fn bwrap_args(&self, cwd: &Path) -> Vec<String> {
+        self.bwrap_args_for(cwd, &[], cwd)
+    }
+
+    /// With `denied` directories (a confined agent), they are bound
+    /// read-only, then `root` (which may lie in one) read-write again with
+    /// its protected paths read-only on top; the shell starts in `cwd`.
+    fn bwrap_args_for(&self, root: &Path, denied: &[PathBuf], cwd: &Path) -> Vec<String> {
         let mut args: Vec<String> = ["--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc"]
             .iter()
             .map(|arg| arg.to_string())
             .collect();
         let path = |path: &Path| path.display().to_string();
-        for root in self.writable_roots(cwd).iter().filter(|root| root.exists()) {
-            args.extend(["--bind".to_string(), path(root), path(root)]);
+        for writable in self.writable_roots(root).iter().filter(|dir| dir.exists()) {
+            args.extend(["--bind".to_string(), path(writable), path(writable)]);
         }
-        for protected in self.protected_paths(cwd) {
+        for protected in self.protected_paths(root) {
             args.extend(["--ro-bind".to_string(), path(&protected), path(&protected)]);
+        }
+        if !denied.is_empty() {
+            for dir in denied
+                .iter()
+                .map(|dir| real(dir))
+                .filter(|dir| dir.exists())
+            {
+                args.extend(["--ro-bind".to_string(), path(&dir), path(&dir)]);
+            }
+            let root = real(root);
+            args.extend(["--bind".to_string(), path(&root), path(&root)]);
+            for protected in self.protected_paths(&root) {
+                args.extend(["--ro-bind".to_string(), path(&protected), path(&protected)]);
+            }
         }
         for secret in denied_reads().into_iter().filter(|secret| secret.exists()) {
             if secret.is_dir() {
@@ -724,5 +803,63 @@ mod tests {
         assert!(!run("echo no > .git/config"));
         assert!(!run(&format!("echo no > {}", outside.display())));
         assert!(!outside.exists());
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_confined_agent_writes_only_its_worktree() {
+        use std::process::Command;
+        let project = work("confined");
+        let worktree = project.join(".lynshen/agents/sub");
+        fs::write(
+            worktree.join(".git"),
+            "gitdir: ../../../.git/worktrees/sub\n",
+        )
+        .unwrap();
+        let extra =
+            real(&env::temp_dir()).join(format!("lynshen-sbx-extra-{}", std::process::id()));
+        fs::create_dir_all(&extra).unwrap();
+        let mut policy = policy(SandboxMode::WorkspaceWrite);
+        policy.writable_dirs = vec![extra.clone()];
+        let run = |script: &str| {
+            let (program, args) = policy
+                .wrap_confined("/bin/sh", &["-c", script], &worktree, &project, &worktree)
+                .unwrap();
+            Command::new(program)
+                .args(args)
+                .current_dir(&worktree)
+                .status()
+                .unwrap()
+                .success()
+        };
+        assert!(run("echo ok > inside.txt"));
+        assert!(worktree.join("inside.txt").exists());
+        // The project around the worktree, its git file and the parent's
+        // read-write directories are out of reach, though all sit in temp.
+        assert!(!run(&format!(
+            "echo no > {}",
+            project.join("escape.txt").display()
+        )));
+        assert!(!project.join("escape.txt").exists());
+        assert!(!run("echo no > .git"));
+        assert!(!run(&format!(
+            "echo no > {}",
+            extra.join("x.txt").display()
+        )));
+        assert!(!extra.join("x.txt").exists());
+        // Unconfined, the same policy writes both.
+        let (program, args) = policy
+            .wrap(
+                "/bin/sh",
+                &[
+                    "-c",
+                    &format!("echo yes > {}", extra.join("y.txt").display()),
+                ],
+                &project,
+            )
+            .unwrap();
+        assert!(Command::new(program).args(args).status().unwrap().success());
+        let _ = fs::remove_dir_all(&extra);
+        let _ = fs::remove_dir_all(&project);
     }
 }
