@@ -2158,8 +2158,8 @@ impl AgentCore {
         };
         self.context_overhead = Some(overhead);
         let request_items = self.session.request_context_items();
-        let (context_tokens, context_tokenizer) =
-            self.session.context_token_usage(&self.config.model);
+        let count = crate::tokens::count_values(&self.config.model, request_items.iter());
+        let (context_tokens, context_tokenizer) = (count.tokens, count.tokenizer);
         let model_context_budget = target_context_budget(
             &self.config.current_model_config(),
             self.config.compaction_threshold_percent,
