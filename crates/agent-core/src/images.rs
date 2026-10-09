@@ -435,11 +435,32 @@ fn request_error(error: ureq::Error) -> String {
             let message = serde_json::from_str::<Value>(&body)
                 .ok()
                 .and_then(|value| error_message(&value))
-                .unwrap_or_else(|| body.trim().chars().take(300).collect());
+                .unwrap_or_else(|| body_summary(&body));
             format!("the image API returned HTTP {code}: {message}")
         }
         ureq::Error::Transport(transport) => format!("the image request failed: {transport}"),
     }
+}
+
+/// One line about a body that is not a JSON error: a gateway or proxy often
+/// answers with an HTML page, whose title (or first line of text) says what
+/// happened. The markup itself is never reported.
+fn body_summary(body: &str) -> String {
+    let text = if body.trim_start().starts_with('<') {
+        // The extractor puts the page title first.
+        crate::web_fetch::extract_html_text(body)
+    } else {
+        body.to_string()
+    };
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    if line.is_empty() {
+        return "the response body held no message".to_string();
+    }
+    line.chars().take(200).collect()
 }
 
 fn error_message(value: &Value) -> Option<String> {
@@ -1148,6 +1169,21 @@ mod tests {
         let result = run_tool(json!({ "prompt": "fox" }), &dir, &state);
         assert_eq!(result["error"], "the image API returned no images");
         assert!(!dir.join("images").exists());
+
+        // An HTML error page is reported by its title, never as markup.
+        let page = "<!DOCTYPE html><html lang=\"zh-CN\"><head><title>502 Bad Gateway</title>\
+            <style>body{color:red}</style></head><body><h1>\u{7f51}\u{5173}\u{9519}\u{8bef}</h1></body></html>";
+        let (url, _requests) = serve(vec![format!(
+            "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{page}",
+            page.len()
+        )
+        .into_bytes()]);
+        let state = state_with(tools(&url));
+        let result = run_tool(json!({ "prompt": "fox" }), &dir, &state);
+        assert_eq!(
+            result["error"],
+            "the image API returned HTTP 502: 502 Bad Gateway"
+        );
 
         // Bad arguments and an unconfigured session fail before any request.
         let result = run_tool(json!({ "prompt": "fox", "n": 9 }), &dir, &state);
