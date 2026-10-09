@@ -518,12 +518,17 @@ struct SubagentRegistry {
     revision: u64,
     /// Bumped each time mail that wakes the main agent arrives.
     wake_stamp: u64,
+    /// Nicknames handed out so far, and where this session's sequence starts.
+    named: u64,
+    name_seed: u64,
 }
 
 struct SubagentRecord {
     path: String,
     parent_path: String,
     task_name: String,
+    /// What people call it (`青岚`): the task name addresses it.
+    nickname: String,
     message: String,
     model: String,
     reasoning_effort: String,
@@ -557,13 +562,16 @@ const MAX_KEPT_AGENTS: usize = 24;
 
 impl SubagentManager {
     pub(crate) fn new(config: AgentsConfig, shared: TeamShared) -> Self {
-        Self {
+        let manager = Self {
             inner: Arc::new(SubagentInner {
                 config: Mutex::new(config),
                 shared,
                 ..SubagentInner::default()
             }),
-        }
+        };
+        // Each session's agents start somewhere else in the name list.
+        manager.inner.state.lock().unwrap().name_seed = now_ms();
+        manager
     }
 
     pub(crate) fn config(&self) -> AgentsConfig {
@@ -688,6 +696,17 @@ impl SubagentManager {
         let mut slots = Vec::new();
         for spawn in spawns {
             let path = child_path(&spawn.parent_path, &spawn.task_name);
+            // A task run again keeps its name; a new one gets the next.
+            let nickname = match state.agents.get(&path) {
+                Some(previous) => previous.nickname.clone(),
+                None => {
+                    let taken: Vec<&str> =
+                        state.agents.values().map(|a| a.nickname.as_str()).collect();
+                    let name = crate::nicknames::pick(state.name_seed, state.named, &taken);
+                    state.named += 1;
+                    name
+                }
+            };
             let interrupt_flag = Arc::new(AtomicBool::new(false));
             let trace = crate::subagent_trace::SubagentTrace::new(&spawn.message);
             state.inboxes.remove(&path);
@@ -697,6 +716,7 @@ impl SubagentManager {
                     path: path.clone(),
                     parent_path: spawn.parent_path,
                     task_name: spawn.task_name,
+                    nickname,
                     message: spawn.message,
                     model: spawn.model,
                     reasoning_effort: spawn.reasoning_effort,
@@ -1740,6 +1760,7 @@ impl SubagentManager {
                     let result = agent.result.as_ref();
                     row["parent"] = json!(agent.parent_path);
                     row["task_name"] = json!(agent.task_name);
+                    row["nickname"] = json!(agent.nickname);
                     row["message"] = json!(summarize_to(&agent.message, 2000));
                     row["model"] = json!(agent.model);
                     row["effort"] = json!(agent.reasoning_effort);
@@ -1812,6 +1833,11 @@ impl SubagentManager {
             });
             let task_name = text("task_name")
                 .unwrap_or_else(|| path.rsplit('/').next().unwrap_or_default().to_string());
+            let nickname = text("nickname").unwrap_or_else(|| {
+                let taken: Vec<&str> = state.agents.values().map(|a| a.nickname.as_str()).collect();
+                crate::nicknames::pick(state.name_seed, state.named, &taken)
+            });
+            state.named += 1;
             let files_changed = row["files_changed"]
                 .as_array()
                 .map(|files| {
@@ -1829,6 +1855,7 @@ impl SubagentManager {
                     path: path.clone(),
                     parent_path: text("parent").unwrap_or_else(|| ROOT_PATH.to_string()),
                     task_name,
+                    nickname,
                     message,
                     model: text("model").unwrap_or_default(),
                     reasoning_effort: text("effort").unwrap_or_default(),
@@ -1887,7 +1914,8 @@ impl SubagentManager {
                 let result = agent.result.as_ref();
                 json!({
                     "id": agent.path,
-                    "label": agent.task_name,
+                    "label": agent.nickname,
+                    "task": agent.task_name,
                     "model": agent.model,
                     "effort": agent.reasoning_effort,
                     "state": agent.status.as_str(),
@@ -1931,7 +1959,7 @@ impl SubagentManager {
     pub(crate) fn describe(&self, path: &str) -> Option<AgentInfo> {
         let state = self.inner.state.lock().unwrap();
         state.agents.get(path).map(|agent| AgentInfo {
-            label: agent.task_name.clone(),
+            label: agent.nickname.clone(),
             model: agent.model.clone(),
             tool_use_id: agent.tool_use_id.clone(),
             role: agent.role.clone(),
@@ -2579,6 +2607,7 @@ fn agent_json(agent: &SubagentRecord) -> Value {
     json!({
         "task_name": agent.path,
         "name": agent.task_name,
+        "nickname": agent.nickname,
         "parent": agent.parent_path,
         "depth": agent.depth,
         "status": status_json(agent),

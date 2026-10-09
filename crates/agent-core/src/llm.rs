@@ -1696,10 +1696,13 @@ impl OpenAiClient {
             );
             started.push((path, workdir));
         }
+        // The name the user sees for it: call it that when telling them.
+        let nickname = |path: &str| manager.describe(path).map(|info| info.label);
         let mut result = if attempts == 1 {
             let (path, workdir) = &started[0];
             json!({
                 "task_name": task_name,
+                "nickname": nickname(path),
                 "path": path,
                 "status": "running",
                 "workdir": workdir,
@@ -1710,7 +1713,7 @@ impl OpenAiClient {
                 "attempt_group": task_name,
                 "attempts": started
                     .iter()
-                    .map(|(path, workdir)| json!({ "path": path, "workdir": workdir }))
+                    .map(|(path, workdir)| json!({ "path": path, "nickname": nickname(path), "workdir": workdir }))
                     .collect::<Vec<_>>(),
                 "status": "running",
                 "note": format!("wait_agent on {task_name} returns once every attempt finished, with their diffs; then pick_attempt applies one."),

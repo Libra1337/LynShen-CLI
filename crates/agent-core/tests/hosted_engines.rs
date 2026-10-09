@@ -722,7 +722,12 @@ fn subagents_report_their_work_to_the_agent_trace() {
             _ => None,
         })
         .expect("subagent_lifecycle");
-    assert_eq!(lifecycle, ("lister".to_string(), "call_1".to_string()));
+    // Its card shows the nickname it was given, not the task name.
+    assert_eq!(lifecycle.1, "call_1");
+    assert!(
+        !lifecycle.0.is_empty() && lifecycle.0 != "lister",
+        "{lifecycle:?}"
+    );
     assert!(events
         .iter()
         .any(|event| matches!(event, AgentEvent::AgentRuns(_))));
@@ -732,7 +737,7 @@ fn subagents_report_their_work_to_the_agent_trace() {
     };
     let row = rows
         .iter()
-        .find(|row| row["label"] == "lister")
+        .find(|row| row["task"] == "lister")
         .expect("row");
     assert_eq!(row["id"], "/root/lister");
     assert_eq!(row["tool_use_id"], "call_1");
@@ -764,7 +769,7 @@ fn subagents_report_their_work_to_the_agent_trace() {
     let AgentEvent::AgentRuns(rows) = core.agent_runs_event() else {
         unreachable!()
     };
-    assert!(rows.iter().any(|row| row["label"] == "lister"));
+    assert!(rows.iter().any(|row| row["task"] == "lister"));
     assert!(matches!(
         core.subagent_transcript_event("/root/lister"),
         AgentEvent::SubagentTranscript { items: Some(_), .. }
@@ -917,7 +922,7 @@ fn a_worker_runs_in_a_worktree_that_the_merge_op_brings_back() {
         };
         let row = rows
             .into_iter()
-            .find(|row| row["label"] == "builder")
+            .find(|row| row["task"] == "builder")
             .expect("row");
         if row["state"] != "running" && row["state"] != "pending" && worker_event(&events) {
             break row;
@@ -1039,7 +1044,7 @@ fn rows(core: &AgentCore) -> Vec<serde_json::Value> {
 fn row(core: &AgentCore, label: &str) -> serde_json::Value {
     rows(core)
         .into_iter()
-        .find(|row| row["label"] == label)
+        .find(|row| row["task"] == label)
         .unwrap_or_else(|| panic!("no agent {label}"))
 }
 
