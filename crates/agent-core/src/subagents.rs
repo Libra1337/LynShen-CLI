@@ -21,6 +21,11 @@ pub(crate) const BUDGET_EXHAUSTED: &str = "budget_exhausted";
 /// The main agent's path; its subagents are `/root/<task_name>`.
 pub(crate) const ROOT_PATH: &str = "/root";
 const MESSAGE_SUMMARY_CHARS: usize = 200;
+/// How much of a task and of a result list_agents shows.
+const LIST_MESSAGE_CHARS: usize = 300;
+const LIST_RESULT_CHARS: usize = 800;
+const LIST_CLIPPED_NOTE: &str =
+    "Long results are cut short here; wait_agent on a finished agent returns its whole result.";
 
 /// An isolated working directory for one subagent. File-tool writes
 /// (write/str_replace/hashline_edit/apply_patch) are confined to this root by
@@ -1082,9 +1087,14 @@ impl SubagentManager {
                     .map(|prefix| agent.path.starts_with(prefix))
                     .unwrap_or(true)
             })
-            .map(agent_json)
+            .map(agent_row)
             .collect::<Vec<_>>();
-        json!({ "agents": agents })
+        let clipped = agents.iter().any(|row| row["result"]["clipped"] == true);
+        let mut listed = json!({ "agents": agents });
+        if clipped {
+            listed["note"] = json!(LIST_CLIPPED_NOTE);
+        }
+        listed
     }
 
     /// Waits until one of `targets` finishes (every attempt, for a best-of-N
@@ -2603,26 +2613,57 @@ fn wait_statuses(state: &SubagentRegistry, targets: &[String]) -> Value {
     Value::Object(statuses)
 }
 
-fn agent_json(agent: &SubagentRecord) -> Value {
-    json!({
+/// A list_agents row: who it is, its state, and the start of its task and
+/// of its result. The whole result reached the requester when the agent
+/// finished, and wait_agent on it returns it again, so a listing does not
+/// repeat it: ten finished agents once put 100k tokens of their reports
+/// into the conversation on every list_agents call.
+fn agent_row(agent: &SubagentRecord) -> Value {
+    let mut row = json!({
         "task_name": agent.path,
         "name": agent.task_name,
         "nickname": agent.nickname,
         "parent": agent.parent_path,
         "depth": agent.depth,
-        "status": status_json(agent),
+        "status": agent.status.as_str(),
         "model": agent.model,
         "reasoning_effort": agent.reasoning_effort,
         "role": agent.role,
         "background": agent.background,
         "attempt_group": agent.attempt_group,
         "attempt": agent.attempt,
-        "message": agent.message,
+        "message": summarize_to(&agent.message, LIST_MESSAGE_CHARS),
         "started_at_ms": agent.started_at_ms,
         "completed_at_ms": agent.completed_at_ms,
         "workdir": agent.workdir,
-        "result": agent.result.as_ref().map(result_json),
-    })
+    });
+    if let Some(error) = &agent.error {
+        row["error"] = json!(summarize_to(error, LIST_RESULT_CHARS));
+    }
+    if let Some(result) = &agent.result {
+        let mut shown = result_json(result);
+        let mut clipped = false;
+        for key in ["summary", "partial_output"] {
+            let text = shown[key].as_str().unwrap_or_default().to_string();
+            if text.trim().chars().count() > LIST_RESULT_CHARS {
+                shown[format!("{key}_chars")] = json!(text.chars().count());
+                shown[key] = json!(summarize_to(&text, LIST_RESULT_CHARS));
+                clipped = true;
+            }
+        }
+        // The same text twice (a finished agent's output is both) is shown once.
+        if shown["partial_output"] == shown["summary"] {
+            if let Some(fields) = shown.as_object_mut() {
+                fields.remove("partial_output");
+                fields.remove("partial_output_chars");
+            }
+        }
+        if clipped {
+            shown["clipped"] = json!(true);
+        }
+        row["result"] = shown;
+    }
+    row
 }
 
 fn status_json(agent: &SubagentRecord) -> Value {
@@ -2798,8 +2839,47 @@ mod tests {
         assert_eq!(result["status"]["/root/worker"]["completed"], "done");
         assert!(result.get("messages").is_none());
         let listed = manager.list_agents("/root", None);
+        assert_eq!(listed["agents"][0]["status"], "completed");
         assert_eq!(listed["agents"][0]["result"]["summary"], "done");
         assert_eq!(listed["agents"][0]["result"]["tool_calls"], 0);
+        assert!(listed["agents"][0]["result"]
+            .get("partial_output")
+            .is_none());
+        assert!(listed.get("note").is_none());
+    }
+
+    #[test]
+    fn listing_agents_does_not_repeat_their_reports() {
+        let manager = SubagentManager::default();
+        let report = "研究结论。".repeat(2_000);
+        for name in ["a", "b"] {
+            manager.reserve_spawn(spawn(name)).unwrap();
+            manager.finish_ok(
+                &format!("/root/{name}"),
+                SubagentRunResult {
+                    summary: report.clone(),
+                    partial_output: report.clone(),
+                    ..run_result(1, 1)
+                },
+            );
+        }
+        let listed = manager.list_agents("/root", None);
+        let size = listed.to_string().chars().count();
+        assert!(size < 4_000, "{size} chars listed");
+        let row = &listed["agents"][0];
+        assert_eq!(row["status"], "completed");
+        assert_eq!(row["result"]["clipped"], true);
+        assert_eq!(row["result"]["summary_chars"], 10_000);
+        assert!(row["result"]["summary"]
+            .as_str()
+            .unwrap()
+            .starts_with("研究结论。"));
+        assert!(listed["note"].as_str().unwrap().contains("wait_agent"));
+        // The whole report is still there for whoever asks for it.
+        let waited = manager
+            .wait_agents("/root", vec!["a".to_string()], 1)
+            .unwrap();
+        assert_eq!(waited["status"]["/root/a"]["completed"], report.as_str());
     }
 
     fn run_result(input: u64, output: u64) -> SubagentRunResult {
@@ -3001,7 +3081,12 @@ mod tests {
         let rows = manager.runs_json();
         assert_eq!(rows[0]["state"], "budget_exhausted");
         let listed = manager.list_agents("/root", Some("a"));
-        assert_eq!(listed["agents"][0]["status"]["partial_output"], "half done");
+        assert_eq!(listed["agents"][0]["status"], "budget_exhausted");
+        assert!(listed["agents"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("used up"));
+        assert_eq!(listed["agents"][0]["result"]["partial_output"], "half done");
     }
 
     #[test]
