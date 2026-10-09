@@ -1034,7 +1034,7 @@ impl OpenAiClient {
         (system, mcp)
     }
 
-    fn tool_definitions(&self) -> Vec<Value> {
+    pub(crate) fn tool_definitions(&self) -> Vec<Value> {
         if let Some(host) = self.host.as_ref().filter(|host| host.exclusive) {
             return host.tools.clone();
         }

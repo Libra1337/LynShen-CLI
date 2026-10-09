@@ -16,6 +16,8 @@ mod mcp;
 mod oauth;
 mod plan_mode;
 mod prompt;
+#[cfg(test)]
+mod prompt_budget;
 pub mod protocol;
 pub mod provider_login;
 mod providers;

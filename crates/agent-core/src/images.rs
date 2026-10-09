@@ -95,6 +95,21 @@ impl ImageTools {
     }
 }
 
+#[cfg(test)]
+impl ImageTools {
+    /// A configured image tool that is never called.
+    pub(crate) fn for_test() -> Self {
+        Self {
+            base_url: "https://api.lynshen.org/v1".to_string(),
+            api_key: "test-key".to_string(),
+            model: "gpt-image-2".to_string(),
+            headers: HashMap::new(),
+            connect_timeout: Duration::from_secs(1),
+            read_timeout: Duration::from_secs(1),
+        }
+    }
+}
+
 /// The image model: the call's `model`, else `image_model` from config.json,
 /// else the first configured model whose name contains "image".
 pub(crate) fn resolve_model<'a>(
