@@ -21,6 +21,7 @@ mod prompt_budget;
 pub mod protocol;
 pub mod provider_login;
 mod providers;
+mod roles;
 pub mod sandbox;
 mod search;
 mod secrets;

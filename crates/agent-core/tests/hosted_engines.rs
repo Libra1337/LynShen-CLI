@@ -627,3 +627,144 @@ fn a_steered_message_joins_the_running_turn_without_stopping_its_tool() {
         .count();
     assert_eq!(turns, 1, "one turn, not a restart");
 }
+
+fn git(dir: &Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["-c", "user.email=t@example.com", "-c", "user.name=t"])
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "git {args:?}: {output:?}");
+}
+
+#[test]
+fn a_worker_runs_in_a_worktree_that_the_merge_op_brings_back() {
+    let _guard = setup();
+    let dir = temp_dir("team-merge");
+    git(&dir, &["init", "-q"]);
+    fs::write(dir.join("README.md"), "hello\n").unwrap();
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-qm", "init"]);
+    let mut core = open(&dir, ApprovalMode::FullAccess);
+
+    let args = serde_json::json!({ "task_name": "builder", "role": "worker", "message": "hello" });
+    core.submit_user_message(format!("CALL spawn_agent {args}"));
+    let mut events = pump(&mut core, is_ready);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let row = loop {
+        events.extend(core.poll_events());
+        let AgentEvent::AgentRuns(rows) = core.agent_runs_event() else {
+            unreachable!()
+        };
+        let row = rows
+            .into_iter()
+            .find(|row| row["label"] == "builder")
+            .expect("row");
+        if row["state"] != "running" && row["state"] != "pending" {
+            break row;
+        }
+        assert!(Instant::now() < deadline, "the worker never finished");
+        thread::sleep(Duration::from_millis(20));
+    };
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::SubagentLifecycle { role: Some(role), .. } if role == "worker"
+    )));
+    assert_eq!(row["role"], "worker");
+    assert_eq!(row["isolation"], "worktree");
+    let workdir = std::path::PathBuf::from(row["workdir"].as_str().unwrap());
+    assert!(workdir.starts_with(dir.join(".lynshen/agents")));
+    // What the worker wrote, in its own worktree only.
+    fs::write(workdir.join("feature.txt"), "done\n").unwrap();
+    assert!(!dir.join("feature.txt").exists());
+
+    let op = serde_json::json!({ "op": "merge_agent", "target": "builder", "action": "apply" });
+    let (_, events) = lynshen_agent_core::protocol::apply_op(&mut core, &op);
+    let merged = events
+        .into_iter()
+        .map(lynshen_agent_core::protocol::event_json)
+        .collect::<Vec<_>>();
+    let result = merged
+        .iter()
+        .find(|event| event["type"] == "merge_result")
+        .expect("merge_result");
+    assert_eq!(
+        result,
+        &serde_json::json!({
+            "type": "merge_result", "target": "/root/builder", "action": "apply",
+            "ok": true, "files": ["feature.txt"], "conflicts": [], "error": null
+        })
+    );
+    assert!(merged
+        .iter()
+        .any(|event| event["type"] == "subagent_lifecycle"
+            && event["status"] == "merged"
+            && event["role"] == "worker"));
+    let runs = merged
+        .iter()
+        .find(|event| event["type"] == "agent_runs")
+        .expect("agent_runs");
+    assert_eq!(runs["agents"][0]["state"], "merged");
+    assert_eq!(
+        fs::read_to_string(dir.join("feature.txt")).unwrap(),
+        "done\n"
+    );
+    assert!(!workdir.exists());
+
+    // Nothing left to merge: the op still answers with a merge_result.
+    let (_, events) = lynshen_agent_core::protocol::apply_op(&mut core, &op);
+    let again = events
+        .into_iter()
+        .map(lynshen_agent_core::protocol::event_json)
+        .find(|event| event["type"] == "merge_result")
+        .expect("merge_result");
+    assert_eq!(again["ok"], false);
+    assert!(again["error"].as_str().unwrap().contains("no worktree"));
+}
+
+#[test]
+fn a_plan_step_names_its_agent_and_the_agent_events_carry_the_step() {
+    let _guard = setup();
+    let dir = temp_dir("team-plan");
+    let mut core = open(&dir, ApprovalMode::FullAccess);
+
+    let plan = serde_json::json!({ "plan": [
+        { "step": "Map the parser", "status": "in_progress", "agent": "mapper", "files": ["src/parse.rs"] },
+        { "step": "Write tests", "status": "pending" }
+    ] });
+    core.submit_user_message(format!("CALL update_plan {plan}"));
+    let events = pump(&mut core, is_ready);
+    let items = events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::Plan(items) => Some(items.clone()),
+            _ => None,
+        })
+        .expect("plan event");
+    assert_eq!(items[0].agent.as_deref(), Some("mapper"));
+    assert_eq!(items[0].files, ["src/parse.rs"]);
+    assert_eq!(items[1].agent, None);
+
+    let args = serde_json::json!({ "task_name": "mapper", "role": "explorer", "message": "look" });
+    core.submit_user_message(format!("CALL spawn_agent {args}"));
+    // Whole batches: the lifecycle events follow `ready` in the same batch.
+    let mut events = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !events.iter().any(is_ready) && Instant::now() < deadline {
+        events.extend(core.poll_events());
+        thread::sleep(Duration::from_millis(10));
+    }
+    let (role, step) = events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::SubagentLifecycle {
+                role, plan_step, ..
+            } => Some((role.clone(), plan_step.clone())),
+            _ => None,
+        })
+        .expect("subagent_lifecycle");
+    assert_eq!(role.as_deref(), Some("explorer"));
+    assert_eq!(step.as_deref(), Some("Map the parser"));
+}

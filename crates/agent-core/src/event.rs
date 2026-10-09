@@ -90,10 +90,14 @@ pub struct GoalView {
     pub updated_at: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PlanItem {
     pub step: String,
     pub status: String,
+    /// The subagent doing this step (its path or task name), when one is.
+    pub agent: Option<String>,
+    /// Files the step is expected to write.
+    pub files: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -196,6 +200,36 @@ pub enum AgentEvent {
         label: String,
         model: String,
         tool_use_id: String,
+        /// The role it was started with, if any.
+        role: Option<String>,
+        /// The plan step it works on: from spawn_agent, or the update_plan
+        /// step that names it.
+        plan_step: Option<String>,
+    },
+    /// An agent sent another a message (`send_message`).
+    AgentMessage {
+        from: String,
+        to: String,
+        /// The message, cut to 200 characters.
+        summary: String,
+    },
+    /// merge_agent ran (from the model or the `merge_agent` op).
+    MergeResult {
+        target: String,
+        action: String,
+        ok: bool,
+        /// Files the worktree changes (applied when `ok`).
+        files: Vec<String>,
+        /// Files that did not merge; nothing was written.
+        conflicts: Vec<String>,
+        /// Why the merge could not run at all.
+        error: Option<String>,
+    },
+    /// Tokens the subagents of the running turn used, against
+    /// `agents.turn_token_budget`.
+    TeamBudget {
+        used: u64,
+        limit: u64,
     },
     /// Every subagent of the session (`agent_runs` rows, oldest first).
     AgentRuns(Vec<serde_json::Value>),

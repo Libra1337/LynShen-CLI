@@ -25,7 +25,7 @@ use crate::{
         SessionSummary, ThreadGoal, ThreadGoalStatus,
     },
     skills,
-    subagents::SubagentManager,
+    subagents::{SubagentManager, TeamEvent, TeamShared, ROOT_PATH},
     trust::{self, TrustStore},
     update::{self, UpdateNotice},
 };
@@ -201,6 +201,9 @@ pub struct AgentCore {
     resume_summary_running: bool,
     interrupt_flag: Arc<AtomicBool>,
     subagent_manager: SubagentManager,
+    /// What every turn's subagent manager shares: worktrees still to merge
+    /// and the plan (see `TeamShared`).
+    team: TeamShared,
     /// Messages steered into the running turn, until the model reads them.
     steered_pending: Vec<String>,
     /// Agents of earlier turns: (agent_runs row, transcript), newest last.
@@ -269,6 +272,19 @@ impl AgentCore {
         })?;
         let tool_state = crate::tools::ToolState::default();
         tool_state.set_sandbox(Some(config.sandbox.clone()));
+        // Subagent worktrees left behind by earlier sessions, past their keep
+        // time; git may take a moment, so off the startup path.
+        let keep_days = config.agents.keep_worktrees_days;
+        let (stale_cwd, stale_profile) = (cwd.clone(), profile_dir()?);
+        thread::spawn(move || {
+            let removed =
+                crate::subagents::remove_stale_workspaces(&stale_cwd, &stale_profile, keep_days);
+            if removed > 0 {
+                crate::log_info!("subagent", "removed old worktrees", count = removed);
+            }
+        });
+        let team = TeamShared::default();
+        let subagent_manager = SubagentManager::new(config.agents.clone(), team.clone());
         let session = SessionStore::new();
         // A fresh session id is unique, so this only fails on IO problems.
         let session_lock = SessionLock::acquire(&profile_dir()?, &cwd, session.session_id()).ok();
@@ -306,7 +322,8 @@ impl AgentCore {
             plan_draft: None,
             resume_summary_running: false,
             interrupt_flag: Arc::new(AtomicBool::new(false)),
-            subagent_manager: SubagentManager::default(),
+            subagent_manager,
+            team,
             steered_pending: Vec::new(),
             past_subagents: Vec::new(),
             agent_runs_revision: 0,
@@ -1867,25 +1884,35 @@ impl AgentCore {
     }
 
     fn drain_subagent_events(&mut self) -> Vec<AgentEvent> {
-        let mut events: Vec<AgentEvent> = self
-            .subagent_manager
-            .drain_events()
-            .into_iter()
-            .map(|event| {
-                let (label, model, tool_use_id) = self
-                    .subagent_manager
-                    .describe(&event.path)
-                    .unwrap_or_default();
-                AgentEvent::SubagentLifecycle {
-                    path: event.path,
-                    status: event.status,
-                    message: event.message,
-                    label,
-                    model,
-                    tool_use_id,
+        let mut events = Vec::new();
+        for event in self.subagent_manager.drain_events() {
+            events.push(match event {
+                TeamEvent::Lifecycle {
+                    path,
+                    status,
+                    message,
+                } => self.lifecycle_event(path, status, message),
+                TeamEvent::Message { from, to, summary } => {
+                    AgentEvent::AgentMessage { from, to, summary }
                 }
-            })
-            .collect();
+                TeamEvent::Merge {
+                    target,
+                    action,
+                    ok,
+                    files,
+                    conflicts,
+                    error,
+                } => AgentEvent::MergeResult {
+                    target,
+                    action,
+                    ok,
+                    files,
+                    conflicts,
+                    error,
+                },
+                TeamEvent::Budget { used, limit } => AgentEvent::TeamBudget { used, limit },
+            });
+        }
         // The agent trace: at most two refreshes a second while agents work;
         // a lifecycle change goes out at once.
         let revision = self.subagent_manager.trace_revision();
@@ -1901,6 +1928,88 @@ impl AgentCore {
             }
         }
         events
+    }
+
+    /// A `subagent_lifecycle` event. An agent of an earlier turn (merged or
+    /// discarded since) is described from, and updates, its archived row.
+    fn lifecycle_event(&mut self, path: String, status: String, message: String) -> AgentEvent {
+        let info = match self.subagent_manager.describe(&path) {
+            Some(info) => info,
+            None => {
+                let row = self
+                    .past_subagents
+                    .iter_mut()
+                    .rev()
+                    .map(|(row, _)| row)
+                    .find(|row| row["id"] == path.as_str());
+                match row {
+                    Some(row) => {
+                        row["state"] = json!(status);
+                        let text = |key: &str| row[key].as_str().map(str::to_string);
+                        crate::subagents::AgentInfo {
+                            label: text("label").unwrap_or_default(),
+                            model: text("model").unwrap_or_default(),
+                            tool_use_id: text("tool_use_id").unwrap_or_default(),
+                            role: text("role"),
+                            plan_step: text("plan_step"),
+                        }
+                    }
+                    None => Default::default(),
+                }
+            }
+        };
+        let plan_step = info.plan_step.or_else(|| {
+            let name = path.rsplit('/').next().unwrap_or_default();
+            self.plan
+                .iter()
+                .find(|item| {
+                    item.agent
+                        .as_deref()
+                        .is_some_and(|agent| agent == path || agent == name)
+                })
+                .map(|item| item.step.clone())
+        });
+        AgentEvent::SubagentLifecycle {
+            path,
+            status,
+            message,
+            label: info.label,
+            model: info.model,
+            tool_use_id: info.tool_use_id,
+            role: info.role,
+            plan_step,
+        }
+    }
+
+    /// The `merge_agent` op (the desktop's merge and discard buttons): runs
+    /// merge_agent for the main agent's subagent `target` and emits its
+    /// `merge_result`, lifecycle and `agent_runs` events.
+    pub fn merge_agent(&mut self, target: &str, action: &str) -> Vec<AgentEvent> {
+        if target.trim().is_empty() {
+            return vec![AgentEvent::Error("merge_agent requires target".to_string())];
+        }
+        let _ = self.subagent_manager.merge_agent(ROOT_PATH, target, action);
+        let mut events = self.drain_subagent_events();
+        if !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::AgentRuns(_)))
+        {
+            events.push(self.agent_runs_event());
+        }
+        events
+    }
+
+    /// Whether the latest plan proposed on this branch was approved.
+    fn latest_plan_approved(&self) -> bool {
+        self.session
+            .branch()
+            .into_iter()
+            .rev()
+            .find_map(|entry| match &entry.kind {
+                EntryKind::ProposedPlan { status, .. } => Some(status == "approved"),
+                _ => None,
+            })
+            .unwrap_or(false)
     }
 
     /// A turn that ended before reading what was steered into it: those
@@ -2002,7 +2111,6 @@ impl AgentCore {
         }
         self.archive_subagents();
         self.requeue_unread_steers();
-        self.subagent_manager = SubagentManager::default();
         let base_prompt = match self.config.system_prompt() {
             Ok(_) if self.chat => crate::chat::CHAT_SYSTEM_PROMPT.to_string(),
             Ok(prompt) => prompt,
@@ -2061,6 +2169,12 @@ impl AgentCore {
         // groups in config.json while engines run. An unreadable file keeps
         // the values this engine already has.
         let _ = self.config.reload_live_settings();
+        self.subagent_manager = SubagentManager::new(self.config.agents.clone(), self.team.clone());
+        self.team.set_plan(
+            self.latest_plan_approved(),
+            self.plan.iter().map(|item| item.step.clone()).collect(),
+        );
+        let roles = crate::roles::discover(self.config.profile_dir(), &self.cwd, project_skills);
         let model_headers = self.model_headers();
         let images = crate::images::ImageTools::from_config(
             &self.config,
@@ -2127,6 +2241,7 @@ impl AgentCore {
             tool_state: self.tool_state.clone(),
             host: self.host.clone(),
             subagent_manager: Some(self.subagent_manager.clone()),
+            roles,
             hooks: self.hooks.clone(),
         }) else {
             let mut events = save_event;
@@ -2402,6 +2517,7 @@ impl AgentCore {
             tool_state: crate::tools::ToolState::default(),
             host: None,
             subagent_manager: None,
+            roles: Vec::new(),
             hooks: Hooks::default(),
         })
     }
@@ -2456,6 +2572,7 @@ impl AgentCore {
             tool_state: crate::tools::ToolState::default(),
             host: None,
             subagent_manager: None,
+            roles: Vec::new(),
             hooks: Hooks::default(),
         })
     }
@@ -2680,6 +2797,29 @@ impl AgentCore {
                 is_error: false,
             }];
             events.extend(self.submit_user_message(decision_message(&action, None)));
+            return events;
+        }
+        // A merge runs here: the worktree registry lives in this engine.
+        if action.name == "merge_agent" {
+            let args = serde_json::from_str::<Value>(&action.arguments).unwrap_or_default();
+            let text = |key: &str| args[key].as_str().unwrap_or_default().to_string();
+            let result =
+                self.subagent_manager
+                    .merge_agent(ROOT_PATH, &text("target"), &text("action"));
+            let (output, is_error) = match result {
+                Ok(value) => (value.to_string(), false),
+                Err(error) => (json!({ "error": error }).to_string(), true),
+            };
+            let mut events = self.drain_subagent_events();
+            events.push(AgentEvent::ActionDecided {
+                id: action.id.clone(),
+                allow: true,
+                output: Some(output.clone()),
+                is_error,
+            });
+            events.extend(
+                self.submit_user_message(decision_message(&action, Some((&output, is_error)))),
+            );
             return events;
         }
         let tx = self.action_tx.clone();
@@ -3250,12 +3390,35 @@ impl AgentCore {
                 "in_progress" | "completed" => status,
                 _ => "pending",
             };
+            let agent = item
+                .get("agent")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|agent| !agent.is_empty())
+                .map(str::to_string);
+            let files = item
+                .get("files")
+                .and_then(Value::as_array)
+                .map(|files| {
+                    files
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::trim)
+                        .filter(|file| !file.is_empty())
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
             plan.push(PlanItem {
                 step: step.to_string(),
                 status: status.to_string(),
+                agent,
+                files,
             });
         }
         self.plan = plan;
+        self.team
+            .set_plan_steps(self.plan.iter().map(|item| item.step.clone()).collect());
         let output = json!({ "ok": true, "steps": self.plan.len() }).to_string();
         (
             ToolGoalResponse {
@@ -4873,6 +5036,7 @@ fn title_request(
         tool_state: crate::tools::ToolState::default(),
         host: None,
         subagent_manager: None,
+        roles: Vec::new(),
         hooks: Hooks::default(),
     })?;
     client.summarize_text(system, user, |_| Ok(()))

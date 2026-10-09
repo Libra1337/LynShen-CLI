@@ -739,8 +739,8 @@ also carries `session`, which the Android app opens.
 ## Session ops
 
 Every op from `docs/serve-protocol.md` (`user_message`, `command`, `steer`,
-`interrupt`, `approve`, `set_approval_mode`, `decide_action`, `mcp_*`) is
-accepted with a `session` field and forwarded to that session's engine. Its
+`interrupt`, `approve`, `set_approval_mode`, `decide_action`, `merge_agent`,
+`mcp_*`) is accepted with a `session` field and forwarded to that session's engine. Its
 events carry the same `session` field.
 
 `set_approval_mode` applies at once where the engine allows it: a LynShen

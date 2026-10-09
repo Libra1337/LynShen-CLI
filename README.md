@@ -184,6 +184,8 @@ lynshen daemon pair              # 打印一次性配对链接，5 分钟内在�
 
 MCP 服务器写在 `config.json` 的 `mcp_servers` 里，支持 stdio 和 HTTP。详见 [docs/mcp.md](docs/mcp.md)。
 
+子智能体可以按角色启动。内置三个角色：`explorer` 只读调研，`worker` 在自己的 git worktree 里写代码、用 `merge_agent` 合并回来，`reviewer` 只读审查 diff。`~/.lynshen/roles/<名字>.md` 和已信任项目的 `.lynshen/roles/<名字>.md` 可以覆盖或新增角色。同时运行的数量、嵌套层数、每轮 token 预算和分派策略写在 `config.json` 的 `agents` 里，见 [docs/serve-protocol.md](docs/serve-protocol.md) 的 "Agent team"。
+
 ## 更新
 
 `lynshen`（TUI）和 `lynshen serve` 启动时检查软件库。有新版本时，release 构建的二进制会在后台下载新版本替换自己，下次启动生效。你自己用 `cargo build --release` 编出来的二进制也会这样做；debug 构建只提示。版本清单用 Ed25519 签名，文件按 sha256 校验后才替换。`config.json` 里设 `"auto_update": false` 后只提示，不自动安装。手动更新：
