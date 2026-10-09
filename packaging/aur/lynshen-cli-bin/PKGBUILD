@@ -1,0 +1,25 @@
+# Maintainer: Libra1337 <https://github.com/Libra1337>
+# LynShen CLI for Arch Linux, from the release's Linux binary.
+pkgname=lynshen-cli-bin
+pkgver=0.4.25
+pkgrel=1
+pkgdesc='LynShen CLI: a coding agent in the terminal'
+arch=('x86_64')
+url='https://github.com/Libra1337/LynShen-CLI'
+license=('Apache-2.0')
+# The shell sandbox on Linux runs commands under bubblewrap.
+depends=('bubblewrap' 'gcc-libs' 'glibc')
+optdepends=('git: version control in projects')
+provides=('lynshen-cli')
+conflicts=('lynshen-cli')
+options=('!strip' '!debug')
+source=("third-party-notices-${pkgver}.txt::https://github.com/Libra1337/LynShen-CLI/releases/download/v${pkgver}/lynshen-third-party-notices.txt")
+source_x86_64=("lynshen-${pkgver}::https://github.com/Libra1337/LynShen-CLI/releases/download/v${pkgver}/lynshen-${CARCH}-unknown-linux-gnu")
+sha256sums=('4831460dfd8a0e3bdccc4edae2ab0bbc6a4810325a8662bef32cd38d1cb5001c')
+sha256sums_x86_64=('c591336c014aef578cd94f8332e912fdfe318311776d8d47a53bc35aaf292347')
+
+package() {
+  install -Dm755 "lynshen-${pkgver}" "${pkgdir}/usr/bin/lynshen"
+  install -Dm644 "third-party-notices-${pkgver}.txt" \
+    "${pkgdir}/usr/share/licenses/${pkgname}/third-party-notices.txt"
+}

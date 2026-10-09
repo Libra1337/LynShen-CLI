@@ -1,0 +1,21 @@
+pkgbase = lynshen-cli-bin
+	pkgdesc = LynShen CLI: a coding agent in the terminal
+	pkgver = 0.4.25
+	pkgrel = 1
+	url = https://github.com/Libra1337/LynShen-CLI
+	arch = x86_64
+	license = Apache-2.0
+	depends = bubblewrap
+	depends = gcc-libs
+	depends = glibc
+	optdepends = git: version control in projects
+	provides = lynshen-cli
+	conflicts = lynshen-cli
+	options = !strip
+	options = !debug
+	source = third-party-notices-0.4.25.txt::https://github.com/Libra1337/LynShen-CLI/releases/download/v0.4.25/lynshen-third-party-notices.txt
+	sha256sums = 4831460dfd8a0e3bdccc4edae2ab0bbc6a4810325a8662bef32cd38d1cb5001c
+	source_x86_64 = lynshen-0.4.25::https://github.com/Libra1337/LynShen-CLI/releases/download/v0.4.25/lynshen-x86_64-unknown-linux-gnu
+	sha256sums_x86_64 = c591336c014aef578cd94f8332e912fdfe318311776d8d47a53bc35aaf292347
+
+pkgname = lynshen-cli-bin
