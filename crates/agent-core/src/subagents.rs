@@ -2127,6 +2127,22 @@ fn workspace_changes(workspace: &SubagentWorkspace) -> Result<WorkspaceChanges, 
 }
 
 /// The workspace staged on a throwaway index, diffed against `base`.
+/// Folders a worker's tools create in its workspace (environments, package
+/// installs, caches) that never belong to its change.
+const SKIPPED_DIRS: [&str; 11] = [
+    ".venv",
+    "venv",
+    "node_modules",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".tox",
+    ".gradle",
+    ".next",
+    ".turbo",
+];
+
 struct StagedDiff {
     patch: Vec<u8>,
     /// `--name-status -z`
@@ -2168,7 +2184,16 @@ fn staged_diff(root: &Path, index: &Path, base: &str) -> Result<StagedDiff, Stri
         git(&args)
     };
     git(&["read-tree", base])?;
-    git(&["add", "-A", "--", ".", ":(exclude).lynshen/agents"])?;
+    // What a worker installs to run its checks (a virtualenv, node_modules,
+    // caches) is not its change, .gitignore or not: thousands of files, and
+    // a virtualenv's symlinks made every merge of it conflict.
+    let mut add = vec!["add", "-A", "--", ".", ":(exclude).lynshen/agents"];
+    let skipped: Vec<String> = SKIPPED_DIRS
+        .iter()
+        .map(|dir| format!(":(exclude,glob)**/{dir}/**"))
+        .collect();
+    add.extend(skipped.iter().map(String::as_str));
+    git(&add)?;
     Ok(StagedDiff {
         patch: diff(&["--binary", "--src-prefix=a/", "--dst-prefix=b/"])?,
         status: diff(&["--name-status", "-z"])?,
@@ -3086,6 +3111,31 @@ mod tests {
         // Merged once: there is nothing left to merge.
         assert!(manager.merge_agent("/root", "worker", "apply").is_err());
         let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn merge_apply_leaves_environments_and_caches_behind() {
+        let (repo, manager, workspace) = merge_fixture("merge-skips-venv");
+        let root = &workspace.root;
+        std::fs::write(root.join("test_a.py"), "def test_a():\n    pass\n").unwrap();
+        // What running the checks left: a virtualenv (with a symlink, which a
+        // three-way merge cannot take), node_modules and a cache.
+        std::fs::create_dir_all(root.join(".venv/bin")).unwrap();
+        std::fs::write(root.join(".venv/pyvenv.cfg"), "home = /usr\n").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("/usr/bin/python3", root.join(".venv/bin/python")).unwrap();
+        std::fs::create_dir_all(root.join("web/node_modules/x")).unwrap();
+        std::fs::write(root.join("web/node_modules/x/index.js"), "1\n").unwrap();
+        std::fs::create_dir_all(root.join("__pycache__")).unwrap();
+        std::fs::write(root.join("__pycache__/a.pyc"), "x").unwrap();
+        manager.finish_ok("/root/worker", run_result(1, 1));
+        manager.drain_events();
+
+        let result = manager.merge_agent("/root", "worker", "apply").unwrap();
+        assert_eq!(result["ok"], true, "{result}");
+        assert_eq!(result["files"], json!(["test_a.py"]));
+        assert!(repo.join("test_a.py").exists());
+        assert!(!repo.join(".venv").exists() && !repo.join("web/node_modules").exists());
     }
 
     #[test]
