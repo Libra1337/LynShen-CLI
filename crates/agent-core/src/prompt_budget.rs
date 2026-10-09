@@ -92,6 +92,7 @@ fn default_client(system_prompt: String) -> OpenAiClient {
         connect_timeout: Duration::from_secs(1),
         read_timeout: Duration::from_secs(1),
         goal_tool_tx: Some(goal_tx),
+        has_goal: false,
         approval_tx: None,
         approval_mode: LiveApprovalMode::default(),
         safety_model: None,
@@ -246,4 +247,18 @@ fn print_prompt_token_report() {
             println!("{:<45} {count:>6}", format!("request body ({protocol})"));
         }
     }
+}
+
+/// The coding session's first request before this budget was kept: 874
+/// tokens of system prompt and 3647 of tool definitions (0.4.19).
+const BASELINE_CODING_TOKENS: usize = 4521;
+
+#[test]
+fn default_coding_request_stays_lean() {
+    let budget = measure(false);
+    let total = budget.system + budget.tools_responses;
+    assert!(
+        total * 10 <= BASELINE_CODING_TOKENS * 6,
+        "system prompt + tools grew to {total} tokens; run print_prompt_token_report"
+    );
 }

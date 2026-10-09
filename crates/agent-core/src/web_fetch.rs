@@ -17,16 +17,15 @@ pub fn definition() -> Value {
     json!({
         "type": "function",
         "name": "web_fetch",
-        "description": "Fetch one http(s) URL with GET and return its readable text. Use it to read a URL the user referenced or documentation you already have the exact address for; it is not a search engine. HTML is converted to plain text (page title first, links as `text (url)`), text and JSON bodies pass through, and binary responses return metadata only. Large responses are truncated for you and the full text is saved to a file whose path is reported.",
+        "description": "GET an http(s) URL and return its readable text (HTML converted, links as `text (url)`). A long body is truncated and saved in full to a file whose path is returned. Not a search engine.",
         "parameters": {
             "type": "object",
             "properties": {
-                "url": { "type": "string", "description": "Absolute http:// or https:// URL to fetch." },
-                "max_bytes": { "type": "number", "description": "Optional cap on bytes read from the response body. May only lower the 2 MB default." },
-                "raw": { "type": "boolean", "description": "Return the raw body without HTML-to-text extraction. Defaults to false." }
+                "url": { "type": "string" },
+                "max_bytes": { "type": "number", "description": "Read cap below the 2 MB default." },
+                "raw": { "type": "boolean", "description": "Skip the HTML-to-text conversion." }
             },
-            "required": ["url"],
-            "additionalProperties": false
+            "required": ["url"]
         }
     })
 }

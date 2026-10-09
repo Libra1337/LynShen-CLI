@@ -171,19 +171,18 @@ pub fn definition() -> Value {
     json!({
         "type": "function",
         "name": TOOL_NAME,
-        "description": "Generate an image from a prompt, or edit workspace images, with the provider's image model, and save it in the workspace. Returns the saved paths. Takes one to two minutes.",
+        "description": "Generate an image from a prompt, or edit workspace images, and save it in the workspace. Returns the saved paths. Takes one to two minutes.",
         "parameters": {
             "type": "object",
             "properties": {
                 "prompt": { "type": "string", "description": "What to draw, or how to change the input images." },
-                "images": { "type": "array", "items": { "type": "string" }, "description": "Workspace images (png, jpg, webp) to edit or combine. Omit to draw from the prompt alone." },
-                "path": { "type": "string", "description": "File or directory to save to, relative to the workspace. Defaults to images/<timestamp>-<prompt>.png. The extension follows the image format; existing files are never overwritten (a numeric suffix is added)." },
-                "size": { "type": "string", "description": "For example 1024x1024, 1536x1024, 1024x1536 or auto." },
-                "n": { "type": "integer", "description": "Number of images, 1-4. Defaults to 1." },
-                "model": { "type": "string", "description": "Image model. Defaults to the configured one." }
+                "images": { "type": "array", "items": { "type": "string" }, "description": "Workspace images to edit or combine." },
+                "path": { "type": "string", "description": "File or directory to save to, default images/. Never overwrites." },
+                "size": { "type": "string", "description": "e.g. 1024x1024, 1536x1024, 1024x1536, auto." },
+                "n": { "type": "integer", "description": "1-4, default 1." },
+                "model": { "type": "string" }
             },
-            "required": ["prompt"],
-            "additionalProperties": false
+            "required": ["prompt"]
         }
     })
 }
