@@ -2,6 +2,10 @@
 //! HTML is reduced with a small hand-written extractor; the response body is
 //! capped at 2 MB and the generic model-output projection in tools.rs handles
 //! truncation plus saving the full result under .lynshen/truncated-results.
+//!
+//! Every HTTP response is a result, not an error: a 404 from an existence
+//! check is the answer. Only a transport failure (DNS, connect, TLS, timeout)
+//! is an error, and it is retried once.
 
 use serde_json::{json, Value};
 use std::io::Read;
@@ -10,16 +14,17 @@ use std::time::Duration;
 /// The smallest read cap a call may set (see `run`).
 const MIN_FETCH_BYTES: u64 = 32 * 1024;
 const MAX_FETCH_BYTES: u64 = 2 * 1024 * 1024;
-const ERROR_BODY_SNIPPET_BYTES: usize = 2048;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_REDIRECTS: u32 = 5;
+/// Pause before the single retry of a transport failure.
+const RETRY_BACKOFF: Duration = Duration::from_millis(600);
 
 pub fn definition() -> Value {
     json!({
         "type": "function",
         "name": "web_fetch",
-        "description": "GET an http(s) URL and return its readable text (HTML converted, links as `text (url)`). A long body is truncated and saved in full to a file whose path is returned. Not a search engine.",
+        "description": "GET an http(s) URL and return its `status` and readable text (HTML converted, links as `text (url)`). Every response is a result: a 404 or 403 is the server's answer, not a failed call. A long body is truncated and saved in full to a file whose path is returned. Not a search engine.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -55,72 +60,85 @@ fn read_cap(args: &Value) -> u64 {
         .unwrap_or(MAX_FETCH_BYTES)
 }
 
-fn fetch(url: &str, max_bytes: u64, raw: bool) -> Value {
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(CONNECT_TIMEOUT)
-        .timeout_read(READ_TIMEOUT)
-        .redirects(MAX_REDIRECTS)
-        .build();
+/// GETs `url` once. `Err` is a transport failure only; an HTTP status, any
+/// status, comes back as a result.
+fn fetch_once(url: &str, max_bytes: u64, raw: bool) -> Result<Value, String> {
+    let agent = agent_for(url);
     let host = url_host(url);
-    match agent.get(url).call() {
-        Ok(response) => {
-            let status = response.status();
-            let final_url = response.get_url().to_string();
-            let content_type = response
-                .header("content-type")
-                .unwrap_or_default()
-                .to_string();
-            let (body, network_truncated) = match read_capped(response.into_reader(), max_bytes) {
-                Ok(read) => read,
-                Err(error) => {
-                    crate::log_warn!("web_fetch", "read failed", host = host, error = error);
-                    return json!({ "url": url, "error": format!("failed to read response body: {error}") });
-                }
-            };
-            crate::log_info!(
-                "web_fetch",
-                "fetched",
-                host = host,
-                status = status,
-                bytes = body.len(),
-            );
-            process_response(
-                &final_url,
-                status,
-                &content_type,
-                &body,
-                raw,
-                network_truncated,
-            )
-        }
-        Err(ureq::Error::Status(code, response)) => {
-            let status_text = response.status_text().to_string();
-            let snippet = response
-                .into_string()
-                .map(|body| body_snippet(&body))
-                .unwrap_or_default();
-            crate::log_warn!("web_fetch", "http error", host = host, status = code);
-            json!({
-                "url": url,
-                "status": code,
-                "error": format!("HTTP {code} {status_text}"),
-                "body_snippet": snippet,
-            })
-        }
+    let response = match agent.get(url).call() {
+        Ok(response) => response,
+        // A status the server chose is an answer about the resource.
+        Err(ureq::Error::Status(_, response)) => response,
         Err(ureq::Error::Transport(transport)) => {
             let message = transport_error_message(&transport);
             crate::log_warn!("web_fetch", "transport error", host = host, error = message);
-            json!({ "url": url, "error": message })
+            return Err(message);
+        }
+    };
+    let status = response.status();
+    let status_text = response.status_text().to_string();
+    let final_url = response.get_url().to_string();
+    let content_type = response
+        .header("content-type")
+        .unwrap_or_default()
+        .to_string();
+    let (body, network_truncated) = match read_capped(response.into_reader(), max_bytes) {
+        Ok(read) => read,
+        Err(error) => {
+            crate::log_warn!("web_fetch", "read failed", host = host, error = error);
+            return Err(format!("failed to read response body: {error}"));
+        }
+    };
+    crate::log_info!(
+        "web_fetch",
+        "fetched",
+        host = host,
+        status = status,
+        bytes = body.len(),
+    );
+    Ok(process_response(
+        &final_url,
+        status,
+        &status_text,
+        &content_type,
+        &body,
+        raw,
+        network_truncated,
+    ))
+}
+
+/// A transport failure is usually transient (a dropped TLS handshake, a slow
+/// DNS answer), so the request is sent once more before it is reported.
+fn fetch(url: &str, max_bytes: u64, raw: bool) -> Value {
+    match fetch_once(url, max_bytes, raw) {
+        Ok(value) => value,
+        Err(first) => {
+            std::thread::sleep(RETRY_BACKOFF);
+            match fetch_once(url, max_bytes, raw) {
+                Ok(mut value) => {
+                    value["note"] = json!(format!("the first attempt failed ({first}); retried"));
+                    value
+                }
+                Err(second) => json!({
+                    "url": url,
+                    "error": second,
+                    "note": "the request was sent twice and failed both times",
+                }),
+            }
         }
     }
 }
 
-fn body_snippet(body: &str) -> String {
-    let mut end = ERROR_BODY_SNIPPET_BYTES.min(body.len());
-    while end > 0 && !body.is_char_boundary(end) {
-        end -= 1;
+/// A ureq agent for `url`, through the proxy the environment names.
+fn agent_for(url: &str) -> ureq::Agent {
+    let builder = ureq::AgentBuilder::new()
+        .timeout_connect(CONNECT_TIMEOUT)
+        .timeout_read(READ_TIMEOUT)
+        .redirects(MAX_REDIRECTS);
+    match env_proxy(url).and_then(|proxy| ureq::Proxy::new(proxy).ok()) {
+        Some(proxy) => builder.proxy(proxy).build(),
+        None => builder.build(),
     }
-    body[..end].to_string()
 }
 
 fn transport_error_message(transport: &ureq::Transport) -> String {
@@ -148,10 +166,13 @@ fn read_capped(mut reader: impl Read, max_bytes: u64) -> Result<(Vec<u8>, bool),
 }
 
 /// Turn a fetched body into the tool result. Pure so tests can exercise the
-/// content-type branches without touching the network.
+/// content-type branches without touching the network. A status outside 2xx
+/// is reported as `status` plus a short `note`, never as an error: the model
+/// asked a question about the URL and the server answered it.
 fn process_response(
     url: &str,
     status: u16,
+    status_text: &str,
     content_type: &str,
     body: &[u8],
     raw: bool,
@@ -169,9 +190,17 @@ fn process_response(
         "content_type": mime,
         "bytes": body.len(),
     });
+    let mut notes = Vec::new();
+    if !(200..300).contains(&status) {
+        notes.push(
+            format!("HTTP {status} {}", status_text.trim())
+                .trim()
+                .to_string(),
+        );
+    }
     if network_truncated {
         result["network_truncated"] = json!(true);
-        result["note"] = json!("body exceeded the byte cap; only the first bytes were read");
+        notes.push("body exceeded the byte cap; only the first bytes were read".to_string());
     }
     let is_html = mime == "text/html" || mime == "application/xhtml+xml";
     let is_text = mime.starts_with("text/")
@@ -185,7 +214,10 @@ fn process_response(
     } else if is_html || is_text {
         result["text"] = json!(String::from_utf8_lossy(body).to_string());
     } else {
-        result["note"] = json!("binary content omitted; only metadata is returned");
+        notes.push("binary content omitted; only metadata is returned".to_string());
+    }
+    if !notes.is_empty() {
+        result["note"] = json!(notes.join("; "));
     }
     result
 }
@@ -217,6 +249,50 @@ fn url_host(url: &str) -> String {
         .next()
         .unwrap_or_default()
         .to_string()
+}
+
+/// The proxy the environment names for `url`, or None to connect directly.
+/// ureq's own `try_proxy_from_env` reads ALL_PROXY first and ignores
+/// NO_PROXY, so the variables are read here (see AGENTS.md).
+pub(crate) fn env_proxy(url: &str) -> Option<String> {
+    let host = url_host(url)
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if host.is_empty() || no_proxy(&host) {
+        return None;
+    }
+    let scheme_vars: &[&str] = if url.starts_with("https://") {
+        &["https_proxy", "HTTPS_PROXY"]
+    } else {
+        &["http_proxy", "HTTP_PROXY"]
+    };
+    scheme_vars
+        .iter()
+        .chain(["all_proxy", "ALL_PROXY"].iter())
+        .filter_map(|name| std::env::var(name).ok())
+        .map(|value| value.trim().to_string())
+        .find(|value| !value.is_empty())
+}
+
+/// Whether `host` is exempt from the proxy: NO_PROXY names it (`*`, a bare
+/// host, or a `.suffix`), or it is this machine.
+fn no_proxy(host: &str) -> bool {
+    if matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]") {
+        return true;
+    }
+    let list = std::env::var("no_proxy")
+        .or_else(|_| std::env::var("NO_PROXY"))
+        .unwrap_or_default();
+    list.split(',').any(|entry| {
+        let entry = entry.trim().trim_start_matches('.').to_ascii_lowercase();
+        let entry = entry.split(':').next().unwrap_or_default();
+        if entry.is_empty() {
+            return false;
+        }
+        entry == "*" || host == entry || host.ends_with(&format!(".{entry}"))
+    })
 }
 
 // `title` is skipped because the extractor already emits it as the first line.
@@ -466,6 +542,7 @@ fn collapse_whitespace(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::env;
 
     #[test]
     fn validate_url_accepts_only_plain_http_and_https() {
@@ -544,6 +621,7 @@ mod tests {
         let result = process_response(
             "https://example.com",
             200,
+            "OK",
             "text/html; charset=utf-8",
             body,
             false,
@@ -568,21 +646,29 @@ mod tests {
 
     #[test]
     fn process_response_passes_text_and_json_through() {
-        let result = process_response("u", 200, "application/json", b"{\"a\":1}", false, false);
+        let result = process_response(
+            "u",
+            200,
+            "OK",
+            "application/json",
+            b"{\"a\":1}",
+            false,
+            false,
+        );
         assert_eq!(result["text"], "{\"a\":1}");
-        let result = process_response("u", 200, "text/plain", b"plain", false, false);
+        let result = process_response("u", 200, "OK", "text/plain", b"plain", false, false);
         assert_eq!(result["text"], "plain");
     }
 
     #[test]
     fn process_response_raw_skips_html_extraction() {
-        let result = process_response("u", 200, "text/html", b"<p>hi</p>", true, false);
+        let result = process_response("u", 200, "OK", "text/html", b"<p>hi</p>", true, false);
         assert_eq!(result["text"], "<p>hi</p>");
     }
 
     #[test]
     fn process_response_returns_metadata_only_for_binary() {
-        let result = process_response("u", 200, "image/png", &[0x89, 0x50], false, false);
+        let result = process_response("u", 200, "OK", "image/png", &[0x89, 0x50], false, false);
         assert!(result.get("text").is_none());
         assert_eq!(result["bytes"], 2);
         assert!(result["note"].as_str().unwrap().contains("binary"));
@@ -590,8 +676,96 @@ mod tests {
 
     #[test]
     fn process_response_marks_network_truncation() {
-        let result = process_response("u", 200, "text/plain", b"abc", false, true);
+        let result = process_response("u", 200, "OK", "text/plain", b"abc", false, true);
         assert_eq!(result["network_truncated"], true);
+    }
+
+    #[test]
+    fn an_http_status_is_a_result_not_an_error() {
+        // A 404 is the answer to "does this name exist?": the model needs the
+        // status and the body, not a failed call.
+        let body = b"<html><title>Not Found</title><body><p>no such domain</p></body></html>";
+        let result = process_response(
+            "https://rdap.org/domain/x.dev",
+            404,
+            "Not Found",
+            "text/html",
+            body,
+            false,
+            false,
+        );
+        assert!(result.get("error").is_none(), "{result}");
+        assert_eq!(result["status"], 404);
+        assert_eq!(result["note"], "HTTP 404 Not Found");
+        assert_eq!(result["text"], "Not Found\n\nno such domain");
+
+        let forbidden =
+            process_response("u", 403, "Forbidden", "text/plain", b"nope", false, false);
+        assert!(forbidden.get("error").is_none(), "{forbidden}");
+        assert_eq!(forbidden["note"], "HTTP 403 Forbidden");
+        assert_eq!(forbidden["text"], "nope");
+        // A success keeps its clean shape.
+        let ok = process_response("u", 200, "OK", "text/plain", b"hi", false, false);
+        assert!(ok.get("note").is_none(), "{ok}");
+    }
+
+    #[test]
+    fn env_proxy_follows_the_scheme_and_no_proxy() {
+        // These tests share the process environment, so they run in one test.
+        let restore: Vec<(&str, Option<String>)> = [
+            "http_proxy",
+            "HTTP_PROXY",
+            "https_proxy",
+            "HTTPS_PROXY",
+            "all_proxy",
+            "ALL_PROXY",
+            "no_proxy",
+            "NO_PROXY",
+        ]
+        .iter()
+        .map(|name| (*name, env::var(name).ok()))
+        .collect();
+        for (name, _) in &restore {
+            env::remove_var(name);
+        }
+
+        assert_eq!(env_proxy("https://example.com/x"), None);
+        env::set_var("HTTP_PROXY", "http://127.0.0.1:7890");
+        env::set_var("HTTPS_PROXY", "http://127.0.0.1:7891");
+        assert_eq!(
+            env_proxy("http://example.com/x").as_deref(),
+            Some("http://127.0.0.1:7890")
+        );
+        assert_eq!(
+            env_proxy("https://example.com/x").as_deref(),
+            Some("http://127.0.0.1:7891")
+        );
+        // ALL_PROXY only fills in for a scheme with no variable of its own.
+        env::remove_var("HTTPS_PROXY");
+        env::set_var("ALL_PROXY", "http://127.0.0.1:1080");
+        assert_eq!(
+            env_proxy("https://example.com/x").as_deref(),
+            Some("http://127.0.0.1:1080")
+        );
+        // NO_PROXY exempts a host, a suffix and (with *) everything.
+        env::set_var("NO_PROXY", "example.com, .internal.test");
+        assert_eq!(env_proxy("https://example.com/x"), None);
+        assert_eq!(env_proxy("https://www.example.com/x"), None);
+        assert_eq!(env_proxy("https://a.internal.test/x"), None);
+        assert!(env_proxy("https://other.test/x").is_some());
+        env::set_var("NO_PROXY", "*");
+        assert_eq!(env_proxy("https://other.test/x"), None);
+        // This machine is never proxied.
+        env::remove_var("NO_PROXY");
+        assert_eq!(env_proxy("http://localhost:3000/x"), None);
+        assert_eq!(env_proxy("http://127.0.0.1:3000/x"), None);
+
+        for (name, value) in restore {
+            match value {
+                Some(value) => env::set_var(name, value),
+                None => env::remove_var(name),
+            }
+        }
     }
 
     #[test]
