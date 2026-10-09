@@ -257,6 +257,7 @@ pub fn event_json(event: AgentEvent) -> Value {
         AgentEvent::PendingMessages(messages) => {
             json!({ "type": "pending_messages", "messages": messages })
         }
+        AgentEvent::Unqueued(text) => json!({ "type": "unqueued", "text": text }),
         AgentEvent::UserMessage(content) => json!({ "type": "user_message", "content": content }),
         AgentEvent::FillInput(content) => json!({ "type": "fill_input", "content": content }),
         AgentEvent::Connecting => json!({ "type": "connecting" }),

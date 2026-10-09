@@ -309,6 +309,8 @@ impl TuiState {
                     self.pending_messages = messages;
                     changed
                 }
+                // The TUI sends no unqueue; pending_messages already redrew.
+                AgentEvent::Unqueued(_) => false,
                 AgentEvent::UserMessage(message) => {
                     self.chat.push(ChatLine::PendingUser(message));
                     self.mark_history_dirty();

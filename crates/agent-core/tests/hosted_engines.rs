@@ -847,10 +847,15 @@ fn a_queued_message_taken_back_never_runs() {
     assert!(taken.iter().any(
         |e| matches!(e, AgentEvent::PendingMessages(m) if m == &["first queued".to_string()])
     ));
-    // Text that is no longer queued changes nothing.
-    assert!(core.unqueue(0, Some("gone")).iter().any(
+    assert!(taken
+        .iter()
+        .any(|e| matches!(e, AgentEvent::Unqueued(t) if t == "second queued")));
+    // Text that is no longer queued changes nothing, and nothing comes back.
+    let gone = core.unqueue(0, Some("gone"));
+    assert!(gone.iter().any(
         |e| matches!(e, AgentEvent::PendingMessages(m) if m == &["first queued".to_string()])
     ));
+    assert!(!gone.iter().any(|e| matches!(e, AgentEvent::Unqueued(_))));
     // The turn, then the one queued message as a turn of its own, until
     // that turn is ready.
     let done = |events: &[AgentEvent]| {

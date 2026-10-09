@@ -116,7 +116,9 @@ a new one with it. No-op when idle or when the queue is empty.
 Takes a queued message back before it runs. Removes the message at `index`
 when its text equals `text`, else the first queued message with that text
 (the queue may have moved on since the client saw it); without `text`, the
-one at `index`. Emits the updated `pending_messages` either way.
+one at `index`. Emits the updated `pending_messages` either way, and
+`{"type":"unqueued","text":…}` when a message was taken back (a client
+returns its text to the message box; one that already started is not taken).
 
 ### `interrupt`
 

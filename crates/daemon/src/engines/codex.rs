@@ -1757,10 +1757,15 @@ impl Adapter for Codex {
                         .map(|_| index)
                         .or_else(|| self.waiting.iter().position(|(text, _)| text == wanted)),
                 };
+                let mut events = Vec::new();
                 if let Some(at) = at {
-                    self.waiting.remove(at);
+                    let (text, _) = self.waiting.remove(at);
+                    events.push(self.pending_event());
+                    events.push(json!({ "type": "unqueued", "text": text }));
+                } else {
+                    events.push(self.pending_event());
                 }
-                return Ok(Output::events(vec![self.pending_event()]));
+                return Ok(Output::events(events));
             }
             "steer" => {
                 let (Some(thread), Some(turn)) = (self.thread.clone(), self.active_turn.clone())
@@ -2277,6 +2282,15 @@ mod tests {
             taken.events[0],
             json!({ "type": "pending_messages", "messages": [] })
         );
+        assert_eq!(
+            taken.events[1],
+            json!({ "type": "unqueued", "text": "also this" })
+        );
+        // Taking back what is no longer queued answers with the queue alone.
+        let gone = c
+            .encode(&json!({ "op": "unqueue", "index": 0, "text": "also this" }))
+            .unwrap();
+        assert_eq!(gone.events.len(), 1);
         c.encode(&json!({ "op": "user_message", "content": "also this" }))
             .unwrap();
         let steer = c.encode(&json!({ "op": "steer" })).unwrap();

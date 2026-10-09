@@ -710,10 +710,13 @@ impl AgentCore {
                 .map(|_| index)
                 .or_else(|| self.queued.iter().position(|(queued, _)| queued == text)),
         };
-        if let Some(at) = at {
-            self.queued.remove(at);
-        }
+        let taken = at.and_then(|at| self.queued.remove(at));
         let mut events = vec![AgentEvent::PendingMessages(self.pending_texts())];
+        // Only a message really taken back goes back to the client's box: one
+        // that started running meanwhile is not there to take.
+        if let Some((text, _)) = taken {
+            events.push(AgentEvent::Unqueued(text));
+        }
         if !self.running {
             events.push(self.model_status_event());
         }
