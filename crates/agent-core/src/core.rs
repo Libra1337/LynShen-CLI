@@ -2057,9 +2057,10 @@ impl AgentCore {
         let skills_tokens =
             crate::tokens::count_text(&self.config.model, &crate::prompt::skills_block(&skills))
                 .tokens as u64;
-        if let Ok(image_model) = crate::config::read_image_model_at(self.config.path()) {
-            self.config.image_model = image_model;
-        }
+        // Desktop edits the image model, subagent models, context windows and
+        // groups in config.json while engines run. An unreadable file keeps
+        // the values this engine already has.
+        let _ = self.config.reload_live_settings();
         let model_headers = self.model_headers();
         let images = crate::images::ImageTools::from_config(
             &self.config,
@@ -2090,19 +2091,6 @@ impl AgentCore {
             },
         );
 
-        // Desktop edits subagent_models in config.json while engines run. An
-        // unreadable file keeps the list this engine already has.
-        if let Ok(models) = crate::config::read_subagent_models_at(self.config.path()) {
-            self.config.subagent_models = models;
-        }
-        // Same for the hand-set context windows (model settings in Desktop).
-        if let Ok(overrides) = crate::config::read_context_window_overrides_at(self.config.path()) {
-            self.config.context_window_overrides = overrides;
-        }
-        // And the group picked per model, which the window follows.
-        if let Ok(groups) = crate::config::read_lynshen_groups_at(self.config.path()) {
-            self.config.lynshen_groups = groups;
-        }
         let prompt_tokens =
             crate::tokens::count_text(&self.config.model, &system_prompt).tokens as u64;
         let (goal_tool_tx, goal_tool_rx) = mpsc::channel();
@@ -4793,9 +4781,10 @@ fn provider_api_key(config: &Config, auth: &AuthStore) -> Option<String> {
 
 /// The gateway route chosen per model, as the gateway's routing header: the
 /// LynShen group, or the Monoize Provider. Read from disk so a choice made in
-/// Desktop applies from the next turn.
+/// Desktop applies from the next turn; only read, since this runs every turn
+/// and `load_or_create` would rewrite the file under Desktop.
 fn model_headers(config: &Config) -> HashMap<String, Vec<(String, String)>> {
-    match Config::load_or_create() {
+    match Config::load_existing() {
         Ok(disk) if disk.provider == config.provider => route_headers(&disk),
         _ => route_headers(config),
     }

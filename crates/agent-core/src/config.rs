@@ -704,6 +704,21 @@ impl Config {
         &self.path
     }
 
+    /// Re-reads, in one read of config.json, the settings Desktop changes
+    /// while engines run: the image model, the subagent models, the hand-set
+    /// context windows and the LynShen group per model (the window follows
+    /// the group). An unreadable file keeps the current values.
+    pub(crate) fn reload_live_settings(&mut self) -> io::Result<()> {
+        let content = fs::read_to_string(&self.path)?;
+        let value = serde_json::from_str::<Value>(&content)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        self.image_model = read_string(&value, "image_model", "");
+        self.subagent_models = read_subagent_models(&value);
+        self.context_window_overrides = read_context_window_overrides(&value);
+        self.lynshen_groups = read_lynshen_groups(&value);
+        Ok(())
+    }
+
     pub fn profile_dir(&self) -> &Path {
         self.path.parent().unwrap_or_else(|| Path::new("."))
     }
@@ -1240,15 +1255,8 @@ fn read_reasoning_effort(
     }
 }
 
-/// `subagent_models` as saved in `path` right now: Desktop edits it while
-/// engines run, so each turn reads the current list.
-pub(crate) fn read_subagent_models_at(path: &Path) -> io::Result<Vec<SubagentModel>> {
-    let content = fs::read_to_string(path)?;
-    let value = serde_json::from_str::<Value>(&content)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    Ok(read_subagent_models(&value))
-}
-
+/// `subagent_models` as saved in config.json; Desktop edits it while engines
+/// run, so turns re-read it (see `Config::reload_live_settings`).
 fn read_subagent_models(value: &Value) -> Vec<SubagentModel> {
     let Some(entries) = value.get("subagent_models").and_then(Value::as_array) else {
         return Vec::new();
@@ -1711,7 +1719,7 @@ pub(crate) fn apply_context_window_override(
 }
 
 /// `context_window_overrides` as saved in config.json; Desktop edits it
-/// while engines run, so turns re-read it (see `read_context_window_overrides_at`).
+/// while engines run, so turns re-read it (see `Config::reload_live_settings`).
 fn read_context_window_overrides(value: &Value) -> BTreeMap<String, u64> {
     value
         .get("context_window_overrides")
@@ -1747,30 +1755,6 @@ fn read_choice_map(value: &Value, key: &str) -> BTreeMap<String, String> {
                 .collect()
         })
         .unwrap_or_default()
-}
-
-/// `lynshen_groups` as saved now: Desktop changes a model's group while
-/// engines run, and the window follows the group (see `apply_group_window`).
-pub(crate) fn read_lynshen_groups_at(path: &Path) -> io::Result<BTreeMap<String, String>> {
-    let content = fs::read_to_string(path)?;
-    let value = serde_json::from_str::<Value>(&content)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    Ok(read_lynshen_groups(&value))
-}
-
-/// `image_model` as config.json has it now (Desktop sets it while engines run).
-pub(crate) fn read_image_model_at(path: &Path) -> io::Result<String> {
-    let content = fs::read_to_string(path)?;
-    let value = serde_json::from_str::<Value>(&content)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    Ok(read_string(&value, "image_model", ""))
-}
-
-pub(crate) fn read_context_window_overrides_at(path: &Path) -> io::Result<BTreeMap<String, u64>> {
-    let content = fs::read_to_string(path)?;
-    let value = serde_json::from_str::<Value>(&content)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    Ok(read_context_window_overrides(&value))
 }
 
 /// Built-in providers as (id, default base_url, protocol) — for UIs to offer a
@@ -2579,6 +2563,49 @@ mod tests {
     }
 
     #[test]
+    fn live_settings_reload_in_one_read_and_survive_a_bad_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "lynshen-live-settings-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        let mut config = Config::from_value("{}", path.clone()).unwrap();
+        fs::write(
+            &path,
+            r#"{
+                "image_model": "gpt-image-2",
+                "subagent_models": [{ "name": "gpt-5.4-mini", "description": "quick lookups" }],
+                "context_window_overrides": { "gpt-5.5": 200000 },
+                "lynshen_groups": { "gpt-5.5": "g2" }
+            }"#,
+        )
+        .unwrap();
+        config.reload_live_settings().unwrap();
+        assert_eq!(config.image_model, "gpt-image-2");
+        assert_eq!(config.subagent_models[0].name, "gpt-5.4-mini");
+        assert_eq!(config.subagent_models[0].description, "quick lookups");
+        assert_eq!(
+            config.context_window_overrides,
+            BTreeMap::from([("gpt-5.5".to_string(), 200_000)])
+        );
+        assert_eq!(
+            config.lynshen_groups,
+            BTreeMap::from([("gpt-5.5".to_string(), "g2".to_string())])
+        );
+
+        fs::write(&path, "{ not json").unwrap();
+        assert!(config.reload_live_settings().is_err());
+        assert_eq!(config.image_model, "gpt-image-2");
+        assert_eq!(config.lynshen_groups.len(), 1);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn image_model_defaults_empty_and_survives_a_save() {
         let dir = std::env::temp_dir().join(format!("lynshen-image-model-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
@@ -2590,7 +2617,9 @@ mod tests {
         assert_eq!(saved["image_model"], "");
 
         fs::write(&path, r#"{"image_model":" gpt-image-2 "}"#).unwrap();
-        assert_eq!(read_image_model_at(&path).unwrap(), " gpt-image-2 ");
+        let mut live = Config::from_value("{}", path.clone()).unwrap();
+        live.reload_live_settings().unwrap();
+        assert_eq!(live.image_model, " gpt-image-2 ");
         let mut config =
             Config::from_value(&fs::read_to_string(&path).unwrap(), path.clone()).unwrap();
         assert_eq!(config.image_model, " gpt-image-2 ");
