@@ -129,6 +129,25 @@ fn fetch(url: &str, max_bytes: u64, raw: bool) -> Value {
     }
 }
 
+/// GETs `url` as text for another tool in this crate (the local web_search
+/// engine), through the same proxy and timeouts as web_fetch. `Err` carries
+/// a transport failure or a non-2xx status.
+pub(crate) fn get_text(url: &str, user_agent: &str, max_bytes: u64) -> Result<String, String> {
+    let response = agent_for(url)
+        .get(url)
+        .set("User-Agent", user_agent)
+        .set("Accept", "text/html,application/xhtml+xml")
+        .call()
+        .map_err(|error| match error {
+            ureq::Error::Status(code, response) => {
+                format!("HTTP {code} {}", response.status_text())
+            }
+            ureq::Error::Transport(transport) => transport_error_message(&transport),
+        })?;
+    let (body, _) = read_capped(response.into_reader(), max_bytes)?;
+    Ok(String::from_utf8_lossy(&body).to_string())
+}
+
 /// A ureq agent for `url`, through the proxy the environment names.
 fn agent_for(url: &str) -> ureq::Agent {
     let builder = ureq::AgentBuilder::new()
@@ -440,7 +459,7 @@ fn skip_element(html: &str, from: usize, name: &str) -> usize {
     }
 }
 
-fn attr_value(tag_body: &str, attr: &str) -> Option<String> {
+pub(crate) fn attr_value(tag_body: &str, attr: &str) -> Option<String> {
     let lower = tag_body.to_ascii_lowercase();
     let needle = format!("{attr}=");
     let mut search = 0;
@@ -491,7 +510,20 @@ pub fn decode_entities(text: &str) -> String {
             "gt" => Some('>'),
             "quot" => Some('"'),
             "apos" => Some('\''),
-            "nbsp" => Some(' '),
+            "nbsp" | "ensp" | "emsp" | "thinsp" => Some(' '),
+            "middot" | "bull" => Some('\u{b7}'),
+            "hellip" => Some('\u{2026}'),
+            "ndash" => Some('\u{2013}'),
+            "mdash" => Some('\u{2014}'),
+            "lsquo" | "rsquo" => Some('\''),
+            "ldquo" | "rdquo" => Some('"'),
+            "laquo" => Some('\u{ab}'),
+            "raquo" => Some('\u{bb}'),
+            "times" => Some('\u{d7}'),
+            "deg" => Some('\u{b0}'),
+            "copy" => Some('\u{a9}'),
+            "reg" => Some('\u{ae}'),
+            "trade" => Some('\u{2122}'),
             _ => decode_numeric_entity(entity),
         };
         match decoded {

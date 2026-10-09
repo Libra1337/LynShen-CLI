@@ -178,7 +178,7 @@ lynshen daemon pair              # 打印一次性配对链接，5 分钟内在�
 
 ## 工具、技能和 MCP
 
-模型能用的工具不多：`read`、`hashline_edit`（默认唯一开启的编辑工具）、`bash`、`ripgrep`、`ls`、`outline`、`checkpoint`、`web_fetch`、`generate_image`，以及子智能体相关的 `spawn_agent` 等。`str_replace`、`write`、`apply_patch` 默认关闭，用 `config.json` 的 `edit_tools` 打开。登录 LynShen 账号后还有 `web_search`。文件工具只访问工作目录，以及技能目录和 `sandbox_directories` 里配置的目录。
+模型能用的工具不多：`read`、`hashline_edit`（默认唯一开启的编辑工具）、`bash`、`ripgrep`、`ls`、`outline`、`checkpoint`、`web_fetch`、`generate_image`，以及子智能体相关的 `spawn_agent` 等。`str_replace`、`write`、`apply_patch` 默认关闭，用 `config.json` 的 `edit_tools` 打开。`web_search` 从本机直接搜（Bing/DuckDuckGo 的网页结果，不需要 key，也不需要登录）；`config.json` 里把 `web_search_engine` 设成 `gateway` 才走 LynShen 网关，那条路要登录。文件工具只访问工作目录，以及技能目录和 `sandbox_directories` 里配置的目录。
 
 技能从 `~/.lynshen/skills`、`~/.agents/skills` 和已信任项目的 `.lynshen/skills`、`.agents/skills` 读取。在 `config.json` 里设 `"extra_skills_source": "anthropic"`，`/skills` 就能列出和安装 [anthropics/skills](https://github.com/anthropics/skills) 里的技能。详见 [docs/skills.md](docs/skills.md)。
 

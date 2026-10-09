@@ -2298,7 +2298,7 @@ impl OpenAiClient {
         }
         if name == "web_search" && !self.tool_state.web_search_enabled() {
             return Some(
-                "web_search runs through the LynShen gateway and needs a LynShen login. Run /login."
+                "web_search is set to a gateway engine (web_search_engine in config.json), which needs a LynShen login. Run /login, or set web_search_engine to \"local\" to search from this machine."
                     .to_string(),
             );
         }

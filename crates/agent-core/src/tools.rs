@@ -2641,9 +2641,10 @@ impl ToolState {
         self.inner.lock().ok().and_then(|inner| inner.web.clone())
     }
 
-    /// web_search runs through the gateway, so it needs a LynShen session.
+    /// web_search is offered whenever the web tools are configured: the
+    /// local engine needs nothing, only a gateway engine needs a login.
     pub fn web_search_enabled(&self) -> bool {
-        self.web().is_some_and(|web| web.signed_in)
+        self.web().is_some_and(|web| web.search_available())
     }
 
     pub(crate) fn set_images(&self, images: Result<crate::images::ImageTools, String>) {

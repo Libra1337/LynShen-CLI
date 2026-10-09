@@ -721,12 +721,12 @@ impl Config {
             extra_skills_source: read_optional_string(&value, "extra_skills_source"),
             mcp_servers: read_mcp_servers(&value),
             sandbox: read_sandbox(&value)?,
-            web_search_engine: read_web_engine(
+            web_search_engine: local_unless_gateway(read_web_engine(
                 &value,
                 "web_search_engine",
                 crate::web::DEFAULT_SEARCH_ENGINE,
                 crate::web::SEARCH_ENGINES,
-            )?,
+            )?),
             web_fetch_engine: read_web_engine(
                 &value,
                 "web_fetch_engine",
@@ -1247,6 +1247,18 @@ fn read_sandbox(value: &Value) -> io::Result<crate::sandbox::SandboxPolicy> {
 
 /// A web engine name from config.json. Absent or empty takes the default;
 /// an unknown name is a hard load error.
+/// Only `gateway` picks the LynShen gateway for web_search. The vendor names
+/// (`auto`, `parallel`, `brave`) were the gateway's own engines and older
+/// releases wrote the default `auto` into every config.json, so they are read
+/// as `local`: a file nobody edited must not keep a route that needs a login.
+fn local_unless_gateway(engine: String) -> String {
+    if engine == "gateway" {
+        engine
+    } else {
+        crate::web::DEFAULT_SEARCH_ENGINE.to_string()
+    }
+}
+
 fn read_web_engine(
     value: &Value,
     key: &str,
@@ -2985,6 +2997,15 @@ mod tests {
             read_sandbox(&json!({ "command_rules": [{ "prefix": "", "action": "allow" }] }))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn only_an_explicit_gateway_keeps_the_gateway_search() {
+        // The names older releases wrote by default read as local search.
+        for engine in ["auto", "parallel", "brave", "local"] {
+            assert_eq!(local_unless_gateway(engine.to_string()), "local");
+        }
+        assert_eq!(local_unless_gateway("gateway".to_string()), "gateway");
     }
 
     #[test]
