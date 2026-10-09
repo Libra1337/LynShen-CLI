@@ -5,7 +5,10 @@
 //! the table per part and per tool.
 
 use crate::{
-    config::{default_edit_tools, models_for_provider, LiveApprovalMode, DEFAULT_SYSTEM_PROMPT},
+    config::{
+        default_edit_tools, models_for_provider, AgentsConfig, LiveApprovalMode,
+        DEFAULT_SYSTEM_PROMPT,
+    },
     hooks::Hooks,
     llm::{OpenAiClient, OpenAiClientConfig},
     mcp::McpManager,
@@ -73,6 +76,11 @@ fn system_prompt(chat: bool) -> String {
 }
 
 fn default_client(system_prompt: String) -> OpenAiClient {
+    client_with(system_prompt, AgentsConfig::default())
+}
+
+/// `default_client` with the team settings `agents`.
+fn client_with(system_prompt: String, agents: AgentsConfig) -> OpenAiClient {
     let (goal_tx, _goal_rx) = mpsc::channel();
     OpenAiClient::from_config(OpenAiClientConfig {
         model: MODEL.to_string(),
@@ -102,7 +110,7 @@ fn default_client(system_prompt: String) -> OpenAiClient {
         extra_read_roots: Vec::new(),
         tool_state: default_tool_state(),
         host: None,
-        subagent_manager: Some(SubagentManager::default()),
+        subagent_manager: Some(SubagentManager::new(agents, Default::default())),
         roles: crate::roles::builtin(),
         hooks: Hooks::default(),
     })
@@ -270,5 +278,29 @@ fn default_coding_request_stays_lean() {
     assert!(
         total * 100 <= BASELINE_CODING_TOKENS * MAX_PERCENT_OF_BASELINE,
         "system prompt + tools grew to {total} tokens; run print_prompt_token_report"
+    );
+}
+
+/// The share of the baseline before team v2.
+const V1_PERCENT_OF_BASELINE: usize = 61;
+
+/// With `agents.team_v2` off the team is v1's: the first request is smaller
+/// than with v2 and back within the budget it had before v2.
+#[test]
+fn team_v2_off_request_is_smaller_and_within_the_v1_budget() {
+    let system = system_prompt(false);
+    let total = |agents: AgentsConfig| {
+        let definitions = client_with(system.clone(), agents).tool_definitions();
+        tokens(&system) + tokens(&Value::Array(definitions).to_string())
+    };
+    let on = total(AgentsConfig::default());
+    let off = total(AgentsConfig {
+        team_v2: false,
+        ..AgentsConfig::default()
+    });
+    assert!(off < on, "off {off} tokens, on {on}");
+    assert!(
+        off * 100 <= BASELINE_CODING_TOKENS * V1_PERCENT_OF_BASELINE,
+        "with team v2 off the first request has {off} tokens"
     );
 }

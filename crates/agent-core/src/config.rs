@@ -381,6 +381,10 @@ pub struct AgentsConfig {
     pub wake_on_result: bool,
     /// A completed `worker` task of the board gets a `reviewer` subagent.
     pub review_on_complete: bool,
+    /// Agent team v2 (Beta): the task board, background agents,
+    /// resume_agent, best-of-N attempts, wake turns and the team hooks.
+    /// Off, the team works as v1 did (spawn, wait, message, merge).
+    pub team_v2: bool,
 }
 
 impl Default for AgentsConfig {
@@ -393,6 +397,7 @@ impl Default for AgentsConfig {
             keep_worktrees_days: 7,
             wake_on_result: true,
             review_on_complete: false,
+            team_v2: true,
         }
     }
 }
@@ -407,6 +412,7 @@ impl AgentsConfig {
             "keep_worktrees_days": self.keep_worktrees_days,
             "wake_on_result": self.wake_on_result,
             "review_on_complete": self.review_on_complete,
+            "team_v2": self.team_v2,
         })
     }
 }
@@ -1284,7 +1290,20 @@ fn read_agents(value: &Value) -> io::Result<AgentsConfig> {
         keep_worktrees_days: read_u64(agents, "keep_worktrees_days", defaults.keep_worktrees_days),
         wake_on_result: read_bool(agents, "wake_on_result", defaults.wake_on_result),
         review_on_complete: read_bool(agents, "review_on_complete", defaults.review_on_complete),
+        team_v2: read_bool(agents, "team_v2", defaults.team_v2),
     })
+}
+
+/// `agents.team_v2` as config.json at `path` says now (true without the
+/// key); None when the file cannot be read or parsed.
+pub(crate) fn read_team_v2(path: &Path) -> Option<bool> {
+    let value = serde_json::from_str::<Value>(&fs::read_to_string(path).ok()?).ok()?;
+    Some(
+        value
+            .pointer("/agents/team_v2")
+            .and_then(Value::as_bool)
+            .unwrap_or(AgentsConfig::default().team_v2),
+    )
 }
 
 fn read_approval_mode(value: &Value) -> io::Result<ApprovalMode> {
@@ -3002,10 +3021,11 @@ mod tests {
                 keep_worktrees_days: 7,
                 wake_on_result: true,
                 review_on_complete: false,
+                team_v2: true,
             }
         );
         let partial = Config::from_value(
-            r#"{"agents": {"max_live": 2, "fanout": "plan", "turn_token_budget": 400000, "wake_on_result": false, "review_on_complete": true}}"#,
+            r#"{"agents": {"max_live": 2, "fanout": "plan", "turn_token_budget": 400000, "wake_on_result": false, "review_on_complete": true, "team_v2": false}}"#,
             path.clone(),
         )
         .unwrap();
@@ -3016,6 +3036,7 @@ mod tests {
         assert_eq!(partial.agents.keep_worktrees_days, 7);
         assert!(!partial.agents.wake_on_result);
         assert!(partial.agents.review_on_complete);
+        assert!(!partial.agents.team_v2);
         // Zero limits would disable spawning silently; they are raised to 1.
         let zero = Config::from_value(
             r#"{"agents": {"max_live": 0, "max_depth": 0, "keep_worktrees_days": 0}}"#,
@@ -3056,13 +3077,25 @@ mod tests {
                 "fanout": "auto",
                 "keep_worktrees_days": 7,
                 "wake_on_result": true,
-                "review_on_complete": false
+                "review_on_complete": false,
+                "team_v2": true
             })
         );
-        fs::write(&path, r#"{"agents": {"fanout": "off", "max_live": 6}}"#).unwrap();
+        assert_eq!(read_team_v2(&path), Some(true));
+        fs::write(
+            &path,
+            r#"{"agents": {"fanout": "off", "max_live": 6, "team_v2": false}}"#,
+        )
+        .unwrap();
         config.reload_live_settings().unwrap();
         assert_eq!(config.agents.fanout, Fanout::Off);
         assert_eq!(config.agents.max_live, 6);
+        assert!(!config.agents.team_v2);
+        assert_eq!(read_team_v2(&path), Some(false));
+        fs::write(&path, r#"{"agents": {}}"#).unwrap();
+        assert_eq!(read_team_v2(&path), Some(true));
+        fs::write(&path, "{not json").unwrap();
+        assert_eq!(read_team_v2(&path), None);
         let _ = fs::remove_dir_all(dir);
     }
 

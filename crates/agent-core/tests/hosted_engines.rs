@@ -1154,3 +1154,107 @@ fn a_worktree_agents_shell_writes_only_its_worktree() {
     assert!(workdir.join("ok.txt").exists());
     assert!(!dir.join("escape.txt").exists());
 }
+
+/// Sets `agents.team_v2` in the shared config.json; the file as it was comes
+/// back when this is dropped (a failed test must not leave v2 off for the
+/// others).
+struct TeamSwitch {
+    path: std::path::PathBuf,
+    saved: String,
+}
+
+impl TeamSwitch {
+    fn new() -> Self {
+        let path = std::path::PathBuf::from(env::var("HOME").unwrap())
+            .join(".lynshen")
+            .join("config.json");
+        let saved = fs::read_to_string(&path).unwrap();
+        Self { path, saved }
+    }
+
+    fn set(&self, on: bool) {
+        let mut config: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&self.path).unwrap()).unwrap();
+        config["agents"] = serde_json::json!({ "team_v2": on });
+        fs::write(&self.path, config.to_string()).unwrap();
+    }
+}
+
+impl Drop for TeamSwitch {
+    fn drop(&mut self) {
+        let _ = fs::write(&self.path, &self.saved);
+    }
+}
+
+#[test]
+fn switching_team_v2_off_lets_a_background_agent_finish_without_waking_anyone() {
+    let _guard = setup();
+    let switch = TeamSwitch::new();
+    let dir = temp_dir("team-switch");
+    let mut core = open(&dir, ApprovalMode::FullAccess);
+
+    // Started while v2 is on.
+    let args = serde_json::json!({ "task_name": "scout", "background": true, "message": "[sleep:1200] look around" });
+    let mut events = core.submit_user_message(format!("CALL spawn_agent {args}"));
+    pump_until(&mut core, &mut events, |events, _| readies(events) == 1);
+    assert!(!finished(&row(&core, "scout")));
+
+    // Switched off while it works, with no turn in between: it finishes,
+    // and its result starts no turn.
+    switch.set(false);
+    pump_until(&mut core, &mut events, |_, rows| rows.iter().all(finished));
+    assert_eq!(row(&core, "scout")["state"], "completed");
+    pump_for(&mut core, &mut events, 800);
+    assert_eq!(readies(&events), 1);
+
+    // The stop and pick ops answer with an error.
+    for op in [
+        serde_json::json!({ "op": "close_agent", "target": "scout" }),
+        serde_json::json!({ "op": "pick_attempt", "group": "fix", "target": "1" }),
+    ] {
+        let (_, answer) = lynshen_agent_core::protocol::apply_op(&mut core, &op);
+        assert!(
+            answer.iter().any(|event| matches!(
+                event,
+                AgentEvent::Error(message) if message.ends_with("agent team v2 (Beta) is switched off (agents.team_v2 is false)")
+            )),
+            "{answer:#?}"
+        );
+    }
+
+    // The next turn reads the result before its first request.
+    let mut events = core.submit_user_message("what did the scout find?".to_string());
+    pump_until(&mut core, &mut events, |events, _| readies(events) == 1);
+    let reply = assistant_text(&events);
+    assert!(
+        reply.contains("<subagent_result path=\"/root/scout\" status=\"completed\">"),
+        "{reply}"
+    );
+
+    // Its tools are refused, and so is a background spawn.
+    let mut events = core.submit_user_message("CALL task_list {}".to_string());
+    pump_until(&mut core, &mut events, |events, _| readies(events) == 1);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ToolOutput { name, is_error: true, output, .. }
+            if name == "task_list" && output.contains("agents.team_v2 is false")
+    )));
+    let args = serde_json::json!({ "task_name": "later", "background": true, "message": "m" });
+    let mut events = core.submit_user_message(format!("CALL spawn_agent {args}"));
+    pump_until(&mut core, &mut events, |events, _| readies(events) == 1);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ToolOutput { name, is_error: true, output, .. }
+            if name == "spawn_agent" && output.contains("spawn_agent with background is not available")
+    )));
+    assert_eq!(rows(&core).len(), 1);
+
+    // Switched on again, v2 is back from the next turn.
+    switch.set(true);
+    let mut events = core.submit_user_message("CALL task_list {}".to_string());
+    pump_until(&mut core, &mut events, |events, _| readies(events) == 1);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ToolOutput { name, is_error: false, .. } if name == "task_list"
+    )));
+}
