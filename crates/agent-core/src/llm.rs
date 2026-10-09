@@ -1458,7 +1458,17 @@ impl OpenAiClient {
         // A read-only agent's subagents are read-only too.
         let read_only = (self.read_only && !for_root) || role.is_some_and(|role| role.read_only);
         let (plan_approved, plan_steps) = manager.shared().plan();
-        let plan_step = resolve_plan_step(text("plan_step"), &plan_steps);
+        let mut plan_step = resolve_plan_step(text("plan_step"), &plan_steps);
+        if config.fanout == Fanout::Plan && !read_only && plan_step.is_none() && plan_approved {
+            // A step the task plainly is (its files, its wording) needs no
+            // second call to name it.
+            let task = format!(
+                "{} {}",
+                text("task_name").unwrap_or_default(),
+                text("message").unwrap_or_default()
+            );
+            plan_step = infer_plan_step(&task, &plan_steps);
+        }
         if config.fanout == Fanout::Plan && !read_only {
             check_plan_step(plan_approved, &plan_steps, plan_step.as_deref())?;
         }
@@ -3026,6 +3036,66 @@ fn resolve_plan_step(step: Option<&str>, steps: &[String]) -> Option<String> {
     )
 }
 
+/// The plan step a spawned task plainly is, when the model left plan_step
+/// out: the step whose words the task's name and message share most, file
+/// names (`render.js`) counting three times. None unless one step leads and
+/// shares at least a third of its words.
+fn infer_plan_step(task: &str, steps: &[String]) -> Option<String> {
+    let task = task.to_lowercase();
+    let mut best: Option<(f64, &String)> = None;
+    let mut tied = false;
+    for step in steps {
+        let terms = plan_terms(step);
+        let total: f64 = terms.iter().map(|(_, weight)| weight).sum();
+        if total == 0.0 {
+            continue;
+        }
+        let found: f64 = terms
+            .iter()
+            .filter(|(term, _)| task.contains(term.as_str()))
+            .map(|(_, weight)| weight)
+            .sum();
+        let score = found / total;
+        match best {
+            Some((top, _)) if (score - top).abs() < f64::EPSILON => tied = true,
+            Some((top, _)) if score < top => {}
+            _ => {
+                best = Some((score, step));
+                tied = false;
+            }
+        }
+    }
+    best.filter(|(score, _)| !tied && *score >= 1.0 / 3.0)
+        .map(|(_, step)| step.clone())
+}
+
+/// A plan step's words with their weights: ASCII words and file names
+/// (`render.js`, three times as telling), and pairs of CJK characters.
+fn plan_terms(step: &str) -> Vec<(String, f64)> {
+    let step = step.to_lowercase();
+    let mut terms: Vec<(String, f64)> = Vec::new();
+    let mut add = |term: String, weight: f64| {
+        if !terms.iter().any(|(known, _)| *known == term) {
+            terms.push((term, weight));
+        }
+    };
+    for word in step.split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))) {
+        let word = word.trim_matches(|c: char| matches!(c, '.' | '-' | '_'));
+        if word.len() >= 2 {
+            let weight = if word.contains('.') { 3.0 } else { 1.0 };
+            add(word.to_string(), weight);
+        }
+    }
+    let cjk = |c: char| ('\u{4e00}'..='\u{9fff}').contains(&c);
+    let chars: Vec<char> = step.chars().collect();
+    for pair in chars.windows(2) {
+        if cjk(pair[0]) && cjk(pair[1]) {
+            add(pair.iter().collect(), 1.0);
+        }
+    }
+    terms
+}
+
 /// `agents.fanout = plan`: an agent that may write starts only for a step of
 /// an approved plan.
 fn check_plan_step(approved: bool, steps: &[String], step: Option<&str>) -> Result<(), String> {
@@ -3033,10 +3103,15 @@ fn check_plan_step(approved: bool, steps: &[String], step: Option<&str>) -> Resu
         return Err("agents.fanout is plan: an agent that can write starts only for a step of an approved plan, and there is none. Use a read-only role (explorer or reviewer), or do the work yourself.".to_string());
     }
     let Some(step) = step else {
-        return Err(
-            "agents.fanout is plan: pass plan_step, the step of the approved plan this agent does."
-                .to_string(),
-        );
+        let numbered = steps
+            .iter()
+            .enumerate()
+            .map(|(index, step)| format!("{}. {step}", index + 1))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(format!(
+            "agents.fanout is plan: pass plan_step, the number or text of the approved plan's step this agent does. Steps: {numbered}"
+        ));
     };
     if !steps.is_empty() && !steps.iter().any(|known| known == step) {
         return Err(format!(
@@ -4221,6 +4296,45 @@ mod tests {
         // Approved, but no update_plan checklist yet: any named step.
         team.set_plan(true, Vec::new());
         assert!(settings(&client, json!({ "plan_step": "Refactor io" })).is_ok());
+    }
+
+    #[test]
+    fn a_plan_step_the_task_plainly_is_needs_no_naming() {
+        // The plan and spawns of a session that was refused three times.
+        let steps: Vec<String> = [
+            "建 starcore/ 目录 + core.js/upgrades.js/waves.js 纯逻辑",
+            "写 game.js 纯模拟（update/波次/升级/碰撞/状态机）",
+            "写 test/logic-test.js 并跑通 8 组断言",
+            "写 render.js + main.js（输入/循环/HUD/覆盖层/音效）",
+            "写 index.html + style.css",
+            "写 README.md",
+            "浏览器实测 + 按手感微调并复跑测试",
+        ]
+        .map(String::from)
+        .to_vec();
+        let render = "starcore_render 你在 /Users/chad/Desktop/test 下为纯前端游戏写唯一的渲染文件 `starcore/js/render.js`，并接上 main.js 的输入与循环。";
+        let ui = "starcore_ui 写页面骨架与样式：`starcore/index.html` 和 `starcore/style.css`。";
+        let tests = "starcore_test_docs 写逻辑测试 `starcore/test/logic-test.js`，跑通断言。";
+        assert_eq!(
+            infer_plan_step(render, &steps).as_deref(),
+            Some(steps[3].as_str())
+        );
+        assert_eq!(
+            infer_plan_step(ui, &steps).as_deref(),
+            Some(steps[4].as_str())
+        );
+        assert_eq!(
+            infer_plan_step(tests, &steps).as_deref(),
+            Some(steps[2].as_str())
+        );
+        // Nothing in common, or two steps alike: no guess.
+        assert_eq!(infer_plan_step("fix the login page", &steps), None);
+        let twins = vec![
+            "Write tests".to_string(),
+            "Write tests again".to_string(),
+            "write docs".to_string(),
+        ];
+        assert_eq!(infer_plan_step("write", &twins), None);
     }
 
     #[test]
