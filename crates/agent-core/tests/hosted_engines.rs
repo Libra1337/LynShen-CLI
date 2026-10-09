@@ -214,7 +214,7 @@ fn config_changes_from_two_engines_both_land() {
 
 #[test]
 fn host_tools_run_in_the_host_and_host_prompt_reaches_the_model() {
-    use lynshen_agent_core::host::HostExtensions;
+    use lynshen_agent_core::host::{HostExtensions, HostGate};
     use std::sync::{Arc, Mutex};
     let _guard = setup();
     let mut core = open(&temp_dir("host"), ApprovalMode::Manual);
@@ -227,12 +227,14 @@ fn host_tools_run_in_the_host_and_host_prompt_reaches_the_model() {
             "description": "Record a note.",
             "parameters": { "type": "object", "properties": { "text": { "type": "string" } } }
         })],
-        run_tool: Arc::new(move |name, arguments| {
+        run_tool: Arc::new(move |name, arguments, _| {
             seen.lock().unwrap().push(format!("{name} {arguments}"));
             ("noted".to_string(), false)
         }),
         prompt: Arc::new(|| "<host-marker>brief goes here</host-marker>".to_string()),
         exclusive: false,
+        gate: Arc::new(|_| HostGate::Run),
+        summary: Arc::new(|_, _| String::new()),
     });
 
     core.submit_user_message(r#"CALL note_down {"text":"hi"}"#.to_string());
@@ -252,9 +254,151 @@ fn host_tools_run_in_the_host_and_host_prompt_reaches_the_model() {
     assert!(assistant_text(&events).contains("<host-marker>brief goes here</host-marker>"));
 }
 
+/// A host with `peek` (read-only), `tell` (outward), `always` (asks under
+/// every mode) and `wait` (runs until its turn stops); each call is logged.
+fn gated_host(
+    calls: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+) -> lynshen_agent_core::host::HostExtensions {
+    use lynshen_agent_core::host::{HostExtensions, HostGate};
+    use std::sync::{atomic::Ordering, Arc};
+    let tool = |name: &str| {
+        serde_json::json!({
+            "type": "function",
+            "name": name,
+            "description": "Test tool.",
+            "parameters": { "type": "object", "properties": { "text": { "type": "string" } } }
+        })
+    };
+    HostExtensions {
+        tools: ["peek", "tell", "always", "wait"].map(tool).to_vec(),
+        run_tool: Arc::new(move |name, _, stopped| {
+            if name == "wait" {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while !stopped.load(Ordering::SeqCst) && Instant::now() < deadline {
+                    thread::sleep(Duration::from_millis(10));
+                }
+            }
+            calls.lock().unwrap().push(name.to_string());
+            (format!("{name} done"), false)
+        }),
+        prompt: Arc::new(String::new),
+        exclusive: false,
+        gate: Arc::new(|name| match name {
+            "peek" => HostGate::ReadOnly,
+            "tell" => HostGate::Outward,
+            "always" => HostGate::Ask,
+            _ => HostGate::Run,
+        }),
+        summary: Arc::new(|name, arguments| format!("host card {name} {arguments}")),
+    }
+}
+
+/// Runs `CALL <tool>` and allows an approval request (if any), for the
+/// session too when `always`; returns the request's summary, None when
+/// nothing was asked.
+fn call_host_tool(core: &mut AgentCore, tool: &str, always: bool) -> Option<String> {
+    core.submit_user_message(format!(r#"CALL {tool} {{"text":"hi"}}"#));
+    let events = pump(core, |event| {
+        is_ready(event) || matches!(event, AgentEvent::ApprovalRequest { .. })
+    });
+    let asked = events.iter().find_map(|event| match event {
+        AgentEvent::ApprovalRequest {
+            call_id, summary, ..
+        } => Some((call_id.clone(), summary.clone())),
+        _ => None,
+    });
+    if let Some((call_id, _)) = &asked {
+        core.approve(call_id, true, always, None);
+        pump(core, is_ready);
+    }
+    asked.map(|(_, summary)| summary)
+}
+
+#[test]
+fn host_tools_are_gated_as_the_host_says() {
+    use std::sync::{Arc, Mutex};
+    let _guard = setup();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut core = open(&temp_dir("host-gates"), ApprovalMode::Plan);
+    core.set_host_extensions(gated_host(Arc::clone(&calls)));
+
+    // Plan mode: a read-only host tool runs; an outward one asks first.
+    assert_eq!(call_host_tool(&mut core, "peek", false), None);
+    assert_eq!(
+        call_host_tool(&mut core, "tell", false).as_deref(),
+        Some(r#"host card tell {"text":"hi"}"#)
+    );
+    core.set_approval_mode(ApprovalMode::Manual);
+    assert!(call_host_tool(&mut core, "tell", false).is_some());
+    core.set_approval_mode(ApprovalMode::Auto);
+    assert_eq!(call_host_tool(&mut core, "tell", false), None);
+    // `always` asks under full access too, and approving it "always" does
+    // not allowlist it.
+    core.set_approval_mode(ApprovalMode::FullAccess);
+    assert!(call_host_tool(&mut core, "always", true).is_some());
+    assert!(call_host_tool(&mut core, "always", true).is_some());
+    assert_eq!(
+        *calls.lock().unwrap(),
+        ["peek", "tell", "tell", "tell", "always", "always"]
+    );
+}
+
+#[test]
+fn a_deferred_host_call_runs_in_the_host_once_approved() {
+    use std::sync::{Arc, Mutex};
+    let _guard = setup();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut core = open(&temp_dir("host-deferred"), ApprovalMode::Manual);
+    core.set_host_extensions(gated_host(Arc::clone(&calls)));
+    core.set_attended(false);
+
+    core.submit_user_message(r#"CALL tell {"text":"later"}"#.to_string());
+    let events = pump(&mut core, is_ready);
+    let action = events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::ActionDeferred(action) => Some(action.clone()),
+            _ => None,
+        })
+        .expect("an unattended outward call is deferred");
+    assert_eq!(action.summary, r#"host card tell {"text":"later"}"#);
+    assert!(calls.lock().unwrap().is_empty());
+
+    core.decide_action(&action.id, true);
+    let events = pump(&mut core, is_ready);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ActionDecided { output: Some(output), is_error: false, .. } if output.contains("tell done")
+    )));
+    assert_eq!(*calls.lock().unwrap(), ["tell"]);
+}
+
+#[test]
+fn a_waiting_host_tool_sees_its_turn_stopped() {
+    use std::sync::{Arc, Mutex};
+    let _guard = setup();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut core = open(&temp_dir("host-stop"), ApprovalMode::FullAccess);
+    core.set_host_extensions(gated_host(Arc::clone(&calls)));
+
+    let started = Instant::now();
+    core.submit_user_message("CALL wait {}".to_string());
+    pump(
+        &mut core,
+        |event| matches!(event, AgentEvent::ToolStart { name, .. } if name == "wait"),
+    );
+    core.interrupt();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while calls.lock().unwrap().is_empty() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(*calls.lock().unwrap(), ["wait"]);
+    assert!(started.elapsed() < Duration::from_secs(8));
+}
+
 #[test]
 fn an_exclusive_host_leaves_the_engine_no_tools_of_its_own() {
-    use lynshen_agent_core::host::HostExtensions;
+    use lynshen_agent_core::host::{HostExtensions, HostGate};
     use std::sync::Arc;
     let _guard = setup();
     let dir = temp_dir("exclusive");
@@ -266,9 +410,11 @@ fn an_exclusive_host_leaves_the_engine_no_tools_of_its_own() {
             "description": "Record a note.",
             "parameters": { "type": "object", "properties": {} }
         })],
-        run_tool: Arc::new(|_, _| ("noted".to_string(), false)),
+        run_tool: Arc::new(|_, _, _| ("noted".to_string(), false)),
         prompt: Arc::new(String::new),
         exclusive: true,
+        gate: Arc::new(|_| HostGate::Run),
+        summary: Arc::new(|_, _| String::new()),
     });
     core.submit_user_message(r#"CALL bash {"command":"touch made-by-bash"}"#.to_string());
     let events = pump(&mut core, is_ready);

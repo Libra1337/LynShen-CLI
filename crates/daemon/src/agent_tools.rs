@@ -6,7 +6,7 @@ use crate::{
     hub::Hub,
     store::{now, Message, Question, Report, Timer},
 };
-use lynshen_agent_core::host::HostExtensions;
+use lynshen_agent_core::host::{HostExtensions, HostGate};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
@@ -19,7 +19,7 @@ pub fn extensions(hub: Arc<Hub>, agent: String, session: String) -> HostExtensio
     let prompt_session = session.clone();
     HostExtensions {
         tools: definitions(),
-        run_tool: Arc::new(move |name, arguments| {
+        run_tool: Arc::new(move |name, arguments, _| {
             let result = serde_json::from_str::<Value>(arguments)
                 .map_err(|error| format!("invalid JSON arguments: {error}"))
                 .map(without_empty)
@@ -35,6 +35,8 @@ pub fn extensions(hub: Arc<Hub>, agent: String, session: String) -> HostExtensio
             prompt
         }),
         exclusive: false,
+        gate: Arc::new(|_| HostGate::Run),
+        summary: Arc::new(|_, _| String::new()),
     }
 }
 
@@ -79,7 +81,7 @@ fn dispatcher(hub: Arc<Hub>, session: String) -> HostExtensions {
     );
     HostExtensions {
         tools,
-        run_tool: Arc::new(move |name, arguments| {
+        run_tool: Arc::new(move |name, arguments, _| {
             let result = serde_json::from_str::<Value>(arguments)
                 .map_err(|error| format!("invalid JSON arguments: {error}"))
                 .map(without_empty)
@@ -99,12 +101,14 @@ fn dispatcher(hub: Arc<Hub>, session: String) -> HostExtensions {
         }),
         prompt: Arc::new(move || crate::dispatch::prompt(&prompt_hub, &prompt_session)),
         exclusive: true,
+        gate: Arc::new(|_| HostGate::Run),
+        summary: Arc::new(|_, _| String::new()),
     }
 }
 
 /// Some models fill every optional field with `""` or `[]` (a create
 /// arriving with `"id": ""`); those mean "not given", same as leaving it out.
-fn without_empty(mut args: Value) -> Value {
+pub(crate) fn without_empty(mut args: Value) -> Value {
     if let Some(map) = args.as_object_mut() {
         map.retain(|_, value| {
             !(value.is_null()

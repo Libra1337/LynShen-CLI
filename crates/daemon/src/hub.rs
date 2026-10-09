@@ -84,6 +84,8 @@ pub struct Hub {
     me: Weak<Hub>,
     /// Each turn's token usage (see `usage`).
     pub usage: Usage,
+    /// Messages between sessions (see `session_messages`).
+    pub(crate) messages: crate::session_messages::Messages,
 }
 
 struct Client {
@@ -132,6 +134,7 @@ impl Hub {
             handing_off: Mutex::new(HashSet::new()),
             relay: Relay::new(relay, &store),
             usage: Usage::new(&store),
+            messages: Default::default(),
             dispatch: crate::dispatch::Dispatches::load(store.dir()),
             requirements,
             uploads,
@@ -474,6 +477,37 @@ impl Hub {
         Ok(())
     }
 
+    /// Whether an engine runs the session now.
+    pub fn is_open(&self, id: &str) -> bool {
+        lock(&self.sessions).contains_key(id)
+    }
+
+    /// An open session's conversation as a client that starts watching
+    /// gets it: its `transcript` items.
+    pub fn transcript(&self, session: &str) -> Result<Vec<Value>, String> {
+        let (outbox, inbox) = std::sync::mpsc::channel();
+        let client = self.add_client(outbox, None);
+        let result = self
+            .forward(session, json!({ "op": "snapshot", "client": client }))
+            .and_then(|()| {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                loop {
+                    let left = deadline
+                        .checked_duration_since(std::time::Instant::now())
+                        .ok_or("the conversation did not answer in time")?;
+                    let text = inbox
+                        .recv_timeout(left)
+                        .map_err(|_| "the conversation did not answer in time")?;
+                    let frame: Value = serde_json::from_str(&text).unwrap_or_default();
+                    if frame["type"] == "transcript" && frame["session"] == session {
+                        break Ok(frame["items"].as_array().cloned().unwrap_or_default());
+                    }
+                }
+            });
+        lock(&self.clients).remove(&client);
+        result
+    }
+
     pub(crate) fn host(&self, id: String, ops: Sender<Value>, cwd: PathBuf, generation: u64) {
         lock(&self.sessions).insert(
             id,
@@ -519,6 +553,7 @@ impl Hub {
                 None => {}
             }
         }
+        crate::session_messages::ended(self, id);
         lock(&self.busy).remove(id);
         lock(&self.claims).remove(id);
         self.usage.close(id);
@@ -1140,6 +1175,7 @@ impl Hub {
     /// Every event a session publishes: its title follows the conversation
     /// (see `titles`).
     pub fn observe(&self, session: &str, event: &Value) {
+        crate::session_messages::observe(self, session, event);
         self.usage.observe(session, event, || {
             let record = self
                 .store
@@ -1554,7 +1590,7 @@ fn with_closure(mut item: Value, closure: &Closure) -> Value {
 
 /// A session's title as clients see it: its own, else its first prompt; never
 /// an id or a delivery header (which older daemons wrote as the title).
-fn shown_title(record: &SessionRecord, label: Option<&str>) -> Option<String> {
+pub(crate) fn shown_title(record: &SessionRecord, label: Option<&str>) -> Option<String> {
     record
         .title
         .clone()
@@ -1582,6 +1618,9 @@ const DELIVERY_HEADERS: [&str; 5] = [
 /// was actually asked, for titles and handoff notes.
 pub(crate) fn without_delivery_header(text: &str) -> &str {
     let text = text.trim_start();
+    if let Some(message) = crate::session_messages::unwrapped(text) {
+        return message;
+    }
     if DELIVERY_HEADERS
         .iter()
         .any(|header| text.starts_with(header))

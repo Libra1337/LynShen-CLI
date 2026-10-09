@@ -61,7 +61,8 @@ pub fn temp_dir(label: &str) -> PathBuf {
 /// call; anything after a tool result or a deferred-action message answers
 /// with plain text naming what it saw. In a subagent's task, `[sleep:N]`
 /// waits N ms before answering and a line `RUN: <command>` runs it;
-/// `[history]` answers with every user message of the request.
+/// `[history]` answers with every user message of the request. A message
+/// from another conversation (`<session_message …>`) is scripted by its body.
 fn start_fake_model() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
@@ -155,6 +156,11 @@ fn script(request: &Value) -> String {
         ]);
     }
     if last["role"] == "user" {
+        let text = text
+            .strip_prefix("<session_message ")
+            .and_then(|rest| rest.split_once(">\n"))
+            .map(|(_, body)| body.split("\n</session_message>").next().unwrap_or(body))
+            .unwrap_or(&text);
         if let Some(call) = text.strip_prefix("CALL ") {
             let (name, arguments) = call.split_once(' ').unwrap_or((call, "{}"));
             return sse(&[

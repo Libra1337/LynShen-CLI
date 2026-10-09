@@ -2,6 +2,7 @@ use crate::providers::CLIENT_NAME;
 use crate::{
     config::{is_shell_tool, ApprovalMode, Fanout, LiveApprovalMode, ModelConfig, SubagentModel},
     hooks::Hooks,
+    host::HostGate,
     hunks::{self, HunkView},
     mcp::McpManager,
     roles::Role,
@@ -22,7 +23,11 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     env,
     path::{Path, PathBuf},
-    sync::mpsc::{self, Sender},
+    sync::{
+        atomic::AtomicBool,
+        mpsc::{self, Sender},
+        Arc,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -127,6 +132,8 @@ pub struct OpenAiClient {
     tool_state: tools::ToolState,
     /// Tools and prompt text added by the host process (main agent only).
     host: Option<crate::host::HostExtensions>,
+    /// Set when the turn is stopped; host tools that wait watch it.
+    interrupt_flag: Arc<AtomicBool>,
     hooks: Hooks,
     /// Independent one-shot model used by `auto` mode to classify shell
     /// commands. None disables classification (shell calls then always ask).
@@ -585,9 +592,15 @@ impl OpenAiClient {
             extra_read_roots: config.extra_read_roots,
             tool_state: config.tool_state,
             host: config.host,
+            interrupt_flag: Arc::new(AtomicBool::new(false)),
             hooks: config.hooks,
             safety,
         })
+    }
+
+    /// The flag the turn's owner sets to stop it (see `HostToolRunner`).
+    pub fn set_interrupt_flag(&mut self, flag: Arc<AtomicBool>) {
+        self.interrupt_flag = flag;
     }
 
     /// Sets the input size at which `run_turn_events` hands the turn back for
@@ -910,6 +923,12 @@ impl OpenAiClient {
     /// Why plan mode or a read-only role refuses this call; None when it
     /// may run.
     fn read_only_refusal(&self, request: &ToolCallRequest) -> Option<String> {
+        if matches!(
+            self.host_gate(&request.name),
+            Some(HostGate::ReadOnly | HostGate::Outward | HostGate::Ask)
+        ) {
+            return None;
+        }
         let read_only_hint = self.mcp.tool_read_only_hint(&request.name);
         if self.approval_mode.get() == ApprovalMode::Plan {
             crate::plan_mode::refusal(&request.name, &request.arguments, read_only_hint)
@@ -1304,7 +1323,8 @@ impl OpenAiClient {
             .as_ref()
             .filter(|host| host.has_tool(&request.name))
         {
-            let (output, is_error) = (host.run_tool)(&request.name, &request.arguments);
+            let (output, is_error) =
+                (host.run_tool)(&request.name, &request.arguments, &self.interrupt_flag);
             tools::ToolExecutionResult {
                 model_output: tools::project_model_output(&request.name, &output, cwd),
                 output,
@@ -1766,6 +1786,7 @@ impl OpenAiClient {
                 None => self.tool_state.for_subagent(),
             },
             host: None,
+            interrupt_flag: Arc::clone(&self.interrupt_flag),
             hooks: self.hooks.clone(),
             safety: self.safety.clone(),
         }
@@ -2327,6 +2348,9 @@ impl OpenAiClient {
         if self.approval_tx.is_none() {
             return false;
         }
+        if let Some(gate) = self.host_gate(name) {
+            return self.approval_mode.get().requires_approval_for_host(gate);
+        }
         // MCP tools consult the server's readOnlyHint annotation; a tool
         // without a cached hint falls through to the conservative name check.
         if let Some(read_only_hint) = self.mcp.tool_read_only_hint(name) {
@@ -2336,6 +2360,11 @@ impl OpenAiClient {
                 .requires_approval_for_mcp(read_only_hint);
         }
         self.approval_mode.get().requires_approval(name)
+    }
+
+    /// How the host gates `name`, when it is a host tool.
+    fn host_gate(&self, name: &str) -> Option<HostGate> {
+        self.host.as_ref().and_then(|host| host.gate_of(name))
     }
 
     /// `auto` mode: send the shell command to the safety classifier — a
@@ -2451,6 +2480,11 @@ impl OpenAiClient {
                 call_id: request.call_id.clone(),
                 name: request.name.clone(),
                 summary: match (&self.subagent_manager, request.name.as_str()) {
+                    _ if self.host_gate(&request.name).is_some() => self
+                        .host
+                        .as_ref()
+                        .map(|host| (host.summary)(&request.name, &request.arguments))
+                        .unwrap_or_default(),
                     (Some(manager), "merge_agent" | "pick_attempt") => {
                         let args =
                             serde_json::from_str::<Value>(&request.arguments).unwrap_or_default();
