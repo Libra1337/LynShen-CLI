@@ -487,6 +487,8 @@ struct SubagentInner {
     changed: Condvar,
     config: Mutex<AgentsConfig>,
     shared: TeamShared,
+    /// config.json, where `team_v2_now` reads the switch between turns.
+    config_path: Mutex<Option<PathBuf>>,
 }
 
 #[derive(Default)]
@@ -514,6 +516,8 @@ struct SubagentRegistry {
     /// Bumped on every change the session persists (the board, worktree
     /// agents): the core saves when it moves.
     revision: u64,
+    /// Bumped each time mail that wakes the main agent arrives.
+    wake_stamp: u64,
 }
 
 struct SubagentRecord {
@@ -568,6 +572,21 @@ impl SubagentManager {
 
     pub(crate) fn shared(&self) -> &TeamShared {
         &self.inner.shared
+    }
+
+    /// The config.json `team_v2_now` reads.
+    pub(crate) fn set_config_path(&self, path: PathBuf) {
+        *self.inner.config_path.lock().unwrap() = Some(path);
+    }
+
+    /// Whether agent team v2 is on now. A turn runs with the switch it
+    /// started with; what happens between turns (a background agent's hooks
+    /// and result, an op) reads config.json again, so switching v2 off stops
+    /// it at once. Without a readable file, the turn's value.
+    pub(crate) fn team_v2_now(&self) -> bool {
+        let path = self.inner.config_path.lock().unwrap().clone();
+        path.and_then(|path| crate::config::read_team_v2(&path))
+            .unwrap_or_else(|| self.config().team_v2)
     }
 
     /// A main turn starts: the settings it runs with. `new_window` opens a
@@ -852,6 +871,7 @@ impl SubagentManager {
                         status: status.as_str().to_string(),
                     },
                 });
+            state.wake_stamp += 1;
         }
         self.inner.changed.notify_all();
     }
@@ -925,7 +945,19 @@ impl SubagentManager {
                 text: report.text,
                 kind: MailKind::Hook { ok: report.ok },
             });
+        state.wake_stamp += 1;
         self.inner.changed.notify_all();
+    }
+
+    /// When mail that wakes the main agent waits (see `take_wake`): a stamp
+    /// that changes with each new piece of it.
+    pub(crate) fn pending_wake(&self) -> Option<u64> {
+        let state = self.inner.state.lock().unwrap();
+        state
+            .inboxes
+            .get(ROOT_PATH)
+            .is_some_and(|inbox| inbox.iter().any(InboxMessage::wakes))
+            .then_some(state.wake_stamp)
     }
 
     /// The main agent's mail, drained, when some of it wakes an idle main

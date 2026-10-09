@@ -230,6 +230,8 @@ foreground agents it started (the same as the model's `close_agent` tool).
 `target` is the agent's path, or its task name for a subagent of the main
 agent. Emits `subagent_lifecycle` (`closed`) and `agent_runs`; an unknown
 target emits `error`. A closed background agent never starts a main turn.
+While `agents.team_v2` is off the op emits `error` and stops nothing (see
+"Agent team" → "Team v2 switch").
 
 ### `pick_attempt`
 
@@ -245,7 +247,8 @@ one `merge_result` per agent (the apply first), their `subagent_lifecycle`
 events and `agent_runs`. When the apply conflicts nothing is written and the
 other attempts are kept (one `merge_result`). An unknown group or target
 emits `error`. Like `merge_agent`, the op asks for no approval; the model's
-`pick_attempt` tool asks in `manual` mode.
+`pick_attempt` tool asks in `manual` mode. While `agents.team_v2` is off the
+op emits `error` and changes nothing.
 
 ### `approve_plan`
 
@@ -367,7 +370,7 @@ them, and merge the work of those that write in a worktree.
 without the object gets the defaults. Changes apply from the next turn.
 
 ```json
-{"agents": {"max_live": 4, "max_depth": 2, "turn_token_budget": 0, "fanout": "auto", "keep_worktrees_days": 7, "wake_on_result": true, "review_on_complete": false}}
+{"agents": {"max_live": 4, "max_depth": 2, "turn_token_budget": 0, "fanout": "auto", "keep_worktrees_days": 7, "wake_on_result": true, "review_on_complete": false, "team_v2": true}}
 ```
 
 | Key | Default | Meaning |
@@ -379,6 +382,43 @@ without the object gets the defaults. Changes apply from the next turn.
 | `keep_worktrees_days` | `7` | Subagent worktrees older than this are deleted when an engine opens the project. `0` keeps them. |
 | `wake_on_result` | `true` | When a background subagent of the main agent finishes (or a `task_completed` / `agent_idle` hook reports) while the main agent is idle, the engine starts a main turn by itself on that result. Not while the team budget is used up; the result then waits for the next turn. |
 | `review_on_complete` | `false` | A board task completed with `role: "worker"` (or owned by a `worker` agent) gets a background `reviewer` subagent of the main agent, `review_<task id>`, on the owner's diff. It counts toward the budget and `max_live`; when it cannot start, the main agent gets a message saying why. |
+| `team_v2` | `true` | Agent team v2 (Beta): the task board, background agents, `resume_agent`, best-of-N attempts, wake turns and the `task_completed` / `agent_idle` hooks. `false` turns all of it off and the team works as v1 did; see "Team v2 switch". |
+
+### Team v2 switch
+
+`agents.team_v2: false` (LynShen Desktop writes it from its own switch and
+the product owner's remote switch) gives the v1 team:
+
+- Not offered: `task_create`, `task_list`, `task_update`, `resume_agent`,
+  `pick_attempt`; `spawn_agent` has no `background` and no `attempts`; the
+  `send_message` and `wait_agent` descriptions do not name siblings or
+  attempts. The first request is as small as before v2.
+- A call of one of these tools anyway returns the error `<tool> is not
+  available: agent team v2 (Beta) is switched off (agents.team_v2 is false)`
+  and asks for no approval. `spawn_agent` with `background: true` or
+  `attempts` above 1 returns the same error for `spawn_agent with
+  background` / `spawn_agent with attempts` and starts nothing;
+  `background: false` and `attempts: 1` are accepted (they ask for what v1
+  does).
+- No wake turns, no `task_completed` or `agent_idle` hooks, no reviewer from
+  `review_on_complete`.
+- The `close_agent` and `pick_attempt` ops emit that error (`close_agent:
+  …`, `pick_attempt: …`).
+- Everything of v1 works as before: roles, worktrees and `merge_agent`,
+  messages to the parent, the `agents.*` limits, budget and fanout, plan
+  owners, `agent_runs` and transcripts. Events already sent (`task_board`,
+  `background`, `attempt_group`) are not taken back; a saved board stays in
+  the session and comes back when v2 is on again.
+
+A turn uses the value it started with, like the other keys. What happens
+between turns reads config.json again: a wake, the hooks of an agent that
+finishes, the review of a completed task and the two ops. So switching v2 off
+while background agents run lets them run to the end, but none of them starts
+a main turn or runs a hook: each result waits in the main agent's mail, and
+the next turn (the user's) reads it before its first model request. Agents
+still running stay listed and the model's `close_agent` tool can stop them.
+Switching v2 on again applies from the next turn; a result that already
+waited is still delivered by that turn, not by a wake.
 
 ### Roles
 

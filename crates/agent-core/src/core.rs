@@ -211,6 +211,9 @@ pub struct AgentCore {
     /// The next turn is one the engine starts for a background result: it
     /// continues the team's budget window.
     wake_turn: bool,
+    /// The wake mail (`pending_wake` stamp) last left for the next turn
+    /// because agent team v2 was off.
+    wake_declined: u64,
     /// Messages steered into the running turn, until the model reads them.
     steered_pending: Vec<String>,
     /// What the last `agent_runs` showed, and when it went out (throttle).
@@ -297,6 +300,7 @@ impl AgentCore {
             }
         });
         let subagent_manager = SubagentManager::new(config.agents.clone(), TeamShared::default());
+        subagent_manager.set_config_path(config.path().to_path_buf());
         let session = SessionStore::new();
         // A fresh session id is unique, so this only fails on IO problems.
         let session_lock = SessionLock::acquire(&profile_dir()?, &cwd, session.session_id()).ok();
@@ -337,6 +341,7 @@ impl AgentCore {
             subagent_manager,
             team_saved: 0,
             wake_turn: false,
+            wake_declined: 0,
             steered_pending: Vec::new(),
             agent_runs_revision: 0,
             agent_runs_sent_at: None,
@@ -1887,10 +1892,21 @@ impl AgentCore {
             } else if self.config.agents.wake_on_result && !self.subagent_manager.budget_exhausted()
             {
                 // A background result (or a hook's output) for an idle main
-                // agent: it carries on without the user.
-                let mail = self.subagent_manager.take_wake();
-                if !mail.is_empty() {
-                    events.extend(self.start_wake_turn(mail));
+                // agent: it carries on without the user. Not when agent team
+                // v2 was switched off, even since the last turn (config.json
+                // is read once per new piece of mail): the mail then waits
+                // for the next turn, which reads it before its first request.
+                if let Some(stamp) = self
+                    .subagent_manager
+                    .pending_wake()
+                    .filter(|stamp| *stamp != self.wake_declined)
+                {
+                    if self.subagent_manager.team_v2_now() {
+                        let mail = self.subagent_manager.take_wake();
+                        events.extend(self.start_wake_turn(mail));
+                    } else {
+                        self.wake_declined = stamp;
+                    }
                 }
             }
         }
@@ -2083,6 +2099,9 @@ impl AgentCore {
         if target.trim().is_empty() {
             return vec![AgentEvent::Error("close_agent requires target".to_string())];
         }
+        if !self.subagent_manager.team_v2_now() {
+            return vec![AgentEvent::Error(crate::llm::team_v2_off("close_agent"))];
+        }
         let error = self.subagent_manager.close_agent(ROOT_PATH, target).err();
         self.team_op_events(error)
     }
@@ -2094,6 +2113,9 @@ impl AgentCore {
             return vec![AgentEvent::Error(
                 "pick_attempt requires group and target".to_string(),
             )];
+        }
+        if !self.subagent_manager.team_v2_now() {
+            return vec![AgentEvent::Error(crate::llm::team_v2_off("pick_attempt"))];
         }
         let error = self
             .subagent_manager
@@ -2161,7 +2183,10 @@ impl AgentCore {
             Some(team) => SubagentManager::restore(self.config.agents.clone(), team),
             None => SubagentManager::new(self.config.agents.clone(), TeamShared::default()),
         };
+        self.subagent_manager
+            .set_config_path(self.config.path().to_path_buf());
         self.team_saved = self.subagent_manager.revision();
+        self.wake_declined = 0;
         self.drop_foreground_approvals();
     }
 
@@ -2914,8 +2939,12 @@ impl AgentCore {
             let args = serde_json::from_str::<Value>(&action.arguments).unwrap_or_default();
             let text = |key: &str| args[key].as_str().unwrap_or_default().to_string();
             let result = if action.name == "pick_attempt" {
-                self.subagent_manager
-                    .pick_attempt(ROOT_PATH, &text("group"), &text("target"))
+                if self.subagent_manager.team_v2_now() {
+                    self.subagent_manager
+                        .pick_attempt(ROOT_PATH, &text("group"), &text("target"))
+                } else {
+                    Err(crate::llm::team_v2_off("pick_attempt"))
+                }
             } else {
                 self.subagent_manager
                     .merge_agent(ROOT_PATH, &text("target"), &text("action"))

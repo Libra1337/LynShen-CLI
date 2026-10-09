@@ -1174,6 +1174,12 @@ impl OpenAiClient {
             .collect::<Vec<_>>();
         if let Some(manager) = &self.subagent_manager {
             let config = manager.config();
+            // Without team v2 the team is v1's: no board.
+            let board = if config.team_v2 {
+                board_definitions()
+            } else {
+                Vec::new()
+            };
             if self.allow_subagents && config.fanout != Fanout::Off {
                 definitions.extend(subagent_definitions(
                     &self.model,
@@ -1183,12 +1189,12 @@ impl OpenAiClient {
                     &config,
                     self.agent_depth > 0,
                 ));
-                definitions.extend(board_definitions());
+                definitions.extend(board);
             } else if self.agent_depth > 0 {
                 // A subagent that may not spawn can still write to its
-                // parent and its siblings, and work the board.
-                definitions.push(send_message_definition(true));
-                definitions.extend(board_definitions());
+                // parent (and, with team v2, its siblings) and work the board.
+                definitions.push(send_message_definition(true, config.team_v2));
+                definitions.extend(board);
             }
         }
         definitions.extend(self.mcp.definitions());
@@ -1249,6 +1255,9 @@ impl OpenAiClient {
         if !is_team_tool(name) {
             return None;
         }
+        if let Some(error) = self.team_v2_refusal(name) {
+            return Some(json_tool_result(json!({ "error": error }), true));
+        }
         let result = match name {
             "spawn_agent" => self.spawn_agent(call_id, arguments, cwd, input, pending_call_ids),
             "wait_agent" => self.wait_agent(arguments),
@@ -1267,6 +1276,16 @@ impl OpenAiClient {
             Ok(value) => json_tool_result(value, false),
             Err(error) => json_tool_result(json!({ "error": error }), true),
         })
+    }
+
+    /// The refusal of a team v2 tool while `agents.team_v2` is off (the
+    /// value this turn started with).
+    fn team_v2_refusal(&self, name: &str) -> Option<String> {
+        let on = self
+            .subagent_manager
+            .as_ref()
+            .is_none_or(|manager| manager.config().team_v2);
+        (!on && is_team_v2_tool(name)).then(|| team_v2_off(name))
     }
 
     fn run_tool_call(
@@ -1560,8 +1579,20 @@ impl OpenAiClient {
             .map_err(|error| format!("invalid JSON arguments: {error}"))?;
         let task_name = required_str(&args, "task_name")?;
         let message = required_str(&args, "message")?;
-        let settings = self.spawn_settings(&args, &manager)?;
         let background = args.get("background").and_then(Value::as_bool) == Some(true);
+        if !manager.config().team_v2 {
+            // v1 has neither; `background: false` and `attempts: 1` ask for
+            // what v1 does anyway.
+            if background {
+                return Err(team_v2_off("spawn_agent with background"));
+            }
+            if !matches!(args.get("attempts"), None | Some(Value::Null))
+                && args.get("attempts").and_then(Value::as_u64) != Some(1)
+            {
+                return Err(team_v2_off("spawn_agent with attempts"));
+            }
+        }
+        let settings = self.spawn_settings(&args, &manager)?;
         let attempts = match args.get("attempts") {
             None | Some(Value::Null) => 1,
             Some(value) => value
@@ -1858,7 +1889,8 @@ impl OpenAiClient {
                 .interrupt_flag
                 .load(std::sync::atomic::Ordering::SeqCst)
                 || matches!(&result, Err(error) if error == "interrupted");
-            if !stopped && hooks.has_agent_idle() {
+            // A switch-off since the turn started counts (team_v2_now).
+            if !stopped && hooks.has_agent_idle() && manager.team_v2_now() {
                 let status = match &result {
                     Ok(()) => "completed",
                     Err(error) if error == BUDGET_EXHAUSTED => "budget_exhausted",
@@ -2000,6 +2032,10 @@ impl OpenAiClient {
         task: &crate::board::Task,
         cwd: &Path,
     ) -> Option<String> {
+        // Both are team v2; a switch-off since the turn started counts.
+        if !manager.team_v2_now() {
+            return None;
+        }
         let owner = task.owner.as_deref();
         let (owner_workdir, owner_role) = owner
             .map(|owner| manager.agent_place(owner))
@@ -2341,6 +2377,10 @@ impl OpenAiClient {
         if request.name == "merge_agent" && merge_action(&request.arguments) != "apply" {
             return false;
         }
+        // A refused call changes nothing: nobody is asked.
+        if self.team_v2_refusal(&request.name).is_some() {
+            return false;
+        }
         self.needs_approval(&request.name)
     }
 
@@ -2678,19 +2718,22 @@ fn subagent_definitions(
                         "type": "number",
                         "description": "Wall-clock limit, at least 10."
                     },
-                    "max_output_tokens": { "type": "number" },
-                    "background": {
-                        "type": "boolean",
-                        "description": "Outlive your turn; its result comes later."
-                    },
-                    "attempts": {
-                        "type": "number",
-                        "description": "2-4 worktree copies <task_name>_aN; wait on task_name, then pick_attempt."
-                    }
+                    "max_output_tokens": { "type": "number" }
                 },
                 "required": ["task_name", "message"]
             }
     });
+    if config.team_v2 {
+        let properties = &mut spawn["parameters"]["properties"];
+        properties["background"] = json!({
+            "type": "boolean",
+            "description": "Outlive your turn; its result comes later."
+        });
+        properties["attempts"] = json!({
+            "type": "number",
+            "description": "2-4 worktree copies <task_name>_aN; wait on task_name, then pick_attempt."
+        });
+    }
     if !roles.is_empty() {
         spawn["parameters"]["properties"]["role"] = json!({ "type": "string" });
     }
@@ -2715,7 +2758,12 @@ fn subagent_definitions(
             "description": "Default: yours."
         });
     }
-    vec![
+    let targets = if config.team_v2 {
+        "Agent paths or names, or an attempts task_name."
+    } else {
+        "Agent paths or names."
+    };
+    let mut definitions = vec![
         spawn,
         json!({
             "type": "function",
@@ -2727,7 +2775,7 @@ fn subagent_definitions(
                     "targets": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "Agent paths or names, or an attempts task_name."
+                        "description": targets
                     },
                     "timeout_ms": {
                         "type": "number",
@@ -2750,7 +2798,7 @@ fn subagent_definitions(
                 }
             }
         }),
-        send_message_definition(subagent),
+        send_message_definition(subagent, config.team_v2),
         json!({
             "type": "function",
             "name": "close_agent",
@@ -2776,6 +2824,11 @@ fn subagent_definitions(
                 "required": ["target", "action"]
             }
         }),
+    ];
+    if !config.team_v2 {
+        return definitions;
+    }
+    definitions.extend([
         json!({
             "type": "function",
             "name": "resume_agent",
@@ -2802,7 +2855,8 @@ fn subagent_definitions(
                 "required": ["group", "target"]
             }
         }),
-    ]
+    ]);
+    definitions
 }
 
 /// The shared task board, offered to the main agent and every subagent.
@@ -2867,6 +2921,21 @@ fn is_team_tool(name: &str) -> bool {
     )
 }
 
+/// The tools only agent team v2 offers (`agents.team_v2`).
+fn is_team_v2_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "resume_agent" | "pick_attempt" | "task_create" | "task_list" | "task_update"
+    )
+}
+
+/// The error a team v2 tool or parameter gets while v2 is off.
+pub(crate) fn team_v2_off(what: &str) -> String {
+    format!(
+        "{what} is not available: agent team v2 (Beta) is switched off (agents.team_v2 is false)"
+    )
+}
+
 /// A stopped agent's conversation as a later request may carry it: a call
 /// without its result (it stopped mid-tool) is left out.
 fn settled_context(items: Vec<Value>) -> Vec<Value> {
@@ -2886,12 +2955,18 @@ fn settled_context(items: Vec<Value>) -> Vec<Value> {
         .collect()
 }
 
-/// send_message; a subagent's may also go to its parent.
-fn send_message_definition(subagent: bool) -> Value {
-    let (description, target) = if subagent {
+/// send_message; a subagent's may also go to its parent and, with team v2,
+/// to its siblings.
+fn send_message_definition(subagent: bool, team_v2: bool) -> Value {
+    let (description, target) = if subagent && team_v2 {
         (
             "Queue a message for a running agent: a subagent, a sibling, or your parent (target \"parent\"); read before their next model call.",
             "Agent path, your or a sibling's task name, or parent.",
+        )
+    } else if subagent {
+        (
+            "Queue a message for a running subagent, or for your parent (target \"parent\"); it is read before their next model call.",
+            "Agent path or name, or parent.",
         )
     } else {
         (
@@ -4401,6 +4476,240 @@ mod tests {
             mail[0].model_text(),
             "<hook_result hook=\"agent_idle\" ok=\"true\">\n/root/probe is idle\n</hook_result>"
         );
+    }
+
+    fn team_v2_off() -> crate::config::AgentsConfig {
+        crate::config::AgentsConfig {
+            team_v2: false,
+            ..Default::default()
+        }
+    }
+
+    fn property_names(definition: &Value) -> Vec<String> {
+        definition["parameters"]["properties"]
+            .as_object()
+            .map(|properties| properties.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn team_v2_off_offers_the_v1_team() {
+        let client = team_client(team_v2_off());
+        assert_eq!(
+            tool_names(&client),
+            [
+                "spawn_agent",
+                "wait_agent",
+                "list_agents",
+                "send_message",
+                "close_agent",
+                "merge_agent"
+            ]
+        );
+        let definitions = client.tool_definitions();
+        let find = |name: &str| definitions.iter().find(|d| d["name"] == name).unwrap();
+        let spawn = property_names(find("spawn_agent"));
+        assert!(!spawn.contains(&"background".to_string()), "{spawn:?}");
+        assert!(!spawn.contains(&"attempts".to_string()), "{spawn:?}");
+        assert!(spawn.contains(&"role".to_string()), "{spawn:?}");
+        assert_eq!(
+            find("wait_agent")["parameters"]["properties"]["targets"]["description"],
+            "Agent paths or names."
+        );
+
+        // A subagent writes to its parent, without siblings or the board.
+        let mut leaf = team_client(team_v2_off());
+        leaf.agent_depth = 2;
+        leaf.agent_path = "/root/a/b".to_string();
+        leaf.allow_subagents = false;
+        assert_eq!(tool_names(&leaf), ["send_message"]);
+        let send = leaf
+            .tool_definitions()
+            .into_iter()
+            .find(|d| d["name"] == "send_message")
+            .unwrap();
+        let description = send["description"].as_str().unwrap();
+        assert!(description.contains("\"parent\""), "{description}");
+        assert!(!description.contains("sibling"), "{description}");
+        let mut middle = team_client(team_v2_off());
+        middle.agent_depth = 1;
+        middle.agent_path = "/root/a".to_string();
+        assert_eq!(tool_names(&middle).len(), 6);
+
+        // Off, the definitions are smaller than on; on, they are as before.
+        let size = |client: &OpenAiClient| {
+            serde_json::to_string(&client.tool_definitions())
+                .unwrap()
+                .len()
+        };
+        assert!(size(&client) < size(&team_client(Default::default())));
+        let on = team_client(Default::default());
+        let on_spawn = on
+            .tool_definitions()
+            .into_iter()
+            .find(|d| d["name"] == "spawn_agent")
+            .unwrap();
+        assert!(property_names(&on_spawn).contains(&"background".to_string()));
+        assert!(property_names(&on_spawn).contains(&"attempts".to_string()));
+    }
+
+    #[test]
+    fn team_v2_off_refuses_its_tools_and_spawn_parameters() {
+        let client = offline_team_client(team_v2_off());
+        for (name, args) in [
+            ("task_create", json!({ "title": "Parser" })),
+            ("task_list", json!({})),
+            ("task_update", json!({ "id": "t1", "action": "claim" })),
+            ("resume_agent", json!({ "target": "w", "message": "again" })),
+            ("pick_attempt", json!({ "group": "fix", "target": "1" })),
+        ] {
+            let error = call_tool(&client, name, args).unwrap_err();
+            assert_eq!(
+                error,
+                format!("{name} is not available: agent team v2 (Beta) is switched off (agents.team_v2 is false)")
+            );
+        }
+        let error = call_tool(
+            &client,
+            "spawn_agent",
+            json!({ "task_name": "scout", "message": "m", "background": true }),
+        )
+        .unwrap_err();
+        assert!(
+            error.starts_with("spawn_agent with background is not available"),
+            "{error}"
+        );
+        let error = call_tool(
+            &client,
+            "spawn_agent",
+            json!({ "task_name": "fix", "role": "worker", "message": "m", "attempts": 2 }),
+        )
+        .unwrap_err();
+        assert!(
+            error.starts_with("spawn_agent with attempts is not available"),
+            "{error}"
+        );
+        let manager = client.subagent_manager.clone().unwrap();
+        assert!(manager.runs_json().is_empty());
+        assert!(manager.board_json().is_empty());
+        // What v1 does anyway is accepted.
+        let started = call_tool(
+            &client,
+            "spawn_agent",
+            json!({ "task_name": "plain", "message": "m", "background": false, "attempts": 1 }),
+        )
+        .unwrap();
+        assert_eq!(started["path"], "/root/plain");
+        assert_eq!(manager.runs_json()[0]["background"], false);
+
+        // A refused call asks nobody; on, pick_attempt asks in manual mode.
+        let (tx, _rx) = mpsc::channel();
+        let pick = ToolCallRequest {
+            call_id: "c".to_string(),
+            name: "pick_attempt".to_string(),
+            arguments: json!({ "group": "fix", "target": "1" }).to_string(),
+        };
+        for (agents, asks) in [(team_v2_off(), false), (Default::default(), true)] {
+            let mut client = team_client(agents);
+            client.approval_mode = LiveApprovalMode::new(ApprovalMode::Manual);
+            client.approval_tx = Some(tx.clone());
+            assert_eq!(client.call_needs_approval(&pick), asks);
+        }
+    }
+
+    /// A config.json whose `agents.team_v2` is `on`.
+    fn switch_file(tag: &str, on: bool) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "lynshen-team-switch-{tag}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        std::fs::write(&path, json!({ "agents": { "team_v2": on } }).to_string()).unwrap();
+        path
+    }
+
+    #[test]
+    fn switched_off_since_the_turn_began_no_team_hook_runs_and_no_reviewer_starts() {
+        if cfg!(windows) {
+            return;
+        }
+        // The turn started with v2 on; config.json says off now.
+        let mut client = offline_team_client(crate::config::AgentsConfig {
+            review_on_complete: true,
+            ..Default::default()
+        });
+        client.hooks = Hooks::from_value(&json!({
+            "task_completed": [{ "command": "printf 'checked %s' \"$LYNSHEN_TASK_ID\"" }],
+            "agent_idle": [{ "command": "cat > /dev/null; printf '%s is idle' \"$LYNSHEN_AGENT\"" }]
+        }));
+        let manager = client.subagent_manager.clone().unwrap();
+        let path = switch_file("hooks", false);
+        manager.set_config_path(path.clone());
+        assert!(!manager.team_v2_now());
+
+        call_tool(
+            &client,
+            "task_create",
+            json!({ "title": "Parser", "role": "worker" }),
+        )
+        .unwrap();
+        let done = call_tool(
+            &client,
+            "task_update",
+            json!({ "id": "t1", "action": "complete" }),
+        )
+        .unwrap();
+        assert!(done.get("review").is_none());
+        call_tool(
+            &client,
+            "spawn_agent",
+            json!({ "task_name": "probe", "message": "m" }),
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < deadline
+            && !manager
+                .runs_json()
+                .iter()
+                .all(|row| row["state"] == "errored")
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // Long enough for a hook thread to have reported.
+        std::thread::sleep(Duration::from_millis(300));
+        let rows = manager.runs_json();
+        assert_eq!(rows.len(), 1, "no reviewer: {rows:?}");
+        assert_eq!(rows[0]["state"], "errored");
+        assert!(manager.take_wake().is_empty());
+        assert_eq!(manager.pending_wake(), None);
+
+        // Switched on again: the same hooks run.
+        std::fs::write(&path, json!({ "agents": { "team_v2": true } }).to_string()).unwrap();
+        assert!(manager.team_v2_now());
+        call_tool(&client, "task_create", json!({ "title": "Docs" })).unwrap();
+        call_tool(
+            &client,
+            "task_update",
+            json!({ "id": "t2", "action": "complete" }),
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mail = loop {
+            let mail = manager.take_wake();
+            if !mail.is_empty() || Instant::now() > deadline {
+                break mail;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(
+            mail[0].model_text(),
+            "<hook_result hook=\"task_completed\" ok=\"true\">\nchecked t2\n</hook_result>"
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]
