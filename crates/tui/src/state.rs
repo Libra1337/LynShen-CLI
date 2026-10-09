@@ -548,6 +548,7 @@ impl TuiState {
                 AgentEvent::McpServers { .. } => false,
                 // The agent trace is for GUI front-ends (the TUI has /subagents).
                 AgentEvent::AgentRuns(_)
+                | AgentEvent::TaskBoard(_)
                 | AgentEvent::SubagentTranscript { .. }
                 | AgentEvent::AgentMessage { .. }
                 | AgentEvent::MergeResult { .. }

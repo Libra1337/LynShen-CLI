@@ -97,6 +97,18 @@ pub fn apply_op(core: &mut AgentCore, value: &Value) -> (bool, Vec<AgentEvent>) 
             let text = |key: &str| value.get(key).and_then(Value::as_str).unwrap_or_default();
             core.merge_agent(text("target"), text("action"))
         }
+        // The desktop's stop button: {"op":"close_agent","target":"/root/w"}.
+        "close_agent" => core.close_agent(
+            value
+                .get("target")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        ),
+        // best-of-N: {"op":"pick_attempt","group":"fix","target":"fix_a2"}.
+        "pick_attempt" => {
+            let text = |key: &str| value.get(key).and_then(Value::as_str).unwrap_or_default();
+            core.pick_attempt(text("group"), text("target"))
+        }
         "subagent_transcript" => {
             let id = value
                 .get("agent_id")
@@ -319,6 +331,9 @@ pub fn event_json(event: AgentEvent) -> Value {
             tool_use_id,
             role,
             plan_step,
+            background,
+            attempt_group,
+            attempt,
         } => json!({
             "type": "subagent_lifecycle",
             "path": path,
@@ -329,6 +344,9 @@ pub fn event_json(event: AgentEvent) -> Value {
             "tool_use_id": tool_use_id,
             "role": role,
             "plan_step": plan_step,
+            "background": background,
+            "attempt_group": attempt_group,
+            "attempt": attempt,
         }),
         AgentEvent::AgentMessage { from, to, summary } => json!({
             "type": "agent_message",
@@ -362,6 +380,7 @@ pub fn event_json(event: AgentEvent) -> Value {
             "workflows": [],
             "agents": agents,
         }),
+        AgentEvent::TaskBoard(tasks) => json!({ "type": "task_board", "tasks": tasks }),
         AgentEvent::SubagentTranscript { agent_id, items } => match items {
             Some(items) => {
                 json!({ "type": "subagent_transcript", "agent_id": agent_id, "items": items })
@@ -662,10 +681,20 @@ mod tests {
             tool_use_id: "call_1".to_string(),
             role: Some("worker".to_string()),
             plan_step: None,
+            background: true,
+            attempt_group: Some("fix".to_string()),
+            attempt: Some(2),
         });
         assert_eq!(lifecycle["type"], "subagent_lifecycle");
         assert_eq!(lifecycle["role"], "worker");
         assert_eq!(lifecycle["plan_step"], Value::Null);
+        assert_eq!(lifecycle["background"], true);
+        assert_eq!(lifecycle["attempt_group"], "fix");
+        assert_eq!(lifecycle["attempt"], 2);
+        assert_eq!(
+            event_json(AgentEvent::TaskBoard(vec![json!({ "id": "t1" })])),
+            json!({ "type": "task_board", "tasks": [{ "id": "t1" }] })
+        );
         assert_eq!(
             event_json(AgentEvent::AgentMessage {
                 from: "/root/w".to_string(),

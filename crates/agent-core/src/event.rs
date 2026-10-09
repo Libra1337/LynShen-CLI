@@ -205,6 +205,12 @@ pub enum AgentEvent {
         /// The plan step it works on: from spawn_agent, or the update_plan
         /// step that names it.
         plan_step: Option<String>,
+        /// It keeps running after its parent's turn ends.
+        background: bool,
+        /// best-of-N: the group (spawn_agent's task_name) and the attempt's
+        /// number from 1.
+        attempt_group: Option<String>,
+        attempt: Option<u64>,
     },
     /// An agent sent another a message (`send_message`).
     AgentMessage {
@@ -233,6 +239,8 @@ pub enum AgentEvent {
     },
     /// Every subagent of the session (`agent_runs` rows, oldest first).
     AgentRuns(Vec<serde_json::Value>),
+    /// The session's shared task board, whole (`task_board`).
+    TaskBoard(Vec<serde_json::Value>),
     /// One subagent's work (`subagent_transcript`); None: unknown id.
     SubagentTranscript {
         agent_id: String,

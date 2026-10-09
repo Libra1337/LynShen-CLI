@@ -158,6 +158,9 @@ pub struct AgentCore {
     resume_summary_receiver: Option<Receiver<WorkerEvent>>,
     goal_tool_receiver: Option<Receiver<GoalToolRequest>>,
     approval_receiver: Option<Receiver<ApprovalRequest>>,
+    /// The sending end of `approval_receiver`, handed to every turn: a
+    /// background subagent started in an earlier turn still asks on it.
+    approval_tx: Option<Sender<ApprovalRequest>>,
     pending_approvals: HashMap<String, PendingApproval>,
     /// Per-session "always allow" tool names, shared by the main agent and all
     /// subagents (their requests arrive on the same channel). It can only
@@ -200,14 +203,16 @@ pub struct AgentCore {
     plan_draft: Option<PlanDraft>,
     resume_summary_running: bool,
     interrupt_flag: Arc<AtomicBool>,
+    /// The session's agent team: its subagents (background ones outlive a
+    /// turn), mail, task board and worktrees to merge.
     subagent_manager: SubagentManager,
-    /// What every turn's subagent manager shares: worktrees still to merge
-    /// and the plan (see `TeamShared`).
-    team: TeamShared,
+    /// The team revision last written to the session (`persist_team`).
+    team_saved: u64,
+    /// The next turn is one the engine starts for a background result: it
+    /// continues the team's budget window.
+    wake_turn: bool,
     /// Messages steered into the running turn, until the model reads them.
     steered_pending: Vec<String>,
-    /// Agents of earlier turns: (agent_runs row, transcript), newest last.
-    past_subagents: Vec<(Value, Vec<Value>)>,
     /// What the last `agent_runs` showed, and when it went out (throttle).
     agent_runs_revision: u64,
     agent_runs_sent_at: Option<Instant>,
@@ -231,6 +236,14 @@ pub struct AgentCore {
     /// Binaries override it with their own via `with_version`; the default is
     /// the agent-core crate version, which may differ.
     version: &'static str,
+}
+
+impl Drop for AgentCore {
+    /// The engine goes away (a daemon session closed): its subagents,
+    /// background ones included, stop instead of working unwatched.
+    fn drop(&mut self) {
+        self.subagent_manager.close_everything("engine stopped");
+    }
 }
 
 /// Messages from an omp provider login worker: interim notices (browser URL,
@@ -283,8 +296,7 @@ impl AgentCore {
                 crate::log_info!("subagent", "removed old worktrees", count = removed);
             }
         });
-        let team = TeamShared::default();
-        let subagent_manager = SubagentManager::new(config.agents.clone(), team.clone());
+        let subagent_manager = SubagentManager::new(config.agents.clone(), TeamShared::default());
         let session = SessionStore::new();
         // A fresh session id is unique, so this only fails on IO problems.
         let session_lock = SessionLock::acquire(&profile_dir()?, &cwd, session.session_id()).ok();
@@ -323,9 +335,9 @@ impl AgentCore {
             resume_summary_running: false,
             interrupt_flag: Arc::new(AtomicBool::new(false)),
             subagent_manager,
-            team,
+            team_saved: 0,
+            wake_turn: false,
             steered_pending: Vec::new(),
-            past_subagents: Vec::new(),
             agent_runs_revision: 0,
             agent_runs_sent_at: None,
             trust,
@@ -336,6 +348,7 @@ impl AgentCore {
             chat,
             plan: Vec::new(),
             approval_receiver: None,
+            approval_tx: None,
             pending_approvals: HashMap::new(),
             approved_tools: HashSet::new(),
             approval_mode: LiveApprovalMode::new(approval_mode),
@@ -443,6 +456,10 @@ impl AgentCore {
             // event is emitted from poll_events when their state settles.
             self.mcp_servers_event(),
         ];
+        let board = self.subagent_manager.board_json();
+        if !board.is_empty() {
+            events.push(AgentEvent::TaskBoard(board));
+        }
         if trust::project_has_local_resources(&self.cwd)
             && self.trust.decision_for(&self.cwd).is_none()
         {
@@ -719,11 +736,41 @@ impl AgentCore {
         self.receiver = None;
         self.running = false;
         self.goal_tool_receiver = None;
-        self.approval_receiver = None;
-        self.pending_approvals.clear();
+        self.drop_foreground_approvals();
         self.goal_continuation_running = false;
         self.turn_started_at = None;
         self.turn_goal_tokens = 0;
+    }
+
+    /// The approval channel's sending end, made on first use.
+    fn approval_sender(&mut self) -> Sender<ApprovalRequest> {
+        match (&self.approval_tx, &self.approval_receiver) {
+            (Some(tx), Some(_)) => tx.clone(),
+            _ => {
+                let (tx, rx) = mpsc::channel();
+                self.approval_tx = Some(tx.clone());
+                self.approval_receiver = Some(rx);
+                tx
+            }
+        }
+    }
+
+    /// Denies the approvals asked for by agents that no longer run (the
+    /// stopped turn and its foreground subagents); those of running
+    /// background agents stay.
+    fn drop_foreground_approvals(&mut self) {
+        let manager = self.subagent_manager.clone();
+        let live = |id: &Option<String>| id.as_deref().is_some_and(|id| manager.is_live(id));
+        self.pending_approvals
+            .retain(|_, pending| live(&pending.subagent_id));
+        if let (Some(rx), Some(tx)) = (&self.approval_receiver, &self.approval_tx) {
+            let waiting: Vec<ApprovalRequest> = rx.try_iter().collect();
+            for request in waiting {
+                if live(&request.subagent_id) {
+                    let _ = tx.send(request);
+                }
+            }
+        }
     }
 
     /// Runs the user_prompt_submit hook before starting a turn. Every path that
@@ -1649,6 +1696,9 @@ impl AgentCore {
                             output,
                             is_error,
                         });
+                        // What a team tool changed (the board, a spawn, a
+                        // merge) follows its result.
+                        events.extend(self.drain_subagent_events());
                     }
                     WorkerEvent::Usage {
                         input_tokens,
@@ -1682,6 +1732,7 @@ impl AgentCore {
                     WorkerEvent::Done => {
                         self.subagent_manager
                             .close_all_with_message("parent turn finished");
+                        events.extend(self.drain_subagent_events());
                         // Steered after the model's last request: run next.
                         self.requeue_unread_steers();
                         events.extend(self.finish_goal_turn());
@@ -1833,9 +1884,63 @@ impl AgentCore {
                 events.extend(self.start_hooked_turn(next, images));
             } else if self.should_continue_goal() {
                 events.extend(self.start_goal_continuation());
+            } else if self.config.agents.wake_on_result && !self.subagent_manager.budget_exhausted()
+            {
+                // A background result (or a hook's output) for an idle main
+                // agent: it carries on without the user.
+                let mail = self.subagent_manager.take_wake();
+                if !mail.is_empty() {
+                    events.extend(self.start_wake_turn(mail));
+                }
             }
         }
+        events.extend(self.persist_team());
 
+        events
+    }
+
+    /// Writes the team's board and worktree registry to the session when
+    /// they changed, so they survive an engine restart.
+    fn persist_team(&mut self) -> Vec<AgentEvent> {
+        let revision = self.subagent_manager.revision();
+        if revision == self.team_saved {
+            return Vec::new();
+        }
+        self.team_saved = revision;
+        self.session.set_team(self.subagent_manager.team_json());
+        self.save_session_event()
+    }
+
+    /// A main turn the engine starts by itself on the main agent's mail: a
+    /// background subagent's result (`<subagent_result>`) or a hook's
+    /// output. It is the conversation's next input, hidden like other
+    /// runtime messages; each result also shows as an `agent_message`.
+    fn start_wake_turn(&mut self, mail: Vec<crate::subagents::InboxMessage>) -> Vec<AgentEvent> {
+        let mut events = Vec::new();
+        for message in &mail {
+            if matches!(message.kind, crate::subagents::MailKind::Result { .. }) {
+                events.push(AgentEvent::AgentMessage {
+                    from: message.from.clone(),
+                    to: ROOT_PATH.to_string(),
+                    summary: message.text.chars().take(200).collect(),
+                });
+            }
+        }
+        let text = mail
+            .iter()
+            .map(crate::subagents::InboxMessage::model_text)
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        self.overflow_retried = false;
+        self.goal_continuation_running = false;
+        self.session.append(EntryKind::ResponseItem {
+            item: json!({
+                "role": "user",
+                "content": [{ "type": "input_text", "text": text }]
+            }),
+        });
+        self.wake_turn = true;
+        events.extend(self.start_turn_from_existing_context());
         events
     }
 
@@ -1911,6 +2016,7 @@ impl AgentCore {
                     error,
                 },
                 TeamEvent::Budget { used, limit } => AgentEvent::TeamBudget { used, limit },
+                TeamEvent::Board => AgentEvent::TaskBoard(self.subagent_manager.board_json()),
             });
         }
         // The agent trace: at most two refreshes a second while agents work;
@@ -1930,34 +2036,9 @@ impl AgentCore {
         events
     }
 
-    /// A `subagent_lifecycle` event. An agent of an earlier turn (merged or
-    /// discarded since) is described from, and updates, its archived row.
+    /// A `subagent_lifecycle` event.
     fn lifecycle_event(&mut self, path: String, status: String, message: String) -> AgentEvent {
-        let info = match self.subagent_manager.describe(&path) {
-            Some(info) => info,
-            None => {
-                let row = self
-                    .past_subagents
-                    .iter_mut()
-                    .rev()
-                    .map(|(row, _)| row)
-                    .find(|row| row["id"] == path.as_str());
-                match row {
-                    Some(row) => {
-                        row["state"] = json!(status);
-                        let text = |key: &str| row[key].as_str().map(str::to_string);
-                        crate::subagents::AgentInfo {
-                            label: text("label").unwrap_or_default(),
-                            model: text("model").unwrap_or_default(),
-                            tool_use_id: text("tool_use_id").unwrap_or_default(),
-                            role: text("role"),
-                            plan_step: text("plan_step"),
-                        }
-                    }
-                    None => Default::default(),
-                }
-            }
-        };
+        let info = self.subagent_manager.describe(&path).unwrap_or_default();
         let plan_step = info.plan_step.or_else(|| {
             let name = path.rsplit('/').next().unwrap_or_default();
             self.plan
@@ -1978,6 +2059,9 @@ impl AgentCore {
             tool_use_id: info.tool_use_id,
             role: info.role,
             plan_step,
+            background: info.background,
+            attempt_group: info.attempt_group,
+            attempt: info.attempt,
         }
     }
 
@@ -1989,13 +2073,47 @@ impl AgentCore {
             return vec![AgentEvent::Error("merge_agent requires target".to_string())];
         }
         let _ = self.subagent_manager.merge_agent(ROOT_PATH, target, action);
-        let mut events = self.drain_subagent_events();
+        self.team_op_events(None)
+    }
+
+    /// The `close_agent` op (the desktop's stop button): closes `target`, a
+    /// subagent of the main agent (its task name or path), background or
+    /// not, and the foreground agents it started.
+    pub fn close_agent(&mut self, target: &str) -> Vec<AgentEvent> {
+        if target.trim().is_empty() {
+            return vec![AgentEvent::Error("close_agent requires target".to_string())];
+        }
+        let error = self.subagent_manager.close_agent(ROOT_PATH, target).err();
+        self.team_op_events(error)
+    }
+
+    /// The `pick_attempt` op: applies attempt `target` of the main agent's
+    /// best-of-N `group` and discards the others (see `pick_attempt`).
+    pub fn pick_attempt(&mut self, group: &str, target: &str) -> Vec<AgentEvent> {
+        if group.trim().is_empty() || target.trim().is_empty() {
+            return vec![AgentEvent::Error(
+                "pick_attempt requires group and target".to_string(),
+            )];
+        }
+        let error = self
+            .subagent_manager
+            .pick_attempt(ROOT_PATH, group, target)
+            .err();
+        self.team_op_events(error)
+    }
+
+    /// What a team op emits: its error, the team's events, then
+    /// `agent_runs`; the team is saved.
+    fn team_op_events(&mut self, error: Option<String>) -> Vec<AgentEvent> {
+        let mut events: Vec<AgentEvent> = error.map(AgentEvent::Error).into_iter().collect();
+        events.extend(self.drain_subagent_events());
         if !events
             .iter()
             .any(|event| matches!(event, AgentEvent::AgentRuns(_)))
         {
             events.push(self.agent_runs_event());
         }
+        events.extend(self.persist_team());
         events
     }
 
@@ -2022,50 +2140,29 @@ impl AgentCore {
         }
     }
 
-    /// `agent_runs`: this session's subagents, earlier turns' first.
+    /// `agent_runs`: this session's subagents, oldest first.
     pub fn agent_runs_event(&self) -> AgentEvent {
-        let current = self.subagent_manager.runs_json();
-        let mut agents: Vec<Value> = self
-            .past_subagents
-            .iter()
-            .map(|(row, _)| row.clone())
-            .filter(|row| !current.iter().any(|now| now["id"] == row["id"]))
-            .collect();
-        agents.extend(current);
-        AgentEvent::AgentRuns(agents)
+        AgentEvent::AgentRuns(self.subagent_manager.runs_json())
     }
 
-    /// `subagent_transcript`: one agent's work, this turn's agents first.
+    /// `subagent_transcript`: one agent's work.
     pub fn subagent_transcript_event(&self, agent_id: &str) -> AgentEvent {
-        let items = self.subagent_manager.transcript_json(agent_id).or_else(|| {
-            self.past_subagents
-                .iter()
-                .rev()
-                .find(|(row, _)| row["id"] == agent_id)
-                .map(|(_, items)| items.clone())
-        });
         AgentEvent::SubagentTranscript {
             agent_id: agent_id.to_string(),
-            items,
+            items: self.subagent_manager.transcript_json(agent_id),
         }
     }
 
-    /// Keeps the agents of the turn that ended (the manager starts afresh
-    /// each turn), bounded to the most recent ones.
-    fn archive_subagents(&mut self) {
-        const MAX_PAST_SUBAGENTS: usize = 24;
-        for row in self.subagent_manager.runs_json() {
-            let id = row["id"].as_str().unwrap_or_default().to_string();
-            let items = self
-                .subagent_manager
-                .transcript_json(&id)
-                .unwrap_or_default();
-            self.past_subagents
-                .retain(|(known, _)| known["id"] != row["id"]);
-            self.past_subagents.push((row, items));
-        }
-        let excess = self.past_subagents.len().saturating_sub(MAX_PAST_SUBAGENTS);
-        self.past_subagents.drain(..excess);
+    /// A new team for the session now open (its saved one, when it has
+    /// one): the previous session's agents stop.
+    fn reset_team(&mut self) {
+        self.subagent_manager.close_everything("session switched");
+        self.subagent_manager = match self.session.team() {
+            Some(team) => SubagentManager::restore(self.config.agents.clone(), team),
+            None => SubagentManager::new(self.config.agents.clone(), TeamShared::default()),
+        };
+        self.team_saved = self.subagent_manager.revision();
+        self.drop_foreground_approvals();
     }
 
     /// Folds finished subagents' token usage into the parent's cumulative totals,
@@ -2109,7 +2206,6 @@ impl AgentCore {
             events.push(AgentEvent::Error(error));
             return events;
         }
-        self.archive_subagents();
         self.requeue_unread_steers();
         let base_prompt = match self.config.system_prompt() {
             Ok(_) if self.chat => crate::chat::CHAT_SYSTEM_PROMPT.to_string(),
@@ -2169,8 +2265,10 @@ impl AgentCore {
         // groups in config.json while engines run. An unreadable file keeps
         // the values this engine already has.
         let _ = self.config.reload_live_settings();
-        self.subagent_manager = SubagentManager::new(self.config.agents.clone(), self.team.clone());
-        self.team.set_plan(
+        let new_window = !std::mem::take(&mut self.wake_turn);
+        self.subagent_manager
+            .begin_turn(self.config.agents.clone(), new_window);
+        self.subagent_manager.shared().set_plan(
             self.latest_plan_approved(),
             self.plan.iter().map(|item| item.step.clone()).collect(),
         );
@@ -2209,9 +2307,8 @@ impl AgentCore {
             crate::tokens::count_text(&self.config.model, &system_prompt).tokens as u64;
         let (goal_tool_tx, goal_tool_rx) = mpsc::channel();
         self.goal_tool_receiver = Some(goal_tool_rx);
-        let (approval_tx, approval_rx) = mpsc::channel();
-        self.approval_receiver = Some(approval_rx);
-        self.pending_approvals.clear();
+        let approval_tx = self.approval_sender();
+        self.drop_foreground_approvals();
         let Ok(mut client) = OpenAiClient::from_config(OpenAiClientConfig {
             model: self.config.model.clone(),
             provider: self.config.provider.clone(),
@@ -2632,6 +2729,14 @@ impl AgentCore {
         };
         let mut events = Vec::new();
         while let Ok(request) = rx.try_recv() {
+            // From a stopped turn or a closed agent: denied (dropped).
+            let current = match &request.subagent_id {
+                None => self.running,
+                Some(id) => self.subagent_manager.is_live(id),
+            };
+            if !current {
+                continue;
+            }
             if self.approved_tools.contains(&request.name)
                 || !self.approval_mode.get().requires_approval(&request.name)
             {
@@ -2800,12 +2905,16 @@ impl AgentCore {
             return events;
         }
         // A merge runs here: the worktree registry lives in this engine.
-        if action.name == "merge_agent" {
+        if matches!(action.name.as_str(), "merge_agent" | "pick_attempt") {
             let args = serde_json::from_str::<Value>(&action.arguments).unwrap_or_default();
             let text = |key: &str| args[key].as_str().unwrap_or_default().to_string();
-            let result =
+            let result = if action.name == "pick_attempt" {
                 self.subagent_manager
-                    .merge_agent(ROOT_PATH, &text("target"), &text("action"));
+                    .pick_attempt(ROOT_PATH, &text("group"), &text("target"))
+            } else {
+                self.subagent_manager
+                    .merge_agent(ROOT_PATH, &text("target"), &text("action"))
+            };
             let (output, is_error) = match result {
                 Ok(value) => (value.to_string(), false),
                 Err(error) => (json!({ "error": error }).to_string(), true),
@@ -3417,7 +3526,8 @@ impl AgentCore {
             });
         }
         self.plan = plan;
-        self.team
+        self.subagent_manager
+            .shared()
             .set_plan_steps(self.plan.iter().map(|item| item.step.clone()).collect());
         let output = json!({ "ok": true, "steps": self.plan.len() }).to_string();
         (
@@ -3535,6 +3645,7 @@ impl AgentCore {
         self.resume_summary_receiver = None;
         self.resume_summary_running = false;
         self.session = SessionStore::new();
+        self.reset_team();
         // Release the old session's lock and hold the new one.
         self.session_lock = None;
         self.session_lock =
@@ -4114,13 +4225,23 @@ impl AgentCore {
                 self.session = session;
                 // Release the previous session's lock only after the switch.
                 self.session_lock = Some(lock);
-                vec![
+                self.reset_team();
+                let mut events = vec![
                     AgentEvent::Transcript(self.session.transcript_items()),
                     AgentEvent::PendingMessages(Vec::new()),
                     self.model_status_event(),
                     self.context_usage_event(),
-                    AgentEvent::Status(format!("resumed session {}", self.session.session_id())),
-                ]
+                    self.agent_runs_event(),
+                ];
+                let board = self.subagent_manager.board_json();
+                if !board.is_empty() {
+                    events.push(AgentEvent::TaskBoard(board));
+                }
+                events.push(AgentEvent::Status(format!(
+                    "resumed session {}",
+                    self.session.session_id()
+                )));
+                events
             }
             Err(error) => {
                 crate::log_error!(

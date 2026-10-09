@@ -1,4 +1,7 @@
-use crate::config::AgentsConfig;
+use crate::{
+    board::{Board, NewTask, Task},
+    config::AgentsConfig,
+};
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -21,10 +24,10 @@ const MESSAGE_SUMMARY_CHARS: usize = 200;
 
 /// An isolated working directory for one subagent. File-tool writes
 /// (write/str_replace/hashline_edit/apply_patch) are confined to this root by
-/// `write_target_escapes_root`; bash commands are not confined, so this is a
-/// write boundary for file tools, not a sandbox — a child shell can still
-/// reach the parent tree via absolute paths. The parent brings the changes
-/// back with `merge_agent`.
+/// `write_target_escapes_root`. Its shell commands run in the sandbox with
+/// this root as the only writable project directory (`ToolState::confined`);
+/// without a sandbox they only start inside it. The parent brings the
+/// changes back with `merge_agent`.
 #[derive(Debug, Clone)]
 pub(crate) struct SubagentWorkspace {
     pub root: PathBuf,
@@ -185,6 +188,22 @@ impl SubagentStatus {
         }
     }
 
+    fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "pending" => Self::Pending,
+            "running" => Self::Running,
+            "completed" => Self::Completed,
+            "errored" => Self::Errored,
+            "interrupted" => Self::Interrupted,
+            "closed" => Self::Closed,
+            "budget_exhausted" => Self::BudgetExhausted,
+            "conflict" => Self::Conflict,
+            "merged" => Self::Merged,
+            "discarded" => Self::Discarded,
+            _ => return None,
+        })
+    }
+
     fn is_live(&self) -> bool {
         matches!(self, Self::Pending | Self::Running)
     }
@@ -194,7 +213,7 @@ impl SubagentStatus {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct SubagentSpawn {
     pub parent_path: String,
     pub task_name: String,
@@ -207,6 +226,12 @@ pub(crate) struct SubagentSpawn {
     pub role: Option<String>,
     /// The plan step this agent works on.
     pub plan_step: Option<String>,
+    /// It keeps running after its parent's turn ends.
+    pub background: bool,
+    /// best-of-N: the task name spawn_agent got, and this attempt's number
+    /// from 1 (the agent is `<group>_a<attempt>`).
+    pub attempt_group: Option<String>,
+    pub attempt: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -258,6 +283,21 @@ pub(crate) enum TeamEvent {
         used: u64,
         limit: u64,
     },
+    /// The task board changed (the core sends the whole board).
+    Board,
+}
+
+/// What a piece of agent mail is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MailKind {
+    /// send_message, or the budget warning.
+    Message,
+    /// A background subagent's result for the main agent; it wakes an idle
+    /// main agent.
+    Result { status: String },
+    /// A task_completed or agent_idle hook's output for the main agent; it
+    /// wakes an idle main agent too.
+    Hook { ok: bool },
 }
 
 /// A message waiting for an agent's next model request.
@@ -265,9 +305,60 @@ pub(crate) enum TeamEvent {
 pub(crate) struct InboxMessage {
     pub from: String,
     pub text: String,
+    pub kind: MailKind,
 }
 
-/// Label, model, spawn call, role and plan step of an agent.
+impl InboxMessage {
+    pub(crate) fn message(from: &str, text: &str) -> Self {
+        Self {
+            from: from.to_string(),
+            text: text.to_string(),
+            kind: MailKind::Message,
+        }
+    }
+
+    /// Mail that starts a turn of an idle main agent.
+    pub(crate) fn wakes(&self) -> bool {
+        self.kind != MailKind::Message
+    }
+
+    /// The text the recipient's model reads.
+    pub(crate) fn model_text(&self) -> String {
+        match &self.kind {
+            MailKind::Message => format!(
+                "<subagent_message from=\"{}\">\n{}\n</subagent_message>",
+                self.from, self.text
+            ),
+            MailKind::Result { status } => format!(
+                "<subagent_result path=\"{}\" status=\"{status}\">\n{}\n</subagent_result>",
+                self.from, self.text
+            ),
+            MailKind::Hook { ok } => format!(
+                "<hook_result hook=\"{}\" ok=\"{ok}\">\n{}\n</hook_result>",
+                self.from.trim_start_matches("hook:"),
+                self.text
+            ),
+        }
+    }
+
+    fn wait_json(&self) -> Value {
+        let mut value = json!({ "from": self.from, "message": self.text });
+        match &self.kind {
+            MailKind::Message => {}
+            MailKind::Result { status } => {
+                value["kind"] = json!("result");
+                value["status"] = json!(status);
+            }
+            MailKind::Hook { ok } => {
+                value["kind"] = json!("hook");
+                value["ok"] = json!(ok);
+            }
+        }
+        value
+    }
+}
+
+/// Label, model, spawn call, role, plan step and kind of an agent.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct AgentInfo {
     pub label: String,
@@ -275,6 +366,9 @@ pub(crate) struct AgentInfo {
     pub tool_use_id: String,
     pub role: Option<String>,
     pub plan_step: Option<String>,
+    pub background: bool,
+    pub attempt_group: Option<String>,
+    pub attempt: Option<u64>,
 }
 
 /// A worktree (or plain workspace) waiting for merge_agent.
@@ -287,9 +381,9 @@ struct PendingWorktree {
     busy: bool,
 }
 
-/// What outlives a turn's `SubagentManager`: worktrees not yet merged or
-/// discarded (so a later turn or a client can still merge them), and the
-/// main agent's plan, which `agents.fanout = plan` checks spawns against.
+/// Worktrees not yet merged or discarded (so a later turn or a client can
+/// still merge them), and the main agent's plan, which `agents.fanout =
+/// plan` checks spawns against.
 #[derive(Clone, Default)]
 pub(crate) struct TeamShared(Arc<Mutex<TeamState>>);
 
@@ -333,6 +427,15 @@ impl TeamShared {
         self.0.lock().unwrap().worktrees.get(path).cloned()
     }
 
+    fn snapshot(&self) -> Vec<(String, PendingWorktree)> {
+        let state = self.0.lock().unwrap();
+        state
+            .worktrees
+            .iter()
+            .map(|(path, worktree)| (path.clone(), worktree.clone()))
+            .collect()
+    }
+
     /// Takes the worktree of `path` for a merge; Err when there is none or a
     /// merge of it is already running.
     fn begin_merge(&self, path: &str) -> Result<PendingWorktree, String> {
@@ -358,6 +461,21 @@ impl TeamShared {
     }
 }
 
+/// A finished subagent ready to run again (`resume_agent`).
+pub(crate) struct Resume {
+    pub slot: SubagentSlot,
+    pub task_name: String,
+    pub spec: crate::llm::ChildSpec,
+    /// Its conversation when it stopped.
+    pub context: Vec<Value>,
+    /// Its worktree, when it still exists.
+    pub workspace: Option<SubagentWorkspace>,
+}
+
+/// The session's team: every subagent of the session (the 24 most recent
+/// finished ones are kept), their mail, the token budget of the current
+/// window, the task board and the worktrees to merge. One per session; the
+/// core starts each main turn with `begin_turn`.
 #[derive(Clone, Default)]
 pub(crate) struct SubagentManager {
     inner: Arc<SubagentInner>,
@@ -367,7 +485,7 @@ pub(crate) struct SubagentManager {
 struct SubagentInner {
     state: Mutex<SubagentRegistry>,
     changed: Condvar,
-    config: AgentsConfig,
+    config: Mutex<AgentsConfig>,
     shared: TeamShared,
 }
 
@@ -384,12 +502,18 @@ struct SubagentRegistry {
     /// Token usage of subagents that reached a final state, awaiting fold-in to
     /// the parent's cumulative totals. Drained once via `drain_finished_usage`.
     finished_usage: Vec<SubagentRunResult>,
-    /// Input + output tokens of every subagent of this turn so far.
+    /// Input + output tokens of every subagent since the budget window
+    /// opened (a user's turn; a turn the engine starts by itself continues
+    /// the window).
     tokens_used: u64,
     /// The 80% "wrap up" message went out.
     budget_warned: bool,
     /// The tenth of the budget the last `Budget` event reported.
     budget_tenth: Option<u64>,
+    board: Board,
+    /// Bumped on every change the session persists (the board, worktree
+    /// agents): the core saves when it moves.
+    revision: u64,
 }
 
 struct SubagentRecord {
@@ -413,51 +537,124 @@ struct SubagentRecord {
     tool_use_id: String,
     role: Option<String>,
     plan_step: Option<String>,
+    background: bool,
+    attempt_group: Option<String>,
+    attempt: Option<u64>,
+    /// How it was started, so resume_agent can run it again.
+    spec: Option<crate::llm::ChildSpec>,
+    /// Its conversation when it last stopped.
+    context: Option<Vec<Value>>,
     /// What it is doing, for the front-ends' agent trace.
     trace: crate::subagent_trace::SubagentTrace,
 }
+
+/// Finished agents kept for agent_runs, transcripts and resume_agent.
+const MAX_KEPT_AGENTS: usize = 24;
 
 impl SubagentManager {
     pub(crate) fn new(config: AgentsConfig, shared: TeamShared) -> Self {
         Self {
             inner: Arc::new(SubagentInner {
-                config,
+                config: Mutex::new(config),
                 shared,
                 ..SubagentInner::default()
             }),
         }
     }
 
-    pub(crate) fn config(&self) -> &AgentsConfig {
-        &self.inner.config
+    pub(crate) fn config(&self) -> AgentsConfig {
+        self.inner.config.lock().unwrap().clone()
     }
 
     pub(crate) fn shared(&self) -> &TeamShared {
         &self.inner.shared
     }
 
-    pub(crate) fn reserve_spawn(&self, spawn: SubagentSpawn) -> Result<SubagentSlot, String> {
-        validate_task_name(&spawn.task_name)?;
-        let config = &self.inner.config;
-        if spawn.depth > config.max_depth {
-            return Err("agent depth limit reached. Solve the task yourself.".to_string());
-        }
-        let path = child_path(&spawn.parent_path, &spawn.task_name);
+    /// A main turn starts: the settings it runs with. `new_window` opens a
+    /// new budget window (every turn but one the engine starts by itself
+    /// for a background result). Old finished agents are forgotten.
+    pub(crate) fn begin_turn(&self, config: AgentsConfig, new_window: bool) {
+        *self.inner.config.lock().unwrap() = config;
         let mut state = self.inner.state.lock().unwrap();
-        if state.agents.contains_key(&path) {
-            return Err(format!("agent already exists: {path}"));
+        if new_window {
+            state.tokens_used = 0;
+            state.budget_warned = false;
+            state.budget_tenth = None;
+            for inbox in state.inboxes.values_mut() {
+                inbox.retain(|message| message.from != "team_budget");
+            }
         }
-        if self.inner.shared.has_worktree(&path) {
-            return Err(format!(
-                "{path} still has a worktree to merge; merge_agent it first or use another task_name"
-            ));
+        let mut finished: Vec<(u64, String)> = state
+            .agents
+            .values()
+            .filter(|agent| agent.status.is_final() && !self.inner.shared.has_worktree(&agent.path))
+            // A running background agent's parent stays: it tells what the
+            // agent belongs to.
+            .filter(|agent| {
+                let prefix = format!("{}/", agent.path);
+                !state
+                    .agents
+                    .values()
+                    .any(|other| other.status.is_live() && other.path.starts_with(&prefix))
+            })
+            .map(|agent| {
+                (
+                    agent.completed_at_ms.unwrap_or(agent.started_at_ms),
+                    agent.path.clone(),
+                )
+            })
+            .collect();
+        if finished.len() > MAX_KEPT_AGENTS {
+            finished.sort();
+            let excess = finished.len() - MAX_KEPT_AGENTS;
+            for (_, path) in finished.drain(..excess) {
+                state.agents.remove(&path);
+                state.inboxes.remove(&path);
+            }
+        }
+    }
+
+    pub(crate) fn reserve_spawn(&self, spawn: SubagentSpawn) -> Result<SubagentSlot, String> {
+        self.reserve_spawns(vec![spawn])
+            .map(|mut slots| slots.remove(0))
+    }
+
+    /// Reserves every spawn or none (best-of-N starts its attempts
+    /// together). A finished agent of the same path is replaced; a running
+    /// one, or a worktree still to merge, refuses.
+    pub(crate) fn reserve_spawns(
+        &self,
+        spawns: Vec<SubagentSpawn>,
+    ) -> Result<Vec<SubagentSlot>, String> {
+        let config = self.config();
+        for spawn in &spawns {
+            validate_task_name(&spawn.task_name)?;
+            if spawn.depth > config.max_depth {
+                return Err("agent depth limit reached. Solve the task yourself.".to_string());
+            }
+        }
+        let mut state = self.inner.state.lock().unwrap();
+        for spawn in &spawns {
+            let path = child_path(&spawn.parent_path, &spawn.task_name);
+            if state
+                .agents
+                .get(&path)
+                .is_some_and(|agent| agent.status.is_live())
+            {
+                return Err(format!("agent already exists: {path}"));
+            }
+            if self.inner.shared.has_worktree(&path) {
+                return Err(format!(
+                    "{path} still has a worktree to merge; merge_agent it first or use another task_name"
+                ));
+            }
         }
         let live = state
             .agents
             .values()
             .filter(|agent| agent.status.is_live())
             .count();
-        if live >= config.max_live {
+        if live + spawns.len() > config.max_live {
             return Err(format!(
                 "too many live agents ({}); wait for or close an agent first",
                 config.max_live
@@ -469,45 +666,72 @@ impl SubagentManager {
                 state.tokens_used, config.turn_token_budget
             ));
         }
-        let interrupt_flag = Arc::new(AtomicBool::new(false));
-        let trace = crate::subagent_trace::SubagentTrace::new(&spawn.message);
-        state.agents.insert(
-            path.clone(),
-            SubagentRecord {
-                path: path.clone(),
-                parent_path: spawn.parent_path,
-                task_name: spawn.task_name,
-                message: spawn.message,
-                model: spawn.model,
-                reasoning_effort: spawn.reasoning_effort,
-                depth: spawn.depth,
-                status: SubagentStatus::Pending,
-                interrupt_flag: Arc::clone(&interrupt_flag),
-                result: None,
-                error: None,
-                started_at_ms: now_ms(),
-                completed_at_ms: None,
-                workdir: None,
-                isolated: false,
-                trace,
-                tool_use_id: spawn.tool_use_id,
-                role: spawn.role,
-                plan_step: spawn.plan_step,
-            },
-        );
-        state.push_event(&path, "pending", "reserved");
+        let mut slots = Vec::new();
+        for spawn in spawns {
+            let path = child_path(&spawn.parent_path, &spawn.task_name);
+            let interrupt_flag = Arc::new(AtomicBool::new(false));
+            let trace = crate::subagent_trace::SubagentTrace::new(&spawn.message);
+            state.inboxes.remove(&path);
+            state.agents.insert(
+                path.clone(),
+                SubagentRecord {
+                    path: path.clone(),
+                    parent_path: spawn.parent_path,
+                    task_name: spawn.task_name,
+                    message: spawn.message,
+                    model: spawn.model,
+                    reasoning_effort: spawn.reasoning_effort,
+                    depth: spawn.depth,
+                    status: SubagentStatus::Pending,
+                    interrupt_flag: Arc::clone(&interrupt_flag),
+                    result: None,
+                    error: None,
+                    started_at_ms: now_ms(),
+                    completed_at_ms: None,
+                    workdir: None,
+                    isolated: false,
+                    trace,
+                    tool_use_id: spawn.tool_use_id,
+                    role: spawn.role,
+                    plan_step: spawn.plan_step,
+                    background: spawn.background,
+                    attempt_group: spawn.attempt_group,
+                    attempt: spawn.attempt,
+                    spec: None,
+                    context: None,
+                },
+            );
+            state.push_event(&path, "pending", "reserved");
+            slots.push(SubagentSlot {
+                path,
+                interrupt_flag,
+            });
+        }
         self.note_budget(&mut state);
         self.inner.changed.notify_all();
-        Ok(SubagentSlot {
-            path,
-            interrupt_flag,
-        })
+        Ok(slots)
     }
 
     pub(crate) fn set_workdir(&self, path: &str, workdir: &str) {
         let mut state = self.inner.state.lock().unwrap();
         if let Some(agent) = state.agents.get_mut(path) {
             agent.workdir = Some(workdir.to_string());
+        }
+    }
+
+    /// How `path` was started, for resume_agent.
+    pub(crate) fn set_spec(&self, path: &str, spec: crate::llm::ChildSpec) {
+        let mut state = self.inner.state.lock().unwrap();
+        if let Some(agent) = state.agents.get_mut(path) {
+            agent.spec = Some(spec);
+        }
+    }
+
+    /// The conversation `path` ended with, for resume_agent.
+    pub(crate) fn save_context(&self, path: &str, items: Vec<Value>) {
+        let mut state = self.inner.state.lock().unwrap();
+        if let Some(agent) = state.agents.get_mut(path) {
+            agent.context = Some(items);
         }
     }
 
@@ -532,6 +756,7 @@ impl SubagentManager {
                 busy: false,
             },
         );
+        state.revision += 1;
     }
 
     pub(crate) fn mark_running(&self, path: &str) {
@@ -550,77 +775,91 @@ impl SubagentManager {
     }
 
     pub(crate) fn finish_ok(&self, path: &str, result: SubagentRunResult) {
-        let mut state = self.inner.state.lock().unwrap();
-        let mut event = None;
-        let mut finished = None;
-        if let Some(agent) = state.agents.get_mut(path) {
-            if agent.status == SubagentStatus::Closed {
-                self.inner.changed.notify_all();
-                return;
-            }
-            agent.status = SubagentStatus::Completed;
-            agent.completed_at_ms = Some(now_ms());
-            agent.trace.finish("Done");
-            agent.result = Some(result.clone());
-            agent.error = None;
-            event = Some(("completed", "finished".to_string()));
-            finished = Some(result);
-        }
-        if let Some(usage) = finished {
-            state.finished_usage.push(usage);
-        }
-        if let Some((status, message)) = event {
-            state.push_event(path, status, &message);
-        }
-        self.inner.changed.notify_all();
+        self.finish(path, result, None);
     }
 
     pub(crate) fn finish_err(&self, path: &str, error: String, partial: SubagentRunResult) {
+        self.finish(path, partial, Some(error));
+    }
+
+    /// An agent's run ended. Its foreground subagents are closed; a
+    /// background agent of the main agent leaves its result in the main
+    /// agent's mail, which wakes an idle main agent.
+    fn finish(&self, path: &str, result: SubagentRunResult, error: Option<String>) {
         let mut state = self.inner.state.lock().unwrap();
-        let mut event = None;
-        let mut finished = None;
-        if let Some(agent) = state.agents.get_mut(path) {
-            if agent.status == SubagentStatus::Closed {
-                self.inner.changed.notify_all();
-                return;
+        let Some(agent) = state.agents.get_mut(path) else {
+            self.inner.changed.notify_all();
+            return;
+        };
+        if agent.status == SubagentStatus::Closed {
+            self.inner.changed.notify_all();
+            return;
+        }
+        let message = match error {
+            None => {
+                agent.status = SubagentStatus::Completed;
+                agent.trace.finish("Done");
+                agent.error = None;
+                "finished".to_string()
             }
-            agent.status = if agent.interrupt_flag.load(Ordering::SeqCst) || error == "interrupted"
-            {
-                SubagentStatus::Interrupted
-            } else if error == BUDGET_EXHAUSTED {
-                SubagentStatus::BudgetExhausted
-            } else {
-                SubagentStatus::Errored
-            };
-            let error = if agent.status == SubagentStatus::BudgetExhausted {
-                "stopped: the turn's subagent token budget is used up".to_string()
-            } else {
+            Some(error) => {
+                agent.status =
+                    if agent.interrupt_flag.load(Ordering::SeqCst) || error == "interrupted" {
+                        SubagentStatus::Interrupted
+                    } else if error == BUDGET_EXHAUSTED {
+                        SubagentStatus::BudgetExhausted
+                    } else {
+                        SubagentStatus::Errored
+                    };
+                let error = if agent.status == SubagentStatus::BudgetExhausted {
+                    "stopped: the turn's subagent token budget is used up".to_string()
+                } else {
+                    error
+                };
+                agent.trace.finish(match agent.status {
+                    SubagentStatus::Interrupted => "Interrupted",
+                    SubagentStatus::BudgetExhausted => "Budget used up",
+                    _ => "Failed",
+                });
+                agent.error = Some(error.clone());
                 error
-            };
-            agent.completed_at_ms = Some(now_ms());
-            agent.result = Some(partial.clone());
-            agent.error = Some(error.clone());
-            agent.trace.finish(match agent.status {
-                SubagentStatus::Interrupted => "Interrupted",
-                SubagentStatus::BudgetExhausted => "Budget used up",
-                _ => "Failed",
-            });
-            let status = agent.status.as_str();
-            event = Some((status, error));
-            finished = Some(partial);
-        }
-        if let Some(usage) = finished {
-            state.finished_usage.push(usage);
-        }
-        if let Some((status, message)) = event {
-            state.push_event(path, status, &message);
+            }
+        };
+        agent.completed_at_ms = Some(now_ms());
+        agent.result = Some(result.clone());
+        let status = agent.status;
+        let wake = agent.background
+            && agent.parent_path == ROOT_PATH
+            && status != SubagentStatus::Interrupted;
+        let report = match &agent.error {
+            None => result.summary.clone(),
+            Some(error) if result.partial_output.trim().is_empty() => error.clone(),
+            Some(error) => format!("{error}\n\nPartial output:\n{}", result.partial_output),
+        };
+        state.finished_usage.push(result);
+        state.push_event(path, status.as_str(), &message);
+        let children = foreground_live(&state, path);
+        close_paths(&mut state, children, "parent agent finished");
+        if wake {
+            state
+                .inboxes
+                .entry(ROOT_PATH.to_string())
+                .or_default()
+                .push_back(InboxMessage {
+                    from: path.to_string(),
+                    text: report,
+                    kind: MailKind::Result {
+                        status: status.as_str().to_string(),
+                    },
+                });
         }
         self.inner.changed.notify_all();
     }
 
-    /// Queues `message` for a running subagent, or for the requester's
-    /// parent when `target` is "parent". It is read before the recipient's
-    /// next model request; a parent blocked in wait_agent gets it at once.
+    /// Queues `message` for a running subagent: a child of the requester,
+    /// a sibling (by task name or path), or the requester's parent when
+    /// `target` is "parent". It is read before the recipient's next model
+    /// request; a parent blocked in wait_agent gets it at once.
     pub(crate) fn send_message(
         &self,
         requester_path: &str,
@@ -635,8 +874,11 @@ impl SubagentManager {
                 .map(|agent| agent.parent_path.clone())
                 .ok_or_else(|| "the main agent has no parent".to_string())?
         } else {
-            resolve_existing_target_in_state(&state, requester_path, target)?
+            resolve_message_target(&state, requester_path, target)?
         };
+        if to == requester_path {
+            return Err("that is you".to_string());
+        }
         if let Some(agent) = state.agents.get_mut(&to) {
             if agent.status.is_final() {
                 return Err(format!("agent is not running: {to}"));
@@ -647,10 +889,7 @@ impl SubagentManager {
             .inboxes
             .entry(to.clone())
             .or_default()
-            .push_back(InboxMessage {
-                from: requester_path.to_string(),
-                text: message.to_string(),
-            });
+            .push_back(InboxMessage::message(requester_path, message));
         if state.agents.contains_key(&to) {
             state.push_event(&to, "message", "queued message");
         }
@@ -665,6 +904,38 @@ impl SubagentManager {
             "delivered": true,
             "status": "queued"
         }))
+    }
+
+    /// A hook's output for the main agent (and an `agent_message` from
+    /// `hook:<event>` for the front-ends).
+    pub(crate) fn report_hook(&self, report: crate::hooks::HookReport) {
+        let mut state = self.inner.state.lock().unwrap();
+        let from = format!("hook:{}", report.event);
+        state.events.push_back(TeamEvent::Message {
+            from: from.clone(),
+            to: ROOT_PATH.to_string(),
+            summary: summarize(&report.text),
+        });
+        state
+            .inboxes
+            .entry(ROOT_PATH.to_string())
+            .or_default()
+            .push_back(InboxMessage {
+                from,
+                text: report.text,
+                kind: MailKind::Hook { ok: report.ok },
+            });
+        self.inner.changed.notify_all();
+    }
+
+    /// The main agent's mail, drained, when some of it wakes an idle main
+    /// agent (a background result, a hook's output); empty otherwise.
+    pub(crate) fn take_wake(&self) -> Vec<InboxMessage> {
+        let mut state = self.inner.state.lock().unwrap();
+        match state.inboxes.get_mut(ROOT_PATH) {
+            Some(inbox) if inbox.iter().any(InboxMessage::wakes) => inbox.drain(..).collect(),
+            _ => Vec::new(),
+        }
     }
 
     /// A user message for the running main turn: the model reads it before
@@ -695,27 +966,19 @@ impl SubagentManager {
             .unwrap_or_default()
     }
 
+    /// Stops `target` (and the foreground agents it started).
     pub(crate) fn close_agent(&self, requester_path: &str, target: &str) -> Result<Value, String> {
         let target = self.resolve_existing_target(requester_path, target)?;
         let mut state = self.inner.state.lock().unwrap();
-        let mut should_emit = false;
-        let previous = {
-            let agent = state
-                .agents
-                .get_mut(&target)
-                .ok_or_else(|| format!("agent not found: {target}"))?;
-            let previous = status_json(agent);
-            if agent.status.is_live() {
-                agent.interrupt_flag.store(true, Ordering::SeqCst);
-                agent.status = SubagentStatus::Closed;
-                agent.completed_at_ms = Some(now_ms());
-                agent.trace.finish("Closed");
-                should_emit = true;
-            }
-            previous
-        };
-        if should_emit {
-            state.push_event(&target, "closed", "close requested");
+        let agent = state
+            .agents
+            .get(&target)
+            .ok_or_else(|| format!("agent not found: {target}"))?;
+        let previous = status_json(agent);
+        if agent.status.is_live() {
+            let mut paths = vec![target.clone()];
+            paths.extend(foreground_live(&state, &target));
+            close_paths(&mut state, paths, "close requested");
         }
         self.inner.changed.notify_all();
         Ok(json!({
@@ -725,25 +988,30 @@ impl SubagentManager {
         }))
     }
 
+    /// The main turn was interrupted: its foreground agents stop; background
+    /// agents (and what they started) keep running.
     pub(crate) fn close_all(&self) {
         self.close_all_with_message("parent interrupted");
     }
 
+    /// The main turn ended: its foreground agents stop.
     pub(crate) fn close_all_with_message(&self, message: &str) {
         let mut state = self.inner.state.lock().unwrap();
-        let mut closed = Vec::new();
-        for agent in state.agents.values_mut() {
-            if agent.status.is_live() {
-                agent.interrupt_flag.store(true, Ordering::SeqCst);
-                agent.status = SubagentStatus::Closed;
-                agent.completed_at_ms = Some(now_ms());
-                agent.trace.finish("Closed");
-                closed.push(agent.path.clone());
-            }
-        }
-        for path in closed {
-            state.push_event(&path, "closed", message);
-        }
+        let paths = foreground_live(&state, ROOT_PATH);
+        close_paths(&mut state, paths, message);
+        self.inner.changed.notify_all();
+    }
+
+    /// Every live agent stops, background ones too (the session ends).
+    pub(crate) fn close_everything(&self, message: &str) {
+        let mut state = self.inner.state.lock().unwrap();
+        let paths = state
+            .agents
+            .values()
+            .filter(|agent| agent.status.is_live())
+            .map(|agent| agent.path.clone())
+            .collect();
+        close_paths(&mut state, paths, message);
         self.inner.changed.notify_all();
     }
 
@@ -767,31 +1035,65 @@ impl SubagentManager {
         json!({ "agents": agents })
     }
 
-    /// Waits until one of `targets` (any agent, without targets) finishes or
-    /// a message for the requester arrives. Messages are handed over in
-    /// `messages` and not read again before the next model request.
+    /// Waits until one of `targets` finishes (every attempt, for a best-of-N
+    /// group name), or without targets until one of the requester's running
+    /// subagents finishes, or until a message for the requester arrives.
+    /// Messages are handed over in `messages` and not read again before the
+    /// next model request. A group whose attempts all finished comes with
+    /// `attempts`: each attempt's diff stats, to compare them.
     pub(crate) fn wait_agents(
         &self,
         requester_path: &str,
         targets: Vec<String>,
         timeout_ms: u64,
     ) -> Result<Value, String> {
-        let canonical_targets = {
+        let (singles, groups) = {
             let state = self.inner.state.lock().unwrap();
-            targets
-                .iter()
-                .map(|target| resolve_existing_target_in_state(&state, requester_path, target))
-                .collect::<Result<Vec<_>, _>>()?
+            let mut singles = Vec::new();
+            let mut groups: Vec<(String, Vec<String>)> = Vec::new();
+            if targets.is_empty() {
+                singles = state
+                    .agents
+                    .values()
+                    .filter(|agent| agent.parent_path == requester_path && agent.status.is_live())
+                    .map(|agent| agent.path.clone())
+                    .collect();
+            }
+            for target in &targets {
+                match resolve_existing_target_in_state(&state, requester_path, target) {
+                    Ok(path) => singles.push(path),
+                    Err(error) => {
+                        let name = target.trim().rsplit('/').next().unwrap_or_default();
+                        let members = group_members(&state, requester_path, name);
+                        if members.is_empty() {
+                            return Err(error);
+                        }
+                        groups.push((name.to_string(), members));
+                    }
+                }
+            }
+            (singles, groups)
         };
-        let deadline = Duration::from_millis(timeout_ms);
-        let started = SystemTime::now();
+        let nothing_to_wait = targets.is_empty() && singles.is_empty();
+        let done = |state: &SubagentRegistry, path: &String| {
+            state
+                .agents
+                .get(path)
+                .is_none_or(|agent| agent.status.is_final())
+        };
         let woken = |state: &SubagentRegistry| {
-            wait_ready(state, &canonical_targets)
+            nothing_to_wait
+                || singles.iter().any(|path| done(state, path))
+                || groups
+                    .iter()
+                    .any(|(_, members)| members.iter().all(|path| done(state, path)))
                 || state
                     .inboxes
                     .get(requester_path)
                     .is_some_and(|inbox| !inbox.is_empty())
         };
+        let deadline = Duration::from_millis(timeout_ms);
+        let started = SystemTime::now();
         let mut state = self.inner.state.lock().unwrap();
         loop {
             if woken(&state) {
@@ -807,21 +1109,98 @@ impl SubagentManager {
         }
 
         let woke = woken(&state);
-        let statuses = wait_statuses(&state, &canonical_targets);
+        let mut shown = singles.clone();
+        if nothing_to_wait {
+            shown = state
+                .agents
+                .values()
+                .filter(|agent| agent.parent_path == requester_path)
+                .map(|agent| agent.path.clone())
+                .collect();
+        }
+        for (_, members) in &groups {
+            shown.extend(members.iter().cloned());
+        }
+        let statuses = wait_statuses(&state, &shown);
+        // A result the statuses carry is not handed over twice.
+        let reported: Vec<String> = shown
+            .iter()
+            .filter(|path| done(&state, path))
+            .cloned()
+            .collect();
         let messages: Vec<Value> = state
             .inboxes
             .get_mut(requester_path)
             .map(|inbox| inbox.drain(..).collect::<Vec<_>>())
             .unwrap_or_default()
             .into_iter()
-            .map(|message| json!({ "from": message.from, "message": message.text }))
+            .filter(|message| {
+                !(matches!(message.kind, MailKind::Result { .. })
+                    && reported.contains(&message.from))
+            })
+            .map(|message| message.wait_json())
             .collect();
+        // Each finished group's attempts, compared after the lock is gone
+        // (their diffs run git).
+        let finished_groups: Vec<(String, Vec<Value>)> = groups
+            .iter()
+            .chain(attempt_groups_of(&state, &shown).iter())
+            .filter(|(_, members)| members.iter().all(|path| done(&state, path)))
+            .map(|(name, members)| {
+                let rows = members
+                    .iter()
+                    .filter_map(|path| state.agents.get(path))
+                    .map(|agent| {
+                        json!({
+                            "path": agent.path,
+                            "attempt": agent.attempt,
+                            "state": agent.status.as_str(),
+                            "summary": agent
+                                .result
+                                .as_ref()
+                                .map(|result| summarize(&result.summary))
+                                .unwrap_or_default(),
+                        })
+                    })
+                    .collect();
+                (name.clone(), rows)
+            })
+            .collect();
+        drop(state);
         let mut result = json!({
             "status": statuses,
             "timed_out": !woke,
         });
         if !messages.is_empty() {
             result["messages"] = Value::Array(messages);
+        }
+        let mut compared = serde_json::Map::new();
+        for (name, mut attempts) in finished_groups {
+            if compared.contains_key(&name) {
+                continue;
+            }
+            for row in &mut attempts {
+                let path = row["path"].as_str().unwrap_or_default().to_string();
+                let Some(pending) = self.inner.shared.get(&path) else {
+                    continue;
+                };
+                match workspace_changes(&pending.workspace) {
+                    Ok(changes) => {
+                        row["files"] = json!(changes
+                            .files
+                            .iter()
+                            .map(|file| file.path.clone())
+                            .collect::<Vec<_>>());
+                        row["added"] = json!(changes.added);
+                        row["removed"] = json!(changes.removed);
+                    }
+                    Err(error) => row["diff_error"] = json!(error),
+                }
+            }
+            compared.insert(name, Value::Array(attempts));
+        }
+        if !compared.is_empty() {
+            result["attempts"] = Value::Object(compared);
         }
         Ok(result)
     }
@@ -854,14 +1233,14 @@ impl SubagentManager {
     }
 
     fn budget_exhausted_in(&self, state: &SubagentRegistry) -> bool {
-        let limit = self.inner.config.turn_token_budget;
+        let limit = self.config().turn_token_budget;
         limit > 0 && state.tokens_used >= limit
     }
 
     /// Sends the 80% "wrap up" message once, and a `Budget` event each time
     /// usage reaches another tenth of the budget. Nothing without a budget.
     fn note_budget(&self, state: &mut SubagentRegistry) {
-        let limit = self.inner.config.turn_token_budget;
+        let limit = self.config().turn_token_budget;
         if limit == 0 {
             return;
         }
@@ -875,23 +1254,23 @@ impl SubagentManager {
                 .map(|agent| agent.path.clone())
                 .collect();
             for path in live {
-                state.inboxes.entry(path).or_default().push_back(InboxMessage {
-                    from: "team_budget".to_string(),
-                    text: format!(
+                state.inboxes.entry(path).or_default().push_back(InboxMessage::message(
+                    "team_budget",
+                    &format!(
                         "Budget nearly used: this turn's subagents have used {used} of {limit} tokens. Wrap up now: finish the current step and report."
                     ),
-                });
+                ));
             }
             state
                 .inboxes
                 .entry(ROOT_PATH.to_string())
                 .or_default()
-                .push_back(InboxMessage {
-                    from: "team_budget".to_string(),
-                    text: format!(
+                .push_back(InboxMessage::message(
+                    "team_budget",
+                    &format!(
                         "Budget nearly used: your subagents have used {used} of {limit} tokens this turn. Start no new agents; collect their results and finish."
                     ),
-                });
+                ));
             self.inner.changed.notify_all();
         }
         let tenth = (used.saturating_mul(10) / limit).min(10);
@@ -899,6 +1278,88 @@ impl SubagentManager {
             state.budget_tenth = Some(tenth);
             state.events.push_back(TeamEvent::Budget { used, limit });
         }
+    }
+
+    /// `resume_agent`: makes the requester's finished subagent `target`
+    /// pending again with `message` noted in its trace. The caller starts
+    /// it on its saved conversation.
+    pub(crate) fn reserve_resume(
+        &self,
+        requester_path: &str,
+        target: &str,
+        message: &str,
+    ) -> Result<Resume, String> {
+        let target = target.trim();
+        let path = if target.starts_with('/') {
+            target.to_string()
+        } else {
+            child_path(requester_path, target)
+        };
+        if !path.starts_with(&format!("{}/", requester_path.trim_end_matches('/'))) {
+            return Err(format!("{path} is not one of your subagents"));
+        }
+        let config = self.config();
+        let mut state = self.inner.state.lock().unwrap();
+        let live = state
+            .agents
+            .values()
+            .filter(|agent| agent.status.is_live())
+            .count();
+        let budget_exhausted = self.budget_exhausted_in(&state);
+        let agent = state
+            .agents
+            .get_mut(&path)
+            .ok_or_else(|| format!("agent not found: {path}"))?;
+        if agent.status.is_live() {
+            return Err(format!(
+                "{path} is still running; use send_message to tell it more"
+            ));
+        }
+        let (Some(spec), Some(context)) = (agent.spec.clone(), agent.context.clone()) else {
+            return Err(format!(
+                "{path} has no saved conversation (it ran before the engine restarted); spawn a new agent"
+            ));
+        };
+        if live >= config.max_live {
+            return Err(format!(
+                "too many live agents ({}); wait for or close an agent first",
+                config.max_live
+            ));
+        }
+        if budget_exhausted {
+            return Err(
+                "the subagents' token budget for this turn is used up; do the rest yourself"
+                    .to_string(),
+            );
+        }
+        let interrupt_flag = Arc::new(AtomicBool::new(false));
+        agent.status = SubagentStatus::Pending;
+        agent.interrupt_flag = Arc::clone(&interrupt_flag);
+        agent.started_at_ms = now_ms();
+        agent.completed_at_ms = None;
+        agent.error = None;
+        agent.result = None;
+        agent.trace.resume(message);
+        let task_name = agent.task_name.clone();
+        state.push_event(&path, "pending", "resumed");
+        self.inner.changed.notify_all();
+        drop(state);
+        let workspace = self
+            .inner
+            .shared
+            .get(&path)
+            .map(|pending| pending.workspace)
+            .filter(|workspace| workspace.root.is_dir());
+        Ok(Resume {
+            slot: SubagentSlot {
+                path,
+                interrupt_flag,
+            },
+            task_name,
+            spec,
+            context,
+            workspace,
+        })
     }
 
     /// `merge_agent`: brings the worktree of the requester's subagent
@@ -1021,7 +1482,94 @@ impl SubagentManager {
             .as_ref()
             .is_ok_and(|merge| merge.conflicts.is_empty());
         self.inner.shared.end_merge(path, done);
+        if done {
+            self.inner.state.lock().unwrap().revision += 1;
+        }
         outcome
+    }
+
+    /// `pick_attempt`: applies attempt `target` of the requester's
+    /// best-of-N `group` (as merge_agent apply) and, once it applied,
+    /// discards every other attempt; attempts still running are closed
+    /// first. Each merge or discard queues its `Merge` event. With a
+    /// conflict nothing is written and the other attempts are kept.
+    pub(crate) fn pick_attempt(
+        &self,
+        requester_path: &str,
+        group: &str,
+        target: &str,
+    ) -> Result<Value, String> {
+        let group = group
+            .trim()
+            .rsplit('/')
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        let target = target.trim();
+        let (members, picked) = {
+            let state = self.inner.state.lock().unwrap();
+            let members = group_members(&state, requester_path, &group);
+            if members.is_empty() {
+                return Err(format!("no best-of-N attempts named {group}"));
+            }
+            let picked = match target.parse::<u64>() {
+                Ok(number) => members
+                    .iter()
+                    .find(|path| {
+                        state
+                            .agents
+                            .get(*path)
+                            .is_some_and(|agent| agent.attempt == Some(number))
+                    })
+                    .cloned(),
+                Err(_) if target.starts_with('/') => Some(target.to_string()),
+                Err(_) => Some(child_path(requester_path, target)),
+            }
+            .filter(|path| members.contains(path))
+            .ok_or_else(|| {
+                format!(
+                    "{target} is not an attempt of {group}; attempts: {}",
+                    members.join(", ")
+                )
+            })?;
+            if state
+                .agents
+                .get(&picked)
+                .is_some_and(|agent| agent.status.is_live())
+            {
+                return Err(format!(
+                    "{picked} is still running; wait for it or close it first"
+                ));
+            }
+            (members, picked)
+        };
+        let others: Vec<String> = members.into_iter().filter(|path| *path != picked).collect();
+        for other in &others {
+            let live = {
+                let state = self.inner.state.lock().unwrap();
+                state
+                    .agents
+                    .get(other)
+                    .is_some_and(|agent| agent.status.is_live())
+            };
+            if live {
+                let _ = self.close_agent(requester_path, other);
+            }
+        }
+        let merged = self.merge_agent(requester_path, &picked, "apply")?;
+        let mut result = json!({ "group": group, "picked": picked, "merge": merged });
+        if merged["ok"] == true {
+            let mut discarded = Vec::new();
+            for other in &others {
+                if self.merge_agent(requester_path, other, "discard").is_ok() {
+                    discarded.push(other.clone());
+                }
+            }
+            result["discarded"] = json!(discarded);
+        } else {
+            result["note"] = json!("Nothing was written and the other attempts are kept.");
+        }
+        Ok(result)
     }
 
     /// One line for the approval card of `merge_agent apply`: the files and
@@ -1055,6 +1603,233 @@ impl SubagentManager {
             }
             Err(error) => format!("merge {path} ({error})"),
         }
+    }
+
+    /// `task_create` (the board is the session's, shared by every agent).
+    pub(crate) fn task_create(&self, task: NewTask) -> Result<Value, String> {
+        let mut state = self.inner.state.lock().unwrap();
+        let created = state.board.create(task, now_ms())?;
+        state.board_changed();
+        Ok(json!({ "id": created.id }))
+    }
+
+    pub(crate) fn task_list(&self) -> Value {
+        let state = self.inner.state.lock().unwrap();
+        json!({ "tasks": state.board.tasks_json() })
+    }
+
+    /// `task_update` by `requester_path`; the updated task.
+    pub(crate) fn task_update(
+        &self,
+        requester_path: &str,
+        id: &str,
+        action: &str,
+        result: Option<&str>,
+    ) -> Result<Task, String> {
+        let mut state = self.inner.state.lock().unwrap();
+        let task = state
+            .board
+            .update(requester_path, id, action, result, now_ms())?;
+        state.board_changed();
+        Ok(task)
+    }
+
+    /// The board as `task_board` lists it.
+    pub(crate) fn board_json(&self) -> Vec<Value> {
+        self.inner.state.lock().unwrap().board.tasks_json()
+    }
+
+    /// `path` is pending or running.
+    pub(crate) fn is_live(&self, path: &str) -> bool {
+        let state = self.inner.state.lock().unwrap();
+        state
+            .agents
+            .get(path)
+            .is_some_and(|agent| agent.status.is_live())
+    }
+
+    /// An agent's working directory and role.
+    pub(crate) fn agent_place(&self, path: &str) -> (Option<String>, Option<String>) {
+        let state = self.inner.state.lock().unwrap();
+        state
+            .agents
+            .get(path)
+            .map(|agent| (agent.workdir.clone(), agent.role.clone()))
+            .unwrap_or_default()
+    }
+
+    /// The worktree of `path`, the commit it started from and the directory
+    /// it merges into, while it waits to be merged.
+    pub(crate) fn worktree_of(&self, path: &str) -> Option<(PathBuf, Option<String>, PathBuf)> {
+        self.inner.shared.get(path).map(|pending| {
+            (
+                pending.workspace.root,
+                pending.workspace.base,
+                pending.parent_cwd,
+            )
+        })
+    }
+
+    /// A plain message for the main agent's next request.
+    pub(crate) fn tell_root(&self, from: &str, text: &str) {
+        let mut state = self.inner.state.lock().unwrap();
+        state
+            .inboxes
+            .entry(ROOT_PATH.to_string())
+            .or_default()
+            .push_back(InboxMessage::message(from, text));
+        self.inner.changed.notify_all();
+    }
+
+    /// Bumped whenever what the session persists changes (`team_json`).
+    pub(crate) fn revision(&self) -> u64 {
+        self.inner.state.lock().unwrap().revision
+    }
+
+    /// What the session keeps of its team: the board and the worktree
+    /// registry (each worktree agent with its row), so merges and the board
+    /// survive an engine restart.
+    pub(crate) fn team_json(&self) -> Value {
+        let worktrees = self.inner.shared.snapshot();
+        let state = self.inner.state.lock().unwrap();
+        let rows: Vec<Value> = worktrees
+            .iter()
+            .map(|(path, pending)| {
+                let mut row = json!({
+                    "path": path,
+                    "worktree": {
+                        "root": pending.workspace.root.display().to_string(),
+                        "from_git": pending.workspace.from_git,
+                        "base": pending.workspace.base,
+                        "parent_cwd": pending.parent_cwd.display().to_string(),
+                    },
+                });
+                if let Some(agent) = state.agents.get(path) {
+                    let result = agent.result.as_ref();
+                    row["parent"] = json!(agent.parent_path);
+                    row["task_name"] = json!(agent.task_name);
+                    row["message"] = json!(summarize_to(&agent.message, 2000));
+                    row["model"] = json!(agent.model);
+                    row["effort"] = json!(agent.reasoning_effort);
+                    row["depth"] = json!(agent.depth);
+                    row["state"] = json!(agent.status.as_str());
+                    row["role"] = json!(agent.role);
+                    row["plan_step"] = json!(agent.plan_step);
+                    row["background"] = json!(agent.background);
+                    row["attempt_group"] = json!(agent.attempt_group);
+                    row["attempt"] = json!(agent.attempt);
+                    row["tool_use_id"] = json!(agent.tool_use_id);
+                    row["started_at"] = json!(agent.started_at_ms);
+                    row["completed_at"] = json!(agent.completed_at_ms);
+                    row["summary"] = json!(result
+                        .map(|result| summarize_to(&result.summary, 2000))
+                        .unwrap_or_default());
+                    row["files_changed"] = json!(result
+                        .map(|result| result.files_changed.clone())
+                        .unwrap_or_default());
+                }
+                row
+            })
+            .collect();
+        json!({ "board": state.board.to_json(), "worktrees": rows })
+    }
+
+    /// The team a session saved (`team_json`): its board, and its worktree
+    /// agents as finished rows (one still running when the engine stopped
+    /// is `interrupted`). A worktree whose directory is gone is dropped.
+    /// Restored agents cannot be resumed: their conversation is not kept.
+    pub(crate) fn restore(config: AgentsConfig, value: &Value) -> Self {
+        let manager = Self::new(config, TeamShared::default());
+        let mut state = manager.inner.state.lock().unwrap();
+        state.board = Board::from_json(&value["board"]);
+        for row in value["worktrees"].as_array().into_iter().flatten() {
+            let text = |key: &str| row[key].as_str().map(str::to_string);
+            let Some(path) = text("path").filter(|path| path.starts_with("/root/")) else {
+                continue;
+            };
+            let worktree = &row["worktree"];
+            let root = PathBuf::from(worktree["root"].as_str().unwrap_or_default());
+            let parent_cwd = PathBuf::from(worktree["parent_cwd"].as_str().unwrap_or_default());
+            if !root.is_dir() || !parent_cwd.is_dir() {
+                continue;
+            }
+            let workspace = SubagentWorkspace {
+                root,
+                from_git: worktree["from_git"].as_bool().unwrap_or(false),
+                base: worktree["base"].as_str().map(str::to_string),
+            };
+            let workdir = workspace.root.display().to_string();
+            manager.inner.shared.insert(
+                &path,
+                PendingWorktree {
+                    workspace,
+                    parent_cwd,
+                    busy: false,
+                },
+            );
+            let status = text("state")
+                .and_then(|state| SubagentStatus::parse(&state))
+                .filter(SubagentStatus::is_final)
+                .unwrap_or(SubagentStatus::Interrupted);
+            let message = text("message").unwrap_or_default();
+            let mut trace = crate::subagent_trace::SubagentTrace::new(&message);
+            trace.finish(if status == SubagentStatus::Interrupted {
+                "Interrupted"
+            } else {
+                "Done"
+            });
+            let task_name = text("task_name")
+                .unwrap_or_else(|| path.rsplit('/').next().unwrap_or_default().to_string());
+            let files_changed = row["files_changed"]
+                .as_array()
+                .map(|files| {
+                    files
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let started_at_ms = row["started_at"].as_u64().unwrap_or_else(now_ms);
+            state.agents.insert(
+                path.clone(),
+                SubagentRecord {
+                    path: path.clone(),
+                    parent_path: text("parent").unwrap_or_else(|| ROOT_PATH.to_string()),
+                    task_name,
+                    message,
+                    model: text("model").unwrap_or_default(),
+                    reasoning_effort: text("effort").unwrap_or_default(),
+                    depth: row["depth"].as_u64().unwrap_or(1),
+                    status,
+                    interrupt_flag: Arc::new(AtomicBool::new(false)),
+                    result: Some(SubagentRunResult {
+                        summary: text("summary").unwrap_or_default(),
+                        workdir: workdir.clone(),
+                        files_changed,
+                        model: text("model").unwrap_or_default(),
+                        ..SubagentRunResult::default()
+                    }),
+                    error: (status == SubagentStatus::Interrupted)
+                        .then(|| "the engine stopped while it ran".to_string()),
+                    started_at_ms,
+                    completed_at_ms: Some(row["completed_at"].as_u64().unwrap_or(started_at_ms)),
+                    workdir: Some(workdir),
+                    isolated: true,
+                    tool_use_id: text("tool_use_id").unwrap_or_default(),
+                    role: text("role"),
+                    plan_step: text("plan_step"),
+                    background: row["background"].as_bool().unwrap_or(false),
+                    attempt_group: text("attempt_group"),
+                    attempt: row["attempt"].as_u64(),
+                    spec: None,
+                    context: None,
+                    trace,
+                },
+            );
+        }
+        drop(state);
+        manager
     }
 
     /// Sum of the trace revisions: changes whenever any agent did something.
@@ -1105,6 +1880,9 @@ impl SubagentManager {
                     "files_changed": result
                         .map(|result| result.files_changed.clone())
                         .unwrap_or_default(),
+                    "background": agent.background,
+                    "attempt_group": agent.attempt_group,
+                    "attempt": agent.attempt,
                 })
             })
             .collect()
@@ -1116,8 +1894,8 @@ impl SubagentManager {
         state.agents.get(path).map(|agent| agent.trace.items_json())
     }
 
-    /// Label, model, spawn call, role and plan step of an agent, for its
-    /// lifecycle events.
+    /// Label, model, spawn call, role, plan step and kind of an agent, for
+    /// its lifecycle events.
     pub(crate) fn describe(&self, path: &str) -> Option<AgentInfo> {
         let state = self.inner.state.lock().unwrap();
         state.agents.get(path).map(|agent| AgentInfo {
@@ -1126,6 +1904,9 @@ impl SubagentManager {
             tool_use_id: agent.tool_use_id.clone(),
             role: agent.role.clone(),
             plan_step: agent.plan_step.clone(),
+            background: agent.background,
+            attempt_group: agent.attempt_group.clone(),
+            attempt: agent.attempt,
         })
     }
 
@@ -1161,12 +1942,98 @@ impl SubagentManager {
 
 impl SubagentRegistry {
     fn push_event(&mut self, path: &str, status: &str, message: &str) {
+        self.revision += 1;
         self.events.push_back(TeamEvent::Lifecycle {
             path: path.to_string(),
             status: status.to_string(),
             message: message.to_string(),
         });
     }
+
+    fn board_changed(&mut self) {
+        self.revision += 1;
+        if !self.events.contains(&TeamEvent::Board) {
+            self.events.push_back(TeamEvent::Board);
+        }
+    }
+}
+
+/// Live agents under `ancestor` that run in its turn: none of the agents
+/// between it and them (they included) runs in the background.
+fn foreground_live(state: &SubagentRegistry, ancestor: &str) -> Vec<String> {
+    let prefix = format!("{}/", ancestor.trim_end_matches('/'));
+    state
+        .agents
+        .values()
+        .filter(|agent| agent.status.is_live() && agent.path.starts_with(&prefix))
+        .filter(|agent| !detached(state, &agent.path, ancestor))
+        .map(|agent| agent.path.clone())
+        .collect()
+}
+
+fn detached(state: &SubagentRegistry, path: &str, ancestor: &str) -> bool {
+    let mut current = path;
+    while current != ancestor {
+        let Some(agent) = state.agents.get(current) else {
+            return false;
+        };
+        if agent.background {
+            return true;
+        }
+        current = &agent.parent_path;
+    }
+    false
+}
+
+fn close_paths(state: &mut SubagentRegistry, paths: Vec<String>, message: &str) {
+    for path in paths {
+        let Some(agent) = state.agents.get_mut(&path) else {
+            continue;
+        };
+        if !agent.status.is_live() {
+            continue;
+        }
+        agent.interrupt_flag.store(true, Ordering::SeqCst);
+        agent.status = SubagentStatus::Closed;
+        agent.completed_at_ms = Some(now_ms());
+        agent.trace.finish("Closed");
+        state.push_event(&path, "closed", message);
+    }
+}
+
+/// The best-of-N attempts of `group` the requester started, by attempt.
+fn group_members(state: &SubagentRegistry, requester_path: &str, group: &str) -> Vec<String> {
+    let mut members: Vec<(&SubagentRecord, u64)> = state
+        .agents
+        .values()
+        .filter(|agent| {
+            agent.parent_path == requester_path && agent.attempt_group.as_deref() == Some(group)
+        })
+        .map(|agent| (agent, agent.attempt.unwrap_or_default()))
+        .collect();
+    members.sort_by_key(|(_, attempt)| *attempt);
+    members
+        .into_iter()
+        .map(|(agent, _)| agent.path.clone())
+        .collect()
+}
+
+/// The attempt groups some of `paths` belong to, with all their members.
+fn attempt_groups_of(state: &SubagentRegistry, paths: &[String]) -> Vec<(String, Vec<String>)> {
+    let mut groups: Vec<(String, Vec<String>)> = Vec::new();
+    for agent in paths.iter().filter_map(|path| state.agents.get(path)) {
+        let Some(group) = &agent.attempt_group else {
+            continue;
+        };
+        if groups.iter().any(|(known, _)| known == group) {
+            continue;
+        }
+        groups.push((
+            group.clone(),
+            group_members(state, &agent.parent_path, group),
+        ));
+    }
+    groups
 }
 
 struct MergeOutcome {
@@ -1493,6 +2360,13 @@ fn merge_file(ours: &[u8], base: &[u8], theirs: &[u8]) -> Option<Vec<u8>> {
     (output.status.code() == Some(0)).then_some(output.stdout)
 }
 
+/// Deletes a workspace no agent ran in (its spawn failed), logging a failure.
+pub(crate) fn discard_workspace(workspace: &SubagentWorkspace, parent_cwd: &Path) {
+    if let Err(error) = remove_workspace(workspace, parent_cwd) {
+        crate::log_warn!("subagent", "unused worktree not removed", error = error);
+    }
+}
+
 /// Deletes a workspace; a git worktree is then pruned from the repository.
 fn remove_workspace(workspace: &SubagentWorkspace, parent_cwd: &Path) -> Result<(), String> {
     match std::fs::remove_dir_all(&workspace.root) {
@@ -1570,12 +2444,41 @@ fn git_text(cwd: &Path, args: &[&str]) -> Result<String, String> {
 }
 
 fn summarize(message: &str) -> String {
+    summarize_to(message, MESSAGE_SUMMARY_CHARS)
+}
+
+fn summarize_to(message: &str, limit: usize) -> String {
     let message = message.trim();
-    let mut summary: String = message.chars().take(MESSAGE_SUMMARY_CHARS).collect();
+    let mut summary: String = message.chars().take(limit).collect();
     if summary.len() < message.len() {
         summary.push('…');
     }
     summary
+}
+
+/// A send_message target: `/root` or an agent path; a name is the
+/// requester's child, else its sibling.
+fn resolve_message_target(
+    state: &SubagentRegistry,
+    requester_path: &str,
+    target: &str,
+) -> Result<String, String> {
+    let target = target.trim();
+    if target == ROOT_PATH {
+        return Ok(ROOT_PATH.to_string());
+    }
+    if target.starts_with('/') {
+        return resolve_existing_target_in_state(state, requester_path, target);
+    }
+    let child = resolve_existing_target_in_state(state, requester_path, target);
+    if child.is_ok() {
+        return child;
+    }
+    match state.agents.get(requester_path) {
+        Some(me) => resolve_existing_target_in_state(state, &me.parent_path, target)
+            .map_err(|_| format!("no child or sibling named {target}")),
+        None => child,
+    }
 }
 
 fn resolve_existing_target_in_state(
@@ -1596,21 +2499,6 @@ fn resolve_existing_target_in_state(
         Ok(canonical)
     } else {
         Err(format!("agent not found: {canonical}"))
-    }
-}
-
-fn wait_ready(state: &SubagentRegistry, targets: &[String]) -> bool {
-    if targets.is_empty() {
-        state.agents.values().any(|agent| agent.status.is_final())
-            || !state.agents.values().any(|agent| agent.status.is_live())
-    } else {
-        targets.iter().any(|target| {
-            state
-                .agents
-                .get(target)
-                .map(|agent| agent.status.is_final())
-                .unwrap_or(true)
-        })
     }
 }
 
@@ -1640,6 +2528,9 @@ fn agent_json(agent: &SubagentRecord) -> Value {
         "model": agent.model,
         "reasoning_effort": agent.reasoning_effort,
         "role": agent.role,
+        "background": agent.background,
+        "attempt_group": agent.attempt_group,
+        "attempt": agent.attempt,
         "message": agent.message,
         "started_at_ms": agent.started_at_ms,
         "completed_at_ms": agent.completed_at_ms,
@@ -1744,6 +2635,7 @@ mod tests {
             tool_use_id: String::new(),
             role: None,
             plan_step: None,
+            ..SubagentSpawn::default()
         }
     }
 
@@ -1926,10 +2818,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             manager.drain_messages(ROOT_PATH),
-            vec![InboxMessage {
-                from: "/root/worker".to_string(),
-                text: "Found it".to_string()
-            }]
+            vec![InboxMessage::message("/root/worker", "Found it")]
         );
         assert!(manager
             .send_message(ROOT_PATH, "parent", "hi")
@@ -1956,10 +2845,7 @@ mod tests {
         manager.send_message("/root", "lead", "hurry").unwrap();
         assert_eq!(
             manager.drain_messages("/root/lead")[0],
-            InboxMessage {
-                from: "/root".to_string(),
-                text: "hurry".to_string()
-            }
+            InboxMessage::message("/root", "hurry")
         );
     }
 
@@ -2378,5 +3264,422 @@ mod tests {
         assert!(resident.exists());
         let _ = std::fs::remove_dir_all(cwd);
         let _ = std::fs::remove_dir_all(profile);
+    }
+
+    fn background(task_name: &str) -> SubagentSpawn {
+        SubagentSpawn {
+            background: true,
+            ..spawn(task_name)
+        }
+    }
+
+    #[test]
+    fn a_background_agent_outlives_its_parents_turn_and_wakes_the_main_agent_once() {
+        let manager = SubagentManager::default();
+        manager.reserve_spawn(spawn("fg")).unwrap();
+        manager.reserve_spawn(background("bg")).unwrap();
+        let mut helper = spawn("helper");
+        helper.parent_path = "/root/bg".to_string();
+        helper.depth = 2;
+        manager.reserve_spawn(helper).unwrap();
+        for path in ["/root/fg", "/root/bg", "/root/bg/helper"] {
+            manager.mark_running(path);
+        }
+        let state = |path: &str| {
+            manager
+                .runs_json()
+                .into_iter()
+                .find(|row| row["id"] == path)
+                .unwrap()["state"]
+                .clone()
+        };
+        // The turn ends (or is interrupted): only its foreground agents stop;
+        // the background agent and what it started work on.
+        manager.close_all_with_message("parent turn finished");
+        manager.close_all();
+        assert_eq!(state("/root/fg"), "closed");
+        assert_eq!(state("/root/bg"), "running");
+        assert_eq!(state("/root/bg/helper"), "running");
+        let background = |path: &str| {
+            manager
+                .runs_json()
+                .into_iter()
+                .find(|row| row["id"] == path)
+                .unwrap()["background"]
+                .clone()
+        };
+        assert_eq!(background("/root/bg"), true);
+        assert_eq!(background("/root/bg/helper"), false);
+        assert!(manager.take_wake().is_empty());
+
+        // It finishes: the agents it started in its turn stop with it, and
+        // its result waits for the main agent, once.
+        manager.finish_ok("/root/bg", run_result(1, 1));
+        assert_eq!(state("/root/bg/helper"), "closed");
+        let mail = manager.take_wake();
+        assert_eq!(mail.len(), 1);
+        assert_eq!(
+            mail[0].kind,
+            MailKind::Result {
+                status: "completed".to_string()
+            }
+        );
+        assert_eq!(
+            mail[0].model_text(),
+            "<subagent_result path=\"/root/bg\" status=\"completed\">\ndone\n</subagent_result>"
+        );
+        assert!(manager.take_wake().is_empty());
+        // A foreground agent's result never wakes anyone.
+        manager.reserve_spawn(spawn("fg2")).unwrap();
+        manager.finish_ok("/root/fg2", run_result(1, 1));
+        assert!(manager.take_wake().is_empty());
+    }
+
+    #[test]
+    fn a_closed_background_agent_wakes_nobody_and_the_session_end_stops_all() {
+        let manager = SubagentManager::default();
+        manager.reserve_spawn(background("bg")).unwrap();
+        manager.mark_running("/root/bg");
+        manager.close_agent("/root", "bg").unwrap();
+        manager.finish_ok("/root/bg", run_result(1, 1));
+        assert!(manager.take_wake().is_empty());
+
+        manager.reserve_spawn(background("other")).unwrap();
+        manager.close_everything("session switched");
+        assert_eq!(manager.runs_json()[1]["state"], "closed");
+    }
+
+    #[test]
+    fn wait_hands_over_a_background_result_once() {
+        let manager = SubagentManager::default();
+        manager.reserve_spawn(background("bg")).unwrap();
+        manager.finish_ok("/root/bg", run_result(1, 1));
+        // Waited on: the status carries the result and the mail is dropped.
+        let result = manager
+            .wait_agents("/root", vec!["bg".to_string()], 100)
+            .unwrap();
+        assert_eq!(result["status"]["/root/bg"]["completed"], "done");
+        assert!(result.get("messages").is_none(), "{result}");
+        assert!(manager.take_wake().is_empty());
+
+        // A finished agent does not end a wait without targets; a running
+        // one does, and so does a background result arriving meanwhile.
+        manager.reserve_spawn(spawn("busy")).unwrap();
+        manager.mark_running("/root/busy");
+        let result = manager.wait_agents("/root", Vec::new(), 100).unwrap();
+        assert_eq!(result["timed_out"], true);
+        assert_eq!(result["status"]["/root/busy"], "running");
+        manager.reserve_spawn(background("late")).unwrap();
+        manager.finish_ok("/root/late", run_result(1, 1));
+        let result = manager.wait_agents("/root", Vec::new(), 5_000).unwrap();
+        assert_eq!(result["timed_out"], false);
+        assert_eq!(
+            result["messages"],
+            json!([{ "from": "/root/late", "message": "done", "kind": "result", "status": "completed" }])
+        );
+        assert!(manager.take_wake().is_empty());
+    }
+
+    #[test]
+    fn an_agent_messages_a_sibling_by_task_name_or_path() {
+        let manager = SubagentManager::default();
+        for name in ["api", "client"] {
+            manager.reserve_spawn(spawn(name)).unwrap();
+            manager.mark_running(&format!("/root/{name}"));
+        }
+        manager.drain_events();
+        let sent = manager
+            .send_message("/root/api", "client", "the route is /v2 now")
+            .unwrap();
+        assert_eq!(sent["target"], "/root/client");
+        assert_eq!(
+            manager.drain_messages("/root/client"),
+            vec![InboxMessage::message("/root/api", "the route is /v2 now")]
+        );
+        manager
+            .send_message("/root/client", "/root/api", "thanks")
+            .unwrap();
+        assert_eq!(manager.drain_messages("/root/api").len(), 1);
+        assert!(manager.drain_events().contains(&TeamEvent::Message {
+            from: "/root/client".to_string(),
+            to: "/root/api".to_string(),
+            summary: "thanks".to_string(),
+        }));
+        // To the main agent by its path, as "parent" does.
+        manager.send_message("/root/api", "/root", "done").unwrap();
+        assert_eq!(manager.drain_messages(ROOT_PATH).len(), 1);
+        let error = manager
+            .send_message("/root/api", "ghost", "hi")
+            .unwrap_err();
+        assert!(error.contains("no child or sibling named ghost"), "{error}");
+        assert!(manager.send_message("/root/api", "api", "me").is_err());
+    }
+
+    fn attempt(group: &str, number: u64) -> SubagentSpawn {
+        SubagentSpawn {
+            attempt_group: Some(group.to_string()),
+            attempt: Some(number),
+            ..spawn(&format!("{group}_a{number}"))
+        }
+    }
+
+    #[test]
+    fn attempts_are_reserved_together_or_not_at_all() {
+        let config = AgentsConfig {
+            max_live: 2,
+            ..AgentsConfig::default()
+        };
+        let manager = SubagentManager::new(config, TeamShared::default());
+        let error = manager
+            .reserve_spawns((1..=3).map(|n| attempt("fix", n)).collect())
+            .unwrap_err();
+        assert!(error.contains("too many live agents (2)"), "{error}");
+        assert!(manager.runs_json().is_empty());
+        let slots = manager
+            .reserve_spawns((1..=2).map(|n| attempt("fix", n)).collect())
+            .unwrap();
+        assert_eq!(slots[1].path, "/root/fix_a2");
+        let rows = manager.runs_json();
+        assert_eq!(rows[1]["attempt_group"], "fix");
+        assert_eq!(rows[1]["attempt"], 2);
+        assert_eq!(rows[0]["attempt"], 1);
+    }
+
+    #[test]
+    fn a_finished_group_is_compared_and_pick_attempt_keeps_one() {
+        let repo = temp_dir("attempts");
+        git(&repo, &["init", "-q"]);
+        std::fs::write(repo.join(".gitignore"), ".lynshen/\n").unwrap();
+        std::fs::write(repo.join("a.txt"), LINES).unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-qm", "init"]);
+        let manager = SubagentManager::default();
+        manager
+            .reserve_spawns((1..=3).map(|n| attempt("fix", n)).collect())
+            .unwrap();
+        let mut roots = Vec::new();
+        for n in 1..=3 {
+            let path = format!("/root/fix_a{n}");
+            let workspace = prepare_workspace(&repo, &format!("fix_a{n}")).unwrap();
+            manager.register_workspace(&path, &workspace, &repo);
+            manager.mark_running(&path);
+            std::fs::write(
+                workspace.root.join("a.txt"),
+                LINES.replace("two", &format!("two-{n}")),
+            )
+            .unwrap();
+            roots.push(workspace.root);
+        }
+        std::fs::write(roots[1].join("extra.txt"), "more\n").unwrap();
+        manager.finish_ok("/root/fix_a1", run_result(1, 1));
+        manager.finish_ok("/root/fix_a2", run_result(1, 1));
+        // Not all attempts finished: the group's wait goes on.
+        let waiting = manager
+            .wait_agents("/root", vec!["fix".to_string()], 100)
+            .unwrap();
+        assert_eq!(waiting["timed_out"], true);
+        assert!(waiting.get("attempts").is_none());
+        let refused = manager.pick_attempt("/root", "fix", "fix_a3").unwrap_err();
+        assert!(refused.contains("still running"), "{refused}");
+
+        manager.finish_ok("/root/fix_a3", run_result(1, 1));
+        let result = manager
+            .wait_agents("/root", vec!["fix".to_string()], 100)
+            .unwrap();
+        assert_eq!(result["timed_out"], false);
+        let attempts = result["attempts"]["fix"].as_array().unwrap();
+        assert_eq!(attempts.len(), 3);
+        assert_eq!(attempts[1]["path"], "/root/fix_a2");
+        assert_eq!(attempts[1]["attempt"], 2);
+        assert_eq!(attempts[1]["files"], json!(["a.txt", "extra.txt"]));
+        assert_eq!(
+            (attempts[1]["added"].clone(), attempts[1]["removed"].clone()),
+            (json!(2), json!(1))
+        );
+        assert_eq!(attempts[0]["files"], json!(["a.txt"]));
+
+        let error = manager.pick_attempt("/root", "fix", "other").unwrap_err();
+        assert!(error.contains("not an attempt of fix"), "{error}");
+        manager.drain_events();
+        let picked = manager.pick_attempt("/root", "fix", "2").unwrap();
+        assert_eq!(picked["picked"], "/root/fix_a2");
+        assert_eq!(picked["merge"]["ok"], true);
+        assert_eq!(picked["discarded"], json!(["/root/fix_a1", "/root/fix_a3"]));
+        assert_eq!(
+            std::fs::read_to_string(repo.join("a.txt")).unwrap(),
+            LINES.replace("two", "two-2")
+        );
+        assert!(repo.join("extra.txt").exists());
+        assert!(roots.iter().all(|root| !root.exists()));
+        assert_eq!(merge_events(&manager).len(), 3);
+        let states: Vec<Value> = manager
+            .runs_json()
+            .iter()
+            .map(|row| row["state"].clone())
+            .collect();
+        assert_eq!(
+            states,
+            vec![json!("discarded"), json!("merged"), json!("discarded")]
+        );
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn resume_needs_a_finished_agent_with_its_conversation() {
+        let manager = SubagentManager::default();
+        manager.reserve_spawn(spawn("helper")).unwrap();
+        manager.mark_running("/root/helper");
+        let error = manager
+            .reserve_resume("/root", "helper", "more")
+            .err()
+            .unwrap();
+        assert!(error.contains("still running"), "{error}");
+        manager.finish_ok("/root/helper", run_result(1, 1));
+        let error = manager
+            .reserve_resume("/root", "helper", "more")
+            .err()
+            .unwrap();
+        assert!(error.contains("no saved conversation"), "{error}");
+        let error = manager
+            .reserve_resume("/root/other", "/root/helper", "more")
+            .err()
+            .unwrap();
+        assert!(error.contains("not one of your subagents"), "{error}");
+    }
+
+    #[test]
+    fn the_board_is_shared_and_reports_each_change() {
+        let manager = SubagentManager::default();
+        let revision = manager.revision();
+        let created = manager
+            .task_create(NewTask {
+                title: "Parser".to_string(),
+                ..NewTask::default()
+            })
+            .unwrap();
+        assert_eq!(created, json!({ "id": "t1" }));
+        // A subagent on another thread sees and claims the same board.
+        let other = manager.clone();
+        let claimed = std::thread::spawn(move || other.task_update("/root/w", "t1", "claim", None))
+            .join()
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.owner.as_deref(), Some("/root/w"));
+        assert_eq!(manager.task_list()["tasks"][0]["status"], "claimed");
+        assert!(manager.revision() > revision);
+        assert_eq!(
+            manager
+                .drain_events()
+                .into_iter()
+                .filter(|event| *event == TeamEvent::Board)
+                .count(),
+            1
+        );
+        assert!(manager
+            .task_update("/root/x", "t1", "complete", None)
+            .is_err());
+    }
+
+    #[test]
+    fn a_hook_report_reaches_the_main_agent_and_wakes_it() {
+        let manager = SubagentManager::default();
+        manager.report_hook(crate::hooks::HookReport {
+            event: "task_completed",
+            ok: false,
+            text: "2 tests failed".to_string(),
+        });
+        assert!(manager.drain_events().contains(&TeamEvent::Message {
+            from: "hook:task_completed".to_string(),
+            to: ROOT_PATH.to_string(),
+            summary: "2 tests failed".to_string(),
+        }));
+        let mail = manager.take_wake();
+        assert_eq!(
+            mail[0].model_text(),
+            "<hook_result hook=\"task_completed\" ok=\"false\">\n2 tests failed\n</hook_result>"
+        );
+        // Plain mail waits for the next turn instead.
+        manager.tell_root("review_on_complete", "no reviewer");
+        assert!(manager.take_wake().is_empty());
+        assert_eq!(manager.drain_messages(ROOT_PATH).len(), 1);
+    }
+
+    #[test]
+    fn the_team_survives_a_restart_without_worktrees_that_are_gone() {
+        let (repo, manager, workspace) = merge_fixture("restart");
+        std::fs::write(workspace.root.join("c.txt"), "child\n").unwrap();
+        manager.finish_ok("/root/worker", run_result(1, 1));
+        manager.reserve_spawn(spawn("gone")).unwrap();
+        let gone = prepare_workspace(&repo, "gone").unwrap();
+        manager.register_workspace("/root/gone", &gone, &repo);
+        manager.reserve_spawn(spawn("busy")).unwrap();
+        let busy = prepare_workspace(&repo, "busy").unwrap();
+        manager.register_workspace("/root/busy", &busy, &repo);
+        manager.mark_running("/root/busy");
+        manager
+            .task_create(NewTask {
+                title: "Ship".to_string(),
+                ..NewTask::default()
+            })
+            .unwrap();
+        let saved = manager.team_json();
+        std::fs::remove_dir_all(&gone.root).unwrap();
+
+        let restored = SubagentManager::restore(AgentsConfig::default(), &saved);
+        assert_eq!(restored.board_json(), manager.board_json());
+        let rows = restored.runs_json();
+        let ids: Vec<&str> = rows.iter().map(|row| row["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["/root/worker", "/root/busy"]);
+        assert_eq!(rows[0]["state"], "completed");
+        assert_eq!(rows[0]["isolation"], "worktree");
+        // It was running when the engine stopped.
+        assert_eq!(rows[1]["state"], "interrupted");
+        let result = restored.merge_agent("/root", "worker", "apply").unwrap();
+        assert_eq!(result["files"], json!(["c.txt"]));
+        assert!(repo.join("c.txt").exists());
+        // Once merged it is no longer saved.
+        let saved = restored.team_json();
+        assert_eq!(saved["worktrees"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            SubagentManager::restore(AgentsConfig::default(), &Value::Null).runs_json(),
+            Vec::<Value>::new()
+        );
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn a_new_budget_window_resets_the_count_and_old_agents_are_forgotten() {
+        let config = AgentsConfig {
+            turn_token_budget: 100,
+            ..AgentsConfig::default()
+        };
+        let manager = SubagentManager::new(config.clone(), TeamShared::default());
+        manager.reserve_spawn(spawn("a")).unwrap();
+        manager.record("/root/a", &usage(90, 20));
+        manager.finish_ok("/root/a", run_result(90, 20));
+        assert!(manager.budget_exhausted());
+        // A turn the engine starts for a result continues the window.
+        manager.begin_turn(config.clone(), false);
+        assert!(manager.budget_exhausted());
+        manager.begin_turn(config.clone(), true);
+        assert!(!manager.budget_exhausted());
+        assert!(manager
+            .drain_messages(ROOT_PATH)
+            .iter()
+            .all(|message| message.from != "team_budget"));
+
+        for index in 0..MAX_KEPT_AGENTS + 3 {
+            let path = format!("/root/old_{index}");
+            manager
+                .reserve_spawn(spawn(&format!("old_{index}")))
+                .unwrap();
+            manager.finish_ok(&path, run_result(1, 1));
+        }
+        manager.begin_turn(config, true);
+        let rows = manager.runs_json();
+        assert_eq!(rows.len(), MAX_KEPT_AGENTS);
+        assert!(!rows.iter().any(|row| row["id"] == "/root/a"));
+        // A finished agent's name can be used again.
+        manager.reserve_spawn(spawn("old_30")).unwrap();
     }
 }

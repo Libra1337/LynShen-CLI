@@ -751,6 +751,7 @@ fn record_headless_event(event: &AgentEvent, stats: &mut HeadlessStats) {
         AgentEvent::MergeResult { .. } => "merge_result",
         AgentEvent::TeamBudget { .. } => "team_budget",
         AgentEvent::AgentRuns(_) => "agent_runs",
+        AgentEvent::TaskBoard(_) => "task_board",
         AgentEvent::SubagentTranscript { .. } => "subagent_transcript",
         AgentEvent::PlanDraft { .. } => "plan_draft",
         AgentEvent::ProposedPlan { .. } => "proposed_plan",

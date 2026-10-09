@@ -120,6 +120,11 @@ const READ_ONLY_TOOLS: &[&str] = &[
     "list_agents",
     "send_message",
     "close_agent",
+    "resume_agent",
+    // The task board is the team's coordination, not the workspace.
+    "task_create",
+    "task_list",
+    "task_update",
     TOOL_NAME,
 ];
 
@@ -387,6 +392,10 @@ mod tests {
     fn a_read_only_role_gets_the_same_rules_with_its_own_message() {
         assert_eq!(read_only_refusal("read", "{}", None), None);
         assert_eq!(read_only_refusal("send_message", "{}", None), None);
+        for board in ["task_create", "task_list", "task_update", "resume_agent"] {
+            assert_eq!(read_only_refusal(board, "{}", None), None, "{board}");
+        }
+        assert!(read_only_refusal("pick_attempt", "{}", None).is_some());
         assert_eq!(
             read_only_refusal("bash", r#"{"command":"git diff HEAD"}"#, None),
             None

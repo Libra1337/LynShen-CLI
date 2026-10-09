@@ -115,19 +115,21 @@ fn group(name: &str) -> &'static str {
         "web_fetch" | "web_search" => "web",
         "generate_image" => "image",
         "spawn_agent" | "wait_agent" | "list_agents" | "send_message" | "close_agent"
-        | "merge_agent" => "subagents",
+        | "merge_agent" | "resume_agent" | "pick_attempt" => "subagents",
+        "task_create" | "task_list" | "task_update" => "board",
         "get_goal" | "create_goal" | "update_goal" => "goals",
         "update_plan" | "propose_plan" => "plan",
         _ => "files",
     }
 }
 
-const GROUPS: [&str; 7] = [
+const GROUPS: [&str; 8] = [
     "files",
     "shell",
     "web",
     "image",
     "subagents",
+    "board",
     "goals",
     "plan",
 ];
@@ -256,8 +258,10 @@ const BASELINE_CODING_TOKENS: usize = 4521;
 
 /// The first request may carry at most this share of the baseline, in
 /// percent. 60 when the budget was set; 61 since the agent team tools
-/// (roles, merge_agent, plan step owners) added about 160 tokens.
-const MAX_PERCENT_OF_BASELINE: usize = 61;
+/// (roles, merge_agent, plan step owners) added about 160 tokens; 69 since
+/// team v2 (task board, resume_agent, pick_attempt, background and attempts)
+/// added about 360.
+const MAX_PERCENT_OF_BASELINE: usize = 69;
 
 #[test]
 fn default_coding_request_stays_lean() {
