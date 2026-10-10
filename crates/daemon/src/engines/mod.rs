@@ -906,6 +906,8 @@ impl Session<'_> {
                             }
                         }
                         "set_attended" => {}
+                        // Another open: answered, so it does not wait forever.
+                        "tui" => self.refuse(&op, crate::session::ALREADY_IN_TERMINAL.to_string()),
                         _ => self.publish(vec![json!({ "type": "error", "message": "the conversation is open in its terminal: exit the TUI to continue here" })]),
                     }
                 }

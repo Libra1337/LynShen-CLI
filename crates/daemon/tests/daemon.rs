@@ -2010,6 +2010,16 @@ fn a_claude_conversation_moves_to_its_tui_and_back() {
     // The session stays listed and open; its GUI ops wait for the TUI.
     desktop.send(json!({ "op": "user_message", "session": session, "content": "too soon" }));
     desktop.until(|f| f["session"] == session.as_str() && f["type"] == "error");
+    // Opening it again is answered, not left waiting.
+    let again = request(
+        &mut desktop,
+        json!({ "op": "session_tui", "session": session, "cols": 100, "rows": 30 }),
+    );
+    assert_eq!(again["type"], "error", "{again}");
+    assert_eq!(
+        again["message"],
+        "the conversation is already open in its terminal"
+    );
 
     type_in(&mut desktop, &term, "from the tui\n");
     let frames =
@@ -2159,6 +2169,16 @@ fn a_lynshen_conversation_moves_to_its_tui_and_back() {
         .to_string();
     let resume = format!("TUI --resume {session}");
     desktop.until(|f| term_text(std::slice::from_ref(f), &term).contains(&resume));
+    // Opening it again is answered, not left waiting.
+    let again = request(
+        &mut desktop,
+        json!({ "op": "session_tui", "session": session }),
+    );
+    assert_eq!(again["type"], "error", "{again}");
+    assert_eq!(
+        again["message"],
+        "the conversation is already open in its terminal"
+    );
     type_in(&mut desktop, &term, "exit\n");
     let frames = desktop.until(|f| f["session"] == session.as_str() && f["type"] == "transcript");
     assert!(frames

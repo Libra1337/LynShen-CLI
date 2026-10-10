@@ -240,6 +240,9 @@ fn terminal(
                         }
                     }
                     "set_attended" => {}
+                    // Another open (a client that lost its terminal view):
+                    // answered, so its request does not wait forever.
+                    "tui" => refuse_request(hub, &op, ALREADY_IN_TERMINAL),
                     _ => hub.broadcast(&json!({ "type": "error", "session": id, "message": "the conversation is open in its terminal: exit the TUI to continue here" })),
                 }
             }
@@ -263,6 +266,18 @@ fn terminal(
 }
 
 /// Applies one op; returns true when the session should stop.
+/// The answer to a TUI open while the conversation already runs in one.
+pub(crate) const ALREADY_IN_TERMINAL: &str = "the conversation is already open in its terminal";
+
+/// An error answer to one request (`op["id"]`), for its client only.
+fn refuse_request(hub: &Hub, op: &Value, message: &str) {
+    let mut error = json!({ "type": "error", "message": message });
+    if !op["id"].is_null() {
+        error["id"] = op["id"].clone();
+    }
+    hub.send_to(op["client"].as_u64().unwrap_or(0), &error);
+}
+
 fn apply(hub: &Hub, core: &mut AgentCore, id: &str, op: &Value) -> bool {
     if op["op"] == "snapshot" {
         if let Some(client) = op["client"].as_u64() {
