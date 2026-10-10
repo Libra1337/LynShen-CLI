@@ -2916,6 +2916,27 @@ impl AgentCore {
         self.attended
     }
 
+    /// Nothing runs or waits in this engine: no turn or queued message, no
+    /// prompt, deferred action, sign-in, plan, goal or resume work, no live
+    /// subagent, waiting background result or shell. Closing it loses
+    /// nothing that reopening the session does not bring back.
+    pub fn is_idle(&self) -> bool {
+        !self.running
+            && self.queued.is_empty()
+            && self.pending_approvals.is_empty()
+            && self.deferred_actions.is_empty()
+            && self.steered_pending.is_empty()
+            && self.plan_draft.is_none()
+            && self.login_receiver.is_none()
+            && self.omp_login_receiver.is_none()
+            && !self.goal_continuation_running
+            && !self.overflow_retry_pending
+            && !self.resume_summary_running
+            && self.subagent_manager.pending_wake().is_none()
+            && !self.subagent_manager.any_live()
+            && !self.tool_state.has_live_shells()
+    }
+
     /// Marks whether a client is watching. Going unattended also converts
     /// calls already waiting on a prompt into deferred actions, so a client
     /// that disconnects mid-prompt never leaves the turn blocked.

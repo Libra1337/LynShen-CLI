@@ -4,9 +4,13 @@ use std::{
     borrow::Cow,
     collections::HashMap,
     hash::{DefaultHasher, Hash, Hasher},
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
+    time::{Duration, Instant},
 };
-use tiktoken_rs::bpe_for_model;
+use tiktoken_rs::{
+    tokenizer::{get_tokenizer, Tokenizer},
+    CoreBPE,
+};
 
 /// Texts at least this long have their count remembered. The engine recounts
 /// the whole conversation after every item it gains (the context gauge), and
@@ -18,6 +22,48 @@ const MEMO_MAX_ENTRIES: usize = 16_384;
 fn memo() -> &'static Mutex<HashMap<u64, usize>> {
     static MEMO: OnceLock<Mutex<HashMap<u64, usize>>> = OnceLock::new();
     MEMO.get_or_init(Mutex::default)
+}
+
+/// The tokenizers loaded, with when each was last used. One holds about
+/// 40 MB: a host that runs for days (the daemon) lets go of those it has not
+/// used for a while (`release_idle_tokenizers`), and the next count loads
+/// them again.
+type Loaded = Vec<(Tokenizer, Arc<CoreBPE>, Instant)>;
+
+fn loaded() -> &'static Mutex<Loaded> {
+    static LOADED: OnceLock<Mutex<Loaded>> = OnceLock::new();
+    LOADED.get_or_init(Mutex::default)
+}
+
+fn bpe_for_model(model: &str) -> Option<Arc<CoreBPE>> {
+    let tokenizer = get_tokenizer(model)?;
+    let mut loaded = loaded().lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, bpe, used)) = loaded.iter_mut().find(|(t, _, _)| *t == tokenizer) {
+        *used = Instant::now();
+        return Some(Arc::clone(bpe));
+    }
+    let bpe = Arc::new(
+        match tokenizer {
+            Tokenizer::O200kHarmony => tiktoken_rs::o200k_harmony(),
+            Tokenizer::O200kBase => tiktoken_rs::o200k_base(),
+            Tokenizer::Cl100kBase => tiktoken_rs::cl100k_base(),
+            Tokenizer::P50kBase => tiktoken_rs::p50k_base(),
+            Tokenizer::P50kEdit => tiktoken_rs::p50k_edit(),
+            Tokenizer::R50kBase | Tokenizer::Gpt2 => tiktoken_rs::r50k_base(),
+        }
+        .ok()?,
+    );
+    loaded.push((tokenizer, Arc::clone(&bpe), Instant::now()));
+    Some(bpe)
+}
+
+/// Lets go of the tokenizers not used for `idle` (a count in progress
+/// keeps its own until it is done).
+pub fn release_idle_tokenizers(idle: Duration) {
+    loaded()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|(_, _, used)| used.elapsed() < idle);
 }
 
 #[derive(Debug, Clone)]
@@ -128,7 +174,7 @@ pub(crate) fn count_text(model: &str, text: &str) -> TokenCount {
     let text = text.as_ref();
     let requested = tokenizer_model(model);
     let (bpe, tokenizer) = bpe_for_model(requested).map_or_else(
-        |_| {
+        || {
             // gpt-5/o-series models use o200k_base. If a future deployment suffix is
             // unknown to tiktoken-rs, falling back to gpt-5 keeps counting tokenizer
             // based instead of reverting to character estimates.
@@ -198,6 +244,18 @@ fn tokenizer_model(model: &str) -> &str {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_tokenizer_let_go_of_is_loaded_again_by_the_next_count() {
+        let before = count_text("gpt-5", "hello tokenizer world").tokens;
+        release_idle_tokenizers(Duration::ZERO);
+        assert_eq!(count_text("gpt-5", "hello tokenizer world").tokens, before);
+        assert!(loaded()
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(tokenizer, _, _)| *tokenizer == Tokenizer::O200kBase));
+    }
 
     fn png(width: u32, height: u32, body: usize) -> String {
         let mut bytes = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();

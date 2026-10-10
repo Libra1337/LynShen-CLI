@@ -1483,3 +1483,28 @@ fn switching_team_v2_off_lets_a_background_agent_finish_without_waking_anyone() 
         AgentEvent::ToolOutput { name, is_error: false, .. } if name == "task_list"
     )));
 }
+
+#[test]
+fn an_engine_is_idle_only_when_nothing_runs_or_waits_in_it() {
+    let _guard = setup();
+    let dir = temp_dir("idle");
+    let mut core = open(&dir, ApprovalMode::Manual);
+    core.set_attended(false);
+    assert!(core.is_idle());
+
+    core.submit_user_message("RUN: printf idle > marker.txt".to_string());
+    assert!(!core.is_idle());
+    let events = pump(&mut core, is_ready);
+    let id = events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::ActionDeferred(action) => Some(action.id.clone()),
+            _ => None,
+        })
+        .unwrap();
+    // The deferred call waits on the user's decision.
+    assert!(!core.is_idle());
+    core.decide_action(&id, false);
+    pump(&mut core, is_ready);
+    assert!(core.is_idle());
+}

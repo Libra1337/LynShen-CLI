@@ -635,6 +635,18 @@ pub fn observe(hub: &Hub, session: &str, event: &Value) {
 
 /// A session's engine stopped: waits for its replies end, and what it
 /// reported no longer holds.
+/// Another session waits on this one's reply, or it has messages it has
+/// not finished handling.
+pub(crate) fn awaited(hub: &Hub, session: &str) -> bool {
+    let state = lock(&hub.messages.state);
+    state
+        .pending
+        .get(session)
+        .is_some_and(|list| !list.is_empty())
+        || state.waiting.contains_key(session)
+        || state.waiting.values().any(|target| target == session)
+}
+
 pub fn ended(hub: &Hub, session: &str) {
     let mut state = lock(&hub.messages.state);
     state.modes.remove(session);

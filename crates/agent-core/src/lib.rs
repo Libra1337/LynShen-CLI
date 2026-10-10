@@ -50,6 +50,7 @@ pub use event::{
 };
 pub use hunks::HunkView;
 pub use session::{release_session_locks, SessionSummary};
+pub use tokens::release_idle_tokenizers;
 pub use tools::{git_diff, terminate_tool_processes};
 
 /// The LynShen gateway URL and an access token good for at least two more

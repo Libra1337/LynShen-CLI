@@ -25,6 +25,7 @@ use std::{
         Arc, Mutex, MutexGuard, Weak,
     },
     thread,
+    time::{Duration, Instant},
 };
 
 /// How long a pairing code shown on the desktop stays valid.
@@ -101,7 +102,17 @@ struct Hosted {
     watchers: HashSet<u64>,
     /// Which engine thread backs this entry (see `session_ended`).
     generation: u64,
+    /// When it was last opened (or found open): a client that opened it
+    /// watches it next, so it is not closed as idle meanwhile.
+    opened: Instant,
 }
+
+/// How long a tokenizer nobody counted with stays loaded (see `tick`).
+const TOKENIZER_IDLE: Duration = Duration::from_secs(10 * 60);
+
+/// How long after an open an idle session is kept for the client that
+/// opened it to start watching (see `Hub::retire_idle`).
+const OPEN_GRACE: Duration = Duration::from_secs(30);
 
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poison| poison.into_inner())
@@ -371,7 +382,8 @@ impl Hub {
         engine: Option<engines::Kind>,
         options: engines::Options,
     ) -> Result<(), String> {
-        if lock(&self.sessions).contains_key(id) {
+        if let Some(hosted) = lock(&self.sessions).get_mut(id) {
+            hosted.opened = Instant::now();
             return Ok(());
         }
         let known = self
@@ -516,8 +528,49 @@ impl Hub {
                 cwd,
                 watchers: HashSet::new(),
                 generation,
+                opened: Instant::now(),
             },
         );
+    }
+
+    /// Closes a session whose engine thread found it idle with nobody
+    /// watching, unless a client watches or opened it since, a delivered
+    /// message holds it, it is being titled or handed off, another session
+    /// waits on its reply, or an op reached it (`quiet` checks the thread's
+    /// channel; ops are sent under the sessions lock, so none arrives once
+    /// this has decided). True when closed: the thread then ends, and
+    /// `session_ended` tells the clients. Reopening it brings it back.
+    pub(crate) fn retire_idle(
+        &self,
+        id: &str,
+        generation: u64,
+        quiet: impl FnOnce() -> bool,
+    ) -> bool {
+        // Before the sessions lock: a message send holds its state while it
+        // forwards (a send that starts meanwhile finds the session claimed).
+        if crate::session_messages::awaited(self, id) {
+            return false;
+        }
+        let mut sessions = lock(&self.sessions);
+        let Some(hosted) = sessions.get(id) else {
+            return false;
+        };
+        if hosted.generation != generation
+            || !hosted.watchers.is_empty()
+            || hosted.opened.elapsed() < OPEN_GRACE
+            || lock(&self.claims).contains_key(id)
+            || lock(&self.busy).contains(id)
+            || lock(&self.untitled).contains(id)
+            || lock(&self.titling).contains(id)
+            || lock(&self.handing_off).contains(id)
+            || !quiet()
+        {
+            return false;
+        }
+        sessions.remove(id);
+        drop(sessions);
+        let _ = self.store.record_session_closed(id);
+        true
     }
 
     /// A number unique to one engine thread, tying it to its `Hosted` entry.
@@ -854,6 +907,9 @@ impl Hub {
         self.fire_due_schedules();
         self.expire_questions();
         self.deliver_pending();
+        // The daemon runs for days: a tokenizer no session used for a while
+        // is loaded again by the next count.
+        lynshen_agent_core::release_idle_tokenizers(TOKENIZER_IDLE);
     }
 
     pub fn ask(&self, question: &Question) -> Result<(), String> {
@@ -1971,6 +2027,41 @@ mod tests {
         assert!(!archived("run1"));
         assert_eq!(hub.open_items_of("ops").len(), 2);
         assert!(hub.reopen_item(ItemKind::Question, "q1").is_err());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_idle_session_closes_only_when_nothing_holds_it() {
+        let dir = std::env::temp_dir().join(format!(
+            "lynshen-hub-idle-close-{}-{}",
+            std::process::id(),
+            now()
+        ));
+        let hub = Hub::new(
+            Store::open(dir.join("daemon")).unwrap(),
+            Agents::open(dir.join("agents")).unwrap(),
+            "test",
+            None,
+        );
+        let (ops, _rx) = mpsc::channel();
+        let generation = hub.next_generation();
+        hub.host("s1".to_string(), ops, dir.clone(), generation);
+        // Just opened: the client that opened it watches it next.
+        assert!(!hub.retire_idle("s1", generation, || true));
+        let past = Instant::now() - OPEN_GRACE;
+        lock(&hub.sessions).get_mut("s1").unwrap().opened = past;
+        hub.set_watch(7, "s1", true);
+        assert!(!hub.retire_idle("s1", generation, || true));
+        hub.set_watch(7, "s1", false);
+        lock(&hub.busy).insert("s1".into());
+        assert!(!hub.retire_idle("s1", generation, || true));
+        lock(&hub.busy).remove("s1");
+        // An op reached it meanwhile, or it belongs to another engine.
+        assert!(!hub.retire_idle("s1", generation, || false));
+        assert!(!hub.retire_idle("s1", generation + 1, || true));
+        assert!(lock(&hub.sessions).contains_key("s1"));
+        assert!(hub.retire_idle("s1", generation, || true));
+        assert!(!lock(&hub.sessions).contains_key("s1"));
         let _ = fs::remove_dir_all(dir);
     }
 

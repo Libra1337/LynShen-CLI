@@ -2830,6 +2830,20 @@ impl ToolState {
         }
     }
 
+    /// A background shell this engine started is still there: dropping the
+    /// engine would end it (see `ToolStateInner`'s `Drop`).
+    pub fn has_live_shells(&self) -> bool {
+        let ids: Vec<u64> = match self.inner.lock() {
+            Ok(inner) => inner.shells.iter().copied().collect(),
+            Err(_) => return true,
+        };
+        !ids.is_empty()
+            && shell_sessions()
+                .lock()
+                .map(|sessions| ids.iter().any(|id| sessions.contains_key(id)))
+                .unwrap_or(true)
+    }
+
     fn own_shell(&self, session_id: u64) {
         if let Ok(mut inner) = self.inner.lock() {
             inner.shells.insert(session_id);
