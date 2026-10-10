@@ -450,13 +450,14 @@ impl Snapshot {
                     self.transcript
                         .push(json!({ "role": "assistant", "content": "" }));
                 }
+                // Appended in place: rebuilding the reply on every delta
+                // copies it once per token.
                 if let Some(last) = self.transcript.last_mut() {
-                    let text = format!(
-                        "{}{}",
-                        last["content"].as_str().unwrap_or_default(),
-                        event["delta"].as_str().unwrap_or_default()
-                    );
-                    last["content"] = json!(text);
+                    let delta = event["delta"].as_str().unwrap_or_default();
+                    match &mut last["content"] {
+                        Value::String(text) => text.push_str(delta),
+                        content => *content = json!(delta),
+                    }
                 }
             }
             "tool_start" => {

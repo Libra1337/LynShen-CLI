@@ -1059,6 +1059,12 @@ impl SubagentManager {
         self.inner.changed.notify_all();
     }
 
+    /// A subagent is still at work (a background one outlives its turn).
+    pub(crate) fn any_live(&self) -> bool {
+        let state = self.inner.state.lock().unwrap();
+        state.agents.values().any(|agent| agent.status.is_live())
+    }
+
     /// Every live agent stops, background ones too (the session ends).
     pub(crate) fn close_everything(&self, message: &str) {
         let mut state = self.inner.state.lock().unwrap();

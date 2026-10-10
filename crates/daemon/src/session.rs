@@ -14,8 +14,13 @@ use std::{
         Arc,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
+
+/// How long a session nobody watches stays open once nothing happens in it:
+/// then its engine closes (see `Hub::retire_idle`) and its memory with it.
+/// Reopening the session brings it back as it was.
+const IDLE_CLOSE: Duration = Duration::from_secs(10 * 60);
 
 /// Opens an engine in `cwd` (resuming `resume` when given) on a new thread,
 /// set up for `agent` when the session belongs to one. Returns the session
@@ -40,7 +45,7 @@ pub fn spawn(
         };
         let id = core.session_id().to_string();
         let _ = ready_tx.send(Ok(id.clone()));
-        run(&hub, core, &id, ops_rx);
+        run(&hub, core, &id, ops_rx, generation);
         hub.session_ended(&id, generation);
     });
     let id = ready_rx
@@ -126,19 +131,24 @@ fn resume_session(hub: &Hub, core: &mut AgentCore, id: &str) -> Result<(), Strin
     Ok(())
 }
 
-fn run(hub: &Hub, mut core: AgentCore, id: &str, ops: Receiver<Value>) {
+fn run(hub: &Hub, mut core: AgentCore, id: &str, ops: Receiver<Value>, generation: u64) {
     for event in core.startup_events() {
         publish(hub, id, event);
     }
     let mut last_status = None;
+    let mut active = Instant::now();
+    // An op taken off the channel while deciding to close (see below).
+    let mut held: Option<Value> = None;
     loop {
         loop {
-            match ops.try_recv() {
+            let next = held.take().map_or_else(|| ops.try_recv(), Ok);
+            match next {
                 Ok(op) if op["op"] == "tui" => match terminal(hub, core, id, &op, &ops) {
                     Some(next) => core = next,
                     None => return,
                 },
                 Ok(op) => {
+                    active = Instant::now();
                     if apply(hub, &mut core, id, &op) {
                         return;
                     }
@@ -148,6 +158,7 @@ fn run(hub: &Hub, mut core: AgentCore, id: &str, ops: Receiver<Value>) {
             }
         }
         for event in core.poll_events() {
+            active = Instant::now();
             // Usage goes on the turn that spent it (see crate::usage).
             let turn = matches!(event, AgentEvent::Usage { .. })
                 .then(|| core.turn_tag().map(str::to_string))
@@ -155,12 +166,30 @@ fn run(hub: &Hub, mut core: AgentCore, id: &str, ops: Receiver<Value>) {
             publish_on(hub, id, event, turn);
         }
         let status = session_event_json(id, core.model_status_event());
+        let ready = status["state"] == "ready";
         // Reconciled every tick, so a message that never started a run (an
         // engine error) does not hold a running slot.
-        hub.set_busy(id, status["state"] != "ready");
+        hub.set_busy(id, !ready);
+        if !ready {
+            active = Instant::now();
+        }
         if last_status.as_ref() != Some(&status) {
             hub.broadcast(&status);
             last_status = Some(status);
+        }
+        // Nobody has watched it, and nothing has happened in it, for a while.
+        if !core.attended()
+            && active.elapsed() >= IDLE_CLOSE
+            && core.is_idle()
+            && hub.retire_idle(id, generation, || match ops.try_recv() {
+                Ok(op) => {
+                    held = Some(op);
+                    false
+                }
+                Err(_) => true,
+            })
+        {
+            return;
         }
         thread::sleep(Duration::from_millis(30));
     }
