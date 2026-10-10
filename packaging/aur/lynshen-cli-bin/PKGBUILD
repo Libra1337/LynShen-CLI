@@ -1,7 +1,7 @@
 # Maintainer: Libra1337 <https://github.com/Libra1337>
 # LynShen CLI for Arch Linux, from the release's Linux binary.
 pkgname=lynshen-cli-bin
-pkgver=0.4.27
+pkgver=0.4.28
 pkgrel=1
 pkgdesc='LynShen CLI: a coding agent in the terminal'
 arch=('x86_64')
@@ -16,7 +16,7 @@ options=('!strip' '!debug')
 source=("third-party-notices-${pkgver}.txt::https://github.com/Libra1337/LynShen-CLI/releases/download/v${pkgver}/lynshen-third-party-notices.txt")
 source_x86_64=("lynshen-${pkgver}::https://github.com/Libra1337/LynShen-CLI/releases/download/v${pkgver}/lynshen-${CARCH}-unknown-linux-gnu")
 sha256sums=('4831460dfd8a0e3bdccc4edae2ab0bbc6a4810325a8662bef32cd38d1cb5001c')
-sha256sums_x86_64=('2cbdde9a17bebbda8c2862b1d57c1cd580ea16dd489e0a5b8b7171708d052db9')
+sha256sums_x86_64=('556942490b00f6843443f3a3c6c0ac9d5f2d012fe382435921262431f51901cc')
 
 package() {
   install -Dm755 "lynshen-${pkgver}" "${pkgdir}/usr/bin/lynshen"
