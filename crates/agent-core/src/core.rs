@@ -49,6 +49,8 @@ use std::{
 /// turns are folded into the summary.
 const COMPACTION_KEEP_RECENT_TOKENS: usize = 20_000;
 const RESUME_SUMMARY_IDLE_SECONDS: u64 = 5 * 60;
+/// How long a resume summary that could not start waits before another try.
+const RESUME_SUMMARY_RETRY: Duration = Duration::from_secs(10 * 60);
 const RESUME_SUMMARY_MODEL: &str = "gpt-5.4-mini";
 
 /// A gated tool call parked until the client answers `/approve` (or the serve
@@ -202,6 +204,9 @@ pub struct AgentCore {
     /// far and how much of the plan text clients were sent.
     plan_draft: Option<PlanDraft>,
     resume_summary_running: bool,
+    /// A resume summary that could not start (no credentials, no client)
+    /// is not tried again before this: the engine polls every 30 ms.
+    resume_summary_retry_at: Option<Instant>,
     interrupt_flag: Arc<AtomicBool>,
     /// The session's agent team: its subagents (background ones outlive a
     /// turn), mail, task board and worktrees to merge.
@@ -337,6 +342,7 @@ impl AgentCore {
             overflow_retried: false,
             plan_draft: None,
             resume_summary_running: false,
+            resume_summary_retry_at: None,
             interrupt_flag: Arc::new(AtomicBool::new(false)),
             subagent_manager,
             team_saved: 0,
@@ -3715,6 +3721,12 @@ impl AgentCore {
         if self.running || self.resume_summary_running || !self.queued.is_empty() {
             return false;
         }
+        if self
+            .resume_summary_retry_at
+            .is_some_and(|at| Instant::now() < at)
+        {
+            return false;
+        }
         let idle_for = now_secs().saturating_sub(self.session.updated_at());
         if idle_for < RESUME_SUMMARY_IDLE_SECONDS {
             return false;
@@ -3741,12 +3753,17 @@ impl AgentCore {
             .goal()
             .map(|goal| normalize_resume_status(goal.status))
             .unwrap_or(ThreadGoalStatus::Active);
-        if self.ensure_provider_credentials().is_err() {
-            return;
-        }
-        let client = match self.resume_summary_client() {
+        let client = match self
+            .ensure_provider_credentials()
+            .and_then(|()| self.resume_summary_client())
+        {
             Ok(client) => client,
-            Err(_) => return,
+            Err(_) => {
+                // Building the input walked the whole conversation and the
+                // client read config.json: not on every poll.
+                self.resume_summary_retry_at = Some(Instant::now() + RESUME_SUMMARY_RETRY);
+                return;
+            }
         };
         let (tx, rx) = mpsc::channel();
         self.resume_summary_receiver = Some(rx);
