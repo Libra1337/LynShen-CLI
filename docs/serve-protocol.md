@@ -401,7 +401,9 @@ have finished (any state except `pending` and `running`).
   worktree stays and the agent's state becomes `conflict`; apply again after
   the conflicting files are fixed, or discard. On success the worktree is
   deleted and the state becomes `merged`.
-- `discard` deletes the worktree. The state becomes `discarded`.
+- `discard` deletes the worktree. The state becomes `discarded`; an agent
+  that failed (`errored`, `interrupted`, `closed`, `budget_exhausted`) keeps
+  that state.
 
 The op asks for no approval: the click is the user's decision. The model's
 own `merge_agent` tool asks for approval of `apply` in `manual` mode, like a
@@ -413,6 +415,11 @@ or this op can still merge it while the engine runs. Worktrees in
 `<cwd>/.lynshen/agents/` older than `agents.keep_worktrees_days` are deleted
 when an engine opens the directory.
 
+An agent that ends in error (not stopped by a person) and changed nothing in
+its worktree has the worktree deleted before its failure is reported: there
+is nothing to merge, and the same task name can be spawned again. Its error
+then ends with a line saying so. One with changes keeps its worktree.
+
 Emits `merge_result`; on success or conflict also `subagent_lifecycle` with
 the new state; then `agent_runs`. An unknown target, an agent that is still
 running or one without a worktree emits `merge_result` with `ok: false` and
@@ -420,7 +427,8 @@ running or one without a worktree emits `merge_result` with `ok: false` and
 
 The worktree registry is saved with the session: after an engine or daemon
 restart (the session opened again with `/resume` or `session_open`), the
-worktree agents come back as `agent_runs` rows and this op still merges them.
+worktree agents come back as `agent_runs` rows (their state, error and run
+time included) and this op still merges them.
 A worktree whose directory is gone is dropped then; an agent that was still
 running when the engine stopped comes back `interrupted`.
 
@@ -786,6 +794,27 @@ Every key is optional; `name` defaults to the file name. `access` is
 `worktree`. `model` must be one the subagent may use (`subagent_models`).
 The text after the frontmatter is added to the subagent's system prompt.
 The `spawn_agent` call's own parameters override the role's values.
+
+### Model and effort
+
+A subagent runs on its parent's provider and connection; `model` only picks
+which of that provider's models (and so its wire protocol). A provider can
+refuse a model it lists, for example one the account's plan does not
+include: the agent then ends `errored`, and its error starts with the model
+and the endpoint the request went to, followed by the provider's whole
+answer (`claude-sonnet-5 at https://api.commandcode.ai/provider/v1/messages:
+LLM API returned HTTP 403: {"type":"error",...}`). A failed subagent's error
+is also written to `~/.lynshen/logs/lynshen.log` (target `subagent`, message
+`failed`).
+
+A `reasoning_effort` the model does not offer (from `spawn_agent` or from the
+role) runs at the nearest one it does: the next higher tier (`none` <
+`minimal` < `low` < `medium` < `high` < `xhigh` < `max` < `ultra`), else the
+model's highest; `default` on a model without it gets the model's start
+effort. A word that is no effort is refused. The `spawn_agent` result names
+the effort the agent runs at (`reasoning_effort`) and has a `note` when it is
+not the one asked for. `/model <model> <effort>` follows the same rule and
+emits an `info` event naming the effort it set.
 
 A read-only role runs under the rules of plan mode: only read-only tools and
 read-only shell commands run, and every other call returns an error. The

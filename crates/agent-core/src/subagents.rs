@@ -25,6 +25,8 @@ const MESSAGE_SUMMARY_CHARS: usize = 200;
 /// How much of a task and of a result list_agents shows.
 const LIST_MESSAGE_CHARS: usize = 300;
 const LIST_RESULT_CHARS: usize = 800;
+/// How much of a failed agent's error the session keeps.
+const SAVED_ERROR_CHARS: usize = 8000;
 const LIST_CLIPPED_NOTE: &str =
     "Long results are cut short here; wait_agent on a finished agent returns its whole result.";
 
@@ -216,6 +218,25 @@ impl SubagentStatus {
 
     fn is_final(&self) -> bool {
         !self.is_live()
+    }
+
+    /// It ended without finishing its task.
+    fn is_failure(&self) -> bool {
+        matches!(
+            self,
+            Self::Errored | Self::Interrupted | Self::Closed | Self::BudgetExhausted
+        )
+    }
+
+    /// How its trace's last line reads once it ended.
+    fn trace_label(&self) -> &'static str {
+        match self {
+            Self::Errored => "Failed",
+            Self::Interrupted => "Interrupted",
+            Self::Closed => "Closed",
+            Self::BudgetExhausted => "Budget used up",
+            _ => "Done",
+        }
     }
 }
 
@@ -808,6 +829,27 @@ impl SubagentManager {
         state.revision += 1;
     }
 
+    /// Removes the workspace of `path` when merge_agent would find nothing
+    /// in it, so no worktree waits to be merged and its task_name can be
+    /// spawned again; the agent's status is left as it is. True when it
+    /// was removed.
+    pub(crate) fn drop_unchanged_workspace(&self, path: &str) -> bool {
+        let Ok(pending) = self.inner.shared.begin_merge(path) else {
+            return false;
+        };
+        if !workspace_changes(&pending.workspace).is_ok_and(|changes| changes.files.is_empty()) {
+            self.inner.shared.end_merge(path, false);
+            return false;
+        }
+        let removed = remove_workspace(&pending.workspace, &pending.parent_cwd);
+        if let Err(error) = &removed {
+            crate::log_warn!("subagent", "unchanged worktree not removed", error = error);
+        }
+        self.inner.shared.end_merge(path, removed.is_ok());
+        self.inner.state.lock().unwrap().revision += 1;
+        removed.is_ok()
+    }
+
     pub(crate) fn mark_running(&self, path: &str) {
         let mut state = self.inner.state.lock().unwrap();
         let mut event = None;
@@ -865,11 +907,7 @@ impl SubagentManager {
                 } else {
                     error
                 };
-                agent.trace.finish(match agent.status {
-                    SubagentStatus::Interrupted => "Interrupted",
-                    SubagentStatus::BudgetExhausted => "Budget used up",
-                    _ => "Failed",
-                });
+                agent.trace.finish(agent.status.trace_label());
                 agent.error = Some(error.clone());
                 error
             }
@@ -1480,7 +1518,15 @@ impl SubagentManager {
                     format!("conflicts in {}", merge.conflicts.join(", ")),
                 )
             } else if action == "discard" {
-                (SubagentStatus::Discarded, "worktree discarded".to_string())
+                // An agent that failed stays failed: "discarded" reads as a
+                // finished task.
+                let status = state
+                    .agents
+                    .get(&path)
+                    .map(|agent| agent.status)
+                    .filter(SubagentStatus::is_failure)
+                    .unwrap_or(SubagentStatus::Discarded);
+                (status, "worktree discarded".to_string())
             } else {
                 let count = merge.files.len();
                 let files = if count == 1 { "file" } else { "files" };
@@ -1817,6 +1863,13 @@ impl SubagentManager {
                     row["files_changed"] = json!(result
                         .map(|result| result.files_changed.clone())
                         .unwrap_or_default());
+                    row["elapsed_ms"] = json!(result.map_or(0, |result| result.elapsed_ms));
+                    // Why it failed, the provider's answer included: after a
+                    // restart this is all there is of it.
+                    row["error"] = json!(agent
+                        .error
+                        .as_deref()
+                        .map(|error| summarize_to(error, SAVED_ERROR_CHARS)));
                 }
                 row
             })
@@ -1863,11 +1916,8 @@ impl SubagentManager {
                 .unwrap_or(SubagentStatus::Interrupted);
             let message = text("message").unwrap_or_default();
             let mut trace = crate::subagent_trace::SubagentTrace::new(&message);
-            trace.finish(if status == SubagentStatus::Interrupted {
-                "Interrupted"
-            } else {
-                "Done"
-            });
+            // An agent that failed reads so after a restart too.
+            trace.finish(status.trace_label());
             let task_name = text("task_name")
                 .unwrap_or_else(|| path.rsplit('/').next().unwrap_or_default().to_string());
             let nickname = text("nickname").unwrap_or_else(|| {
@@ -1904,10 +1954,13 @@ impl SubagentManager {
                         workdir: workdir.clone(),
                         files_changed,
                         model: text("model").unwrap_or_default(),
+                        elapsed_ms: row["elapsed_ms"].as_u64().unwrap_or(0),
                         ..SubagentRunResult::default()
                     }),
-                    error: (status == SubagentStatus::Interrupted)
-                        .then(|| "the engine stopped while it ran".to_string()),
+                    error: text("error").filter(|error| !error.is_empty()).or_else(|| {
+                        (status == SubagentStatus::Interrupted)
+                            .then(|| "the engine stopped while it ran".to_string())
+                    }),
                     started_at_ms,
                     completed_at_ms: Some(row["completed_at"].as_u64().unwrap_or(started_at_ms)),
                     workdir: Some(workdir),
@@ -2094,7 +2147,7 @@ fn close_paths(state: &mut SubagentRegistry, paths: Vec<String>, message: &str) 
         agent.interrupt_flag.store(true, Ordering::SeqCst);
         agent.status = SubagentStatus::Closed;
         agent.completed_at_ms = Some(now_ms());
-        agent.trace.finish("Closed");
+        agent.trace.finish(SubagentStatus::Closed.trace_label());
         state.push_event(&path, "closed", message);
     }
 }
@@ -4019,6 +4072,80 @@ mod tests {
             SubagentManager::restore(AgentsConfig::default(), &Value::Null).runs_json(),
             Vec::<Value>::new()
         );
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    const REFUSED: &str = "LLM API returned HTTP 403: {\"type\":\"error\",\"error\":{\"type\":\"permission_error\",\"message\":\"MODEL_NOT_IN_PLAN: Claude Sonnet 5 available in Pro and above plans\"}}";
+
+    #[test]
+    fn a_failed_agent_reads_failed_with_its_error_after_a_restart() {
+        let (repo, manager, workspace) = merge_fixture("restart-failed");
+        std::fs::write(workspace.root.join("c.txt"), "child\n").unwrap();
+        let mut partial = run_result(0, 0);
+        partial.elapsed_ms = 617;
+        manager.finish_err("/root/worker", REFUSED.to_string(), partial);
+        let saved = manager.team_json();
+        assert_eq!(saved["worktrees"][0]["error"], REFUSED);
+
+        let restored = SubagentManager::restore(AgentsConfig::default(), &saved);
+        let row = &restored.runs_json()[0];
+        assert_eq!(row["state"], "errored");
+        assert_eq!(row["activity"], "Failed");
+        assert_eq!(row["error"], REFUSED);
+        let listed = restored.list_agents("/root", None);
+        assert_eq!(listed["agents"][0]["result"]["elapsed_ms"], 617);
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn discarding_a_failed_agents_worktree_leaves_it_failed() {
+        let (repo, manager, workspace) = merge_fixture("discard-failed");
+        std::fs::write(workspace.root.join("c.txt"), "child\n").unwrap();
+        manager.finish_err("/root/worker", REFUSED.to_string(), run_result(0, 0));
+        manager.drain_events();
+        let result = manager
+            .merge_agent("/root", "worker", "discard", &ToolState::default())
+            .unwrap();
+        assert_eq!(result["ok"], true);
+        assert!(!workspace.root.exists());
+        // "discarded" reads as a finished task; this one failed.
+        assert_eq!(manager.runs_json()[0]["state"], "errored");
+        assert!(manager.drain_events().contains(&TeamEvent::Lifecycle {
+            path: "/root/worker".to_string(),
+            status: "errored".to_string(),
+            message: "worktree discarded".to_string(),
+        }));
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn only_an_unchanged_workspace_is_dropped_and_its_name_is_free_again() {
+        let (repo, manager, workspace) = merge_fixture("drop-unchanged");
+        // A change keeps it, for merge_agent.
+        std::fs::write(workspace.root.join("a.txt"), "edited\n").unwrap();
+        assert!(!manager.drop_unchanged_workspace("/root/worker"));
+        assert!(workspace.root.exists());
+        std::fs::write(workspace.root.join("a.txt"), LINES).unwrap();
+        // So does a commit made in it.
+        std::fs::write(workspace.root.join("d.txt"), "dee\n").unwrap();
+        git(&workspace.root, &["add", "d.txt"]);
+        git(&workspace.root, &["commit", "-qm", "child"]);
+        assert!(!manager.drop_unchanged_workspace("/root/worker"));
+        git(&workspace.root, &["reset", "-q", "--hard", "HEAD~1"]);
+
+        assert!(manager.drop_unchanged_workspace("/root/worker"));
+        assert!(!workspace.root.exists());
+        manager.finish_err("/root/worker", REFUSED.to_string(), run_result(0, 0));
+        assert_eq!(manager.runs_json()[0]["state"], "errored");
+        assert!(manager.team_json()["worktrees"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        // Nothing waits to be merged: the task can be spawned again.
+        manager.reserve_spawn(spawn("worker")).unwrap();
+        // And no worktree list entry is left behind.
+        let worktrees = git_text(&repo, &["worktree", "list"]).unwrap();
+        assert_eq!(worktrees.lines().count(), 1, "{worktrees}");
         let _ = std::fs::remove_dir_all(repo);
     }
 

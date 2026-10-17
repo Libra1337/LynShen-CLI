@@ -487,6 +487,8 @@ struct SpawnSettings<'a> {
     caps: ModelCaps,
     protocol: Protocol,
     reasoning_effort: String,
+    /// Why `reasoning_effort` is not the one asked for (the model lacks it).
+    effort_note: Option<String>,
     max_output_tokens: u64,
     max_tool_calls: Option<u64>,
     timeout: Option<Duration>,
@@ -1626,6 +1628,15 @@ impl OpenAiClient {
         Ok(summary)
     }
 
+    /// Where this client's turn requests go (see `stream_request`).
+    fn request_url(&self) -> String {
+        match self.provider_kind {
+            Protocol::AnthropicMessages => anthropic::messages_url(&self.base_url),
+            Protocol::OpenAiChatCompletions => chat::completions_url(&self.base_url),
+            kind => transport::endpoint(kind, &self.base_url),
+        }
+    }
+
     /// One request on this client's protocol, its output items streamed
     /// through `emit`; `variant` says how it differs from a turn's.
     fn stream_request(
@@ -2087,17 +2098,27 @@ impl OpenAiClient {
                 )
             }
         };
+        let mut effort_note = None;
         let reasoning_effort = match text("reasoning_effort")
             .or_else(|| role.and_then(|role| role.reasoning_effort.as_deref()))
         {
             Some(explicit) if efforts.is_empty() || efforts.iter().any(|e| e == explicit) => {
                 explicit.to_string()
             }
+            // A tier the model lacks runs at the nearest one it has (the
+            // next higher, else its highest); the result says so.
             Some(explicit) => {
-                return Err(format!(
-                    "reasoning_effort \"{explicit}\" is not supported by {model}; use one of: {}",
+                let nearest = crate::config::nearest_effort(explicit, &efforts).ok_or_else(|| {
+                    format!(
+                        "reasoning_effort \"{explicit}\" is not supported by {model}; use one of: {}",
+                        efforts.join(", ")
+                    )
+                })?;
+                effort_note = Some(format!(
+                    "{model} has no reasoning_effort \"{explicit}\" (it offers {}); it runs at \"{nearest}\".",
                     efforts.join(", ")
-                ))
+                ));
+                nearest
             }
             // Default a subagent to the cheapest supported tier of its model
             // (subagents don't share the parent prompt cache, so this is free
@@ -2153,6 +2174,7 @@ impl OpenAiClient {
             caps,
             protocol,
             reasoning_effort,
+            effort_note,
             max_output_tokens,
             max_tool_calls,
             timeout,
@@ -2299,6 +2321,13 @@ impl OpenAiClient {
                 "note": format!("wait_agent on {task_name} returns once every attempt finished, with their diffs; then pick_attempt applies one."),
             })
         };
+        result["reasoning_effort"] = json!(settings.reasoning_effort);
+        if let Some(note) = &settings.effort_note {
+            result["note"] = match result["note"].as_str() {
+                Some(note_before) => json!(format!("{note} {note_before}")),
+                None => json!(note),
+            };
+        }
         if let Some(role) = settings.role {
             result["role"] = json!(role.name);
         }
@@ -2458,6 +2487,7 @@ impl OpenAiClient {
         let manager = manager.clone();
         let hooks = self.hooks.clone();
         let workdir_text = workdir.clone();
+        let request_url = child.request_url();
         std::thread::spawn(move || {
             let started = Instant::now();
             manager.mark_running(&path);
@@ -2498,6 +2528,17 @@ impl OpenAiClient {
                 .interrupt_flag
                 .load(std::sync::atomic::Ordering::SeqCst)
                 || matches!(&result, Err(error) if error == "interrupted");
+            let result =
+                result.map_err(|error| with_request_target(error, &spec.model, &request_url));
+            if let (Err(error), false) = (&result, stopped) {
+                crate::log_warn!(
+                    "subagent",
+                    "failed",
+                    path = path.clone(),
+                    model = spec.model.clone(),
+                    error = error.clone()
+                );
+            }
             // A switch-off since the turn started counts (team_v2_now).
             if !stopped && hooks.has_agent_idle() && manager.team_v2_now() {
                 let status = match &result {
@@ -2521,7 +2562,20 @@ impl OpenAiClient {
             }
             match result {
                 Ok(()) => manager.finish_ok(&path, run_result),
-                Err(error) => manager.finish_err(&path, error, run_result),
+                // A failed agent that changed nothing leaves nothing to
+                // merge: its worktree goes before the parent hears of the
+                // failure, so the same task_name can be spawned again.
+                Err(error) => {
+                    let dropped =
+                        !stopped && workspace.is_some() && manager.drop_unchanged_workspace(&path);
+                    // finish_err tells a used-up budget by its exact error.
+                    let error = if dropped && error != BUDGET_EXHAUSTED {
+                        format!("{error}\n(It changed nothing; its worktree was removed, so its task_name is free again.)")
+                    } else {
+                        error
+                    };
+                    manager.finish_err(&path, error, run_result)
+                }
             }
         });
         workdir
@@ -4221,6 +4275,18 @@ fn required_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
     Ok(value)
 }
 
+/// A subagent's error with the model and endpoint its request went to, when
+/// the provider answered with an HTTP error: the transport's message names
+/// neither, and a subagent runs on its parent's provider, which may not
+/// serve that model (a plan without it, say) where another would.
+fn with_request_target(error: String, model: &str, url: &str) -> String {
+    if error.starts_with("LLM API returned HTTP ") {
+        format!("{model} at {url}: {error}")
+    } else {
+        error
+    }
+}
+
 fn subagent_system_prompt(
     parent_system: &str,
     path: &str,
@@ -5229,7 +5295,7 @@ mod tests {
     }
 
     #[test]
-    fn spawn_agent_rejects_unlisted_model_and_unsupported_effort() {
+    fn spawn_agent_rejects_unlisted_model_and_unknown_effort() {
         let client = subagent_model_client();
         let spawn = |arguments: Value| {
             client.spawn_agent(
@@ -5243,14 +5309,164 @@ mod tests {
         let error =
             spawn(json!({ "task_name": "a", "message": "m", "model": "gpt-other" })).unwrap_err();
         assert!(error.contains("not allowed for subagents; allowed: gpt-main, claude-helper"));
+        // No effort is called that: a typo, not a tier to round.
         let error = spawn(json!({
             "task_name": "b",
             "message": "m",
             "model": "claude-helper",
-            "reasoning_effort": "medium"
+            "reasoning_effort": "turbo"
         }))
         .unwrap_err();
-        assert!(error.contains("not supported by claude-helper; use one of: low, high"));
+        assert!(error.contains(
+            "reasoning_effort \"turbo\" is not supported by claude-helper; use one of: low, high"
+        ));
+    }
+
+    #[test]
+    fn an_effort_the_model_lacks_runs_at_the_next_higher_tier_else_its_highest() {
+        let mut client = team_client(Default::default());
+        client.roles.push(
+            crate::roles::parse(
+                "---\nname: deep\nmodel: claude-helper\nreasoning_effort: xhigh\n---\n",
+                "deep",
+            )
+            .unwrap(),
+        );
+        let helper = |effort: &str| {
+            settings(
+                &client,
+                json!({ "model": "claude-helper", "reasoning_effort": effort }),
+            )
+            .unwrap()
+        };
+        let medium = helper("medium");
+        assert_eq!(medium.reasoning_effort, "high");
+        assert_eq!(
+            medium.effort_note.as_deref(),
+            Some("claude-helper has no reasoning_effort \"medium\" (it offers low, high); it runs at \"high\".")
+        );
+        assert_eq!(helper("max").reasoning_effort, "high");
+        assert_eq!(helper("none").reasoning_effort, "low");
+        assert!(helper("low").effort_note.is_none());
+        // A role's effort is rounded the same way.
+        let deep = settings(&client, json!({ "role": "deep" })).unwrap();
+        assert_eq!(deep.reasoning_effort, "high");
+        assert!(deep.effort_note.is_some());
+    }
+
+    #[test]
+    fn spawn_agent_says_which_effort_its_agent_runs_at() {
+        let client = offline_team_client(Default::default());
+        let started = call_tool(
+            &client,
+            "spawn_agent",
+            json!({ "task_name": "probe", "message": "m", "model": "claude-helper", "reasoning_effort": "medium" }),
+        )
+        .unwrap();
+        assert_eq!(started["reasoning_effort"], "high");
+        assert!(started["note"]
+            .as_str()
+            .unwrap()
+            .ends_with("it runs at \"high\"."));
+        let manager = client.subagent_manager.clone().unwrap();
+        assert_eq!(manager.runs_json()[0]["effort"], "high");
+        let plain = call_tool(
+            &client,
+            "spawn_agent",
+            json!({ "task_name": "plain", "message": "m", "model": "claude-helper", "reasoning_effort": "low" }),
+        )
+        .unwrap();
+        assert_eq!(plain["reasoning_effort"], "low");
+        assert!(plain.get("note").is_none());
+    }
+
+    /// The answer a provider gives a model the plan does not include
+    /// (Command Code, for claude-sonnet-5).
+    const NOT_IN_PLAN: &str = "{\"type\":\"error\",\"error\":{\"type\":\"permission_error\",\"message\":\"MODEL_NOT_IN_PLAN: Claude Sonnet 5 available in Pro and above plans or extra on demand usage\"}}";
+    const NOT_IN_PLAN_RESPONSE: &str = "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: 157\r\nConnection: close\r\n\r\n{\"type\":\"error\",\"error\":{\"type\":\"permission_error\",\"message\":\"MODEL_NOT_IN_PLAN: Claude Sonnet 5 available in Pro and above plans or extra on demand usage\"}}";
+
+    #[test]
+    fn a_failed_worktree_agent_that_changed_nothing_frees_its_task_name() {
+        assert_eq!(NOT_IN_PLAN.len(), 157);
+        assert!(NOT_IN_PLAN_RESPONSE.ends_with(NOT_IN_PLAN));
+        let repo = test_dir("refused-worktree");
+        fs::create_dir_all(&repo).unwrap();
+        for args in [
+            &["init", "-q"][..],
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+        ] {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+        let (base_url, requests) = quiet_model(NOT_IN_PLAN_RESPONSE, true);
+        let mut client = team_client(Default::default());
+        client.base_url = base_url.clone();
+        let manager = client.subagent_manager.clone().unwrap();
+        let spawn = || {
+            client.spawn_agent(
+                "call_w",
+                &json!({ "task_name": "cards", "message": "m", "isolation": "worktree" })
+                    .to_string(),
+                &repo,
+                &[],
+                &HashSet::new(),
+            )
+        };
+        let ended = || {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            loop {
+                let row = manager.runs_json()[0].clone();
+                if row["state"] != "running" && row["state"] != "pending" {
+                    return row;
+                }
+                assert!(Instant::now() < deadline, "the agent did not end");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        let started = spawn().unwrap();
+        let workdir = PathBuf::from(started["workdir"].as_str().unwrap());
+        assert!(workdir.starts_with(repo.join(".lynshen/agents")));
+        let row = ended();
+        assert_eq!(row["state"], "errored");
+        let error = row["error"].as_str().unwrap();
+        // Where the request went, and the provider's whole answer.
+        assert!(
+            error.starts_with(&format!("gpt-main at {base_url}/")),
+            "{error}"
+        );
+        assert!(
+            error.contains(&format!("LLM API returned HTTP 403: {NOT_IN_PLAN}")),
+            "{error}"
+        );
+        assert!(error.contains("task_name is free again"), "{error}");
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        // It changed nothing: no worktree waits to be merged...
+        assert!(!workdir.exists());
+        assert!(manager.team_json()["worktrees"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        // ...and the same task_name starts again.
+        let again = spawn().unwrap();
+        assert_eq!(again["status"], "running");
+        assert_eq!(again["path"], "/root/cards");
+        assert_eq!(ended()["state"], "errored");
+        let _ = fs::remove_dir_all(&repo);
     }
 
     fn team_client(agents: crate::config::AgentsConfig) -> OpenAiClient {

@@ -2136,6 +2136,40 @@ pub(crate) fn default_effort(efforts: &[String]) -> Option<&str> {
         .or_else(|| efforts.first().map(String::as_str))
 }
 
+/// True for an effort's name: a tier, or "default".
+pub(crate) fn is_effort_name(value: &str) -> bool {
+    value == DEFAULT_EFFORT || EFFORT_ORDER.contains(&value)
+}
+
+/// The effort a request for `requested` runs at on a model offering
+/// `offered`: `requested` when offered, else the next higher tier, else the
+/// highest. "default" (the provider's own setting) on a model without it, or
+/// a tier on a model that lists no tiers, gets the model's start effort
+/// (`default_effort`). None when `requested` is no effort name at all, or
+/// `offered` is empty.
+pub(crate) fn nearest_effort(requested: &str, offered: &[String]) -> Option<String> {
+    if offered.iter().any(|effort| effort == requested) {
+        return Some(requested.to_string());
+    }
+    let rank = |effort: &str| EFFORT_ORDER.iter().position(|tier| *tier == effort);
+    if requested != DEFAULT_EFFORT {
+        let wanted = rank(requested)?;
+        let ranked = || {
+            offered
+                .iter()
+                .filter_map(|effort| Some((rank(effort)?, effort)))
+        };
+        let pick = ranked()
+            .filter(|(at, _)| *at > wanted)
+            .min_by_key(|(at, _)| *at)
+            .or_else(|| ranked().max_by_key(|(at, _)| *at));
+        if let Some((_, effort)) = pick {
+            return Some(effort.clone());
+        }
+    }
+    default_effort(offered).map(str::to_string)
+}
+
 /// Reasoning-effort tiers for a catalog model served over `api`. Upstream's
 /// exact ladders live in KDL class rules we don't compile; this maps the
 /// dialect to the tiers LynShen's wire protocols understand. Chat
@@ -3106,6 +3140,41 @@ mod tests {
             config.title(),
             ("minimax".to_string(), "default".to_string())
         );
+    }
+
+    #[test]
+    fn a_missing_effort_becomes_the_next_higher_tier_else_the_highest() {
+        let tiers = |list: &[&str]| list.iter().map(|t| t.to_string()).collect::<Vec<_>>();
+        let nearest =
+            |requested: &str, offered: &[&str]| nearest_effort(requested, &tiers(offered));
+        let deepseek = ["low", "high", "max"];
+        assert_eq!(nearest("high", &deepseek).as_deref(), Some("high"));
+        assert_eq!(nearest("medium", &deepseek).as_deref(), Some("high"));
+        assert_eq!(nearest("minimal", &deepseek).as_deref(), Some("low"));
+        assert_eq!(nearest("xhigh", &deepseek).as_deref(), Some("max"));
+        assert_eq!(nearest("ultra", &deepseek).as_deref(), Some("max"));
+        assert_eq!(nearest("max", &["low", "high"]).as_deref(), Some("high"));
+        // Order in the list does not matter, "default" is no tier.
+        assert_eq!(
+            nearest("medium", &["default", "max", "none", "high"]).as_deref(),
+            Some("high")
+        );
+        assert_eq!(
+            nearest("none", &["default", "low", "high"]).as_deref(),
+            Some("low")
+        );
+        // A model that cannot think runs without.
+        assert_eq!(nearest("medium", &["none"]).as_deref(), Some("none"));
+        // No tiers, or "default" asked of a model without it: its start effort.
+        assert_eq!(nearest("high", &["default"]).as_deref(), Some("default"));
+        assert_eq!(
+            nearest("default", &["low", "medium"]).as_deref(),
+            Some("medium")
+        );
+        // Not an effort, or nothing to choose from.
+        assert_eq!(nearest("turbo", &deepseek), None);
+        assert_eq!(nearest("high", &[]), None);
+        assert!(is_effort_name("xhigh") && is_effort_name("default") && !is_effort_name("gpt-5"));
     }
 
     #[test]

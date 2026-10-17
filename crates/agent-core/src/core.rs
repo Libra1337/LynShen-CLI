@@ -5792,7 +5792,13 @@ impl AgentCore {
                     active_effort: self.config.reasoning_effort.clone(),
                 }]
             }
-            [model] if self.is_reasoning_effort_for_current_model(model) => {
+            // `/model high`: an effort name that is no model's name sets the
+            // current model's effort (the nearest it has).
+            [model]
+                if self.is_reasoning_effort_for_current_model(model)
+                    || (crate::config::is_effort_name(model)
+                        && !self.config.models.iter().any(|entry| entry.name == *model)) =>
+            {
                 self.set_model_config(self.config.model.clone(), (*model).to_string())
             }
             [model] => {
@@ -5803,14 +5809,7 @@ impl AgentCore {
                     .unwrap_or_else(|| self.default_reasoning_effort_for_model(model));
                 self.set_model_config((*model).to_string(), reasoning_effort)
             }
-            [model, effort] => {
-                if !self.is_reasoning_effort_for_model(model, effort) {
-                    return vec![AgentEvent::Error(format!(
-                        "{model} does not support reasoning effort: {effort}"
-                    ))];
-                }
-                self.set_model_config((*model).to_string(), (*effort).to_string())
-            }
+            [model, effort] => self.set_model_config((*model).to_string(), (*effort).to_string()),
             _ => vec![AgentEvent::Error(
                 "usage: /model [model] [none|low|medium|high]".to_string(),
             )],
@@ -5847,17 +5846,20 @@ impl AgentCore {
         if model.trim().is_empty() {
             return vec![AgentEvent::Error("model cannot be empty".to_string())];
         }
-        if !self.is_reasoning_effort_for_model(&model, &reasoning_effort) {
-            return vec![AgentEvent::Error(format!(
-                "{model} does not support reasoning effort: {reasoning_effort}"
-            ))];
-        }
-
+        let efforts = self.reasoning_efforts_for_model(&model);
+        let (effort, note) = match model_effort(&model, &reasoning_effort, &efforts) {
+            Ok(resolved) => resolved,
+            Err(error) => return vec![AgentEvent::Error(error)],
+        };
         match self.change_config(|config| {
             config.model = model.clone();
-            config.reasoning_effort = reasoning_effort.clone();
+            config.reasoning_effort = effort.clone();
         }) {
-            Ok(()) => vec![self.model_status_event()],
+            Ok(()) => note
+                .map(AgentEvent::Info)
+                .into_iter()
+                .chain([self.model_status_event()])
+                .collect(),
             Err(error) => vec![AgentEvent::Error(format!("failed to save config: {error}"))],
         }
     }
@@ -6548,6 +6550,28 @@ fn resolve_approval_decision(
 /// cannot run it. Whole-flow hooks (github-copilot, cursor, …) have no Rust
 /// port, so callers skip those providers instead of listing a login that would
 /// only mint a credential no request can use.
+/// The effort `/model` (and the desktop's model picker) sets on `model`:
+/// `requested`, or the nearest tier the model has (the next higher, else
+/// its highest) with a line saying so. An error for a word that is no
+/// effort, or a model without tiers.
+fn model_effort(
+    model: &str,
+    requested: &str,
+    efforts: &[String],
+) -> Result<(String, Option<String>), String> {
+    let effort = (!efforts.is_empty())
+        .then(|| crate::config::nearest_effort(requested, efforts))
+        .flatten()
+        .ok_or_else(|| format!("{model} does not support reasoning effort: {requested}"))?;
+    let note = (effort != requested).then(|| {
+        format!(
+            "{model} has no reasoning effort {requested} (it offers {}); using {effort}",
+            efforts.join(", ")
+        )
+    });
+    Ok((effort, note))
+}
+
 fn login_kind(login: &llm_provider_kit::omp::LoginRule) -> Option<(&'static str, bool)> {
     use llm_provider_kit::omp::LoginRule;
     match login {
@@ -7256,6 +7280,30 @@ mod model_config_tests {
         assert_eq!(config.reasoning_efforts, vec!["low", "high"]);
         assert_eq!(config.max_output_tokens, 64_000);
         assert_eq!(config.context_window, 1_000_000);
+    }
+
+    #[test]
+    fn model_takes_the_nearest_effort_the_model_has_and_says_so() {
+        let tiers = ["low", "high", "max"].map(String::from);
+        assert_eq!(
+            model_effort("deepseek-v4.1-flash", "medium", &tiers),
+            Ok((
+                "high".to_string(),
+                Some(
+                    "deepseek-v4.1-flash has no reasoning effort medium (it offers low, high, max); using high"
+                        .to_string()
+                )
+            ))
+        );
+        assert_eq!(
+            model_effort("deepseek-v4.1-flash", "max", &tiers),
+            Ok(("max".to_string(), None))
+        );
+        assert_eq!(
+            model_effort("deepseek-v4.1-flash", "turbo", &tiers),
+            Err("deepseek-v4.1-flash does not support reasoning effort: turbo".to_string())
+        );
+        assert!(model_effort("plain", "high", &[]).is_err());
     }
 }
 
